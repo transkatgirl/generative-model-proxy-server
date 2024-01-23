@@ -1,0 +1,246 @@
+https://platform.openai.com/docs/guides/error-codes/api-errors
+
+< HTTP/2 429
+< date: Mon, 22 Jan 2024 10:28:26 GMT
+< content-type: application/json; charset=utf-8
+< content-length: 337
+< vary: Origin
+< x-request-id: 603c03f69829d3e246e0ef34e2cbdbef
+< strict-transport-security: max-age=15724800; includeSubDomains
+< cf-cache-status: DYNAMIC
+< set-cookie: __cf_bm=tNunNikxjumy8ivVA2Byws4meCLRuQCAupSa5vRyOiY-1705919306-1-AUCGOcRDd4zmwXaJFbbivQbQeBcw/if1Eb2fYNTRgNLvGyQXSSJiJOrDjFLrkTMJ5RJC9kmAkMg7t4f8+aJclDs=; path=/; expires=Mon, 22-Jan-24 10:58:26 GMT; domain=.api.openai.com; HttpOnly; Secure; SameSite=None
+< set-cookie: _cfuvid=M638jKcZsSUfM6Cp1VridKd6MKi.Vw9OaE9qVtBWkYw-1705919306316-0-604800000; path=/; domain=.api.openai.com; HttpOnly; Secure; SameSite=None
+< server: cloudflare
+< cf-ray: 84971c300a3ceb93-SEA
+< alt-svc: h3=":443"; ma=86400
+<
+{
+    "error": {
+        "message": "You exceeded your current quota, please check your plan and billing details. For more information on this error, read the docs: https://platform.openai.com/docs/guides/error-codes/api-errors.",
+        "type": "insufficient_quota",
+        "param": null,
+        "code": "insufficient_quota"
+    }
+}
+* Connection #0 to host api.openai.com left intact
+
+< HTTP/2 401
+< date: Mon, 22 Jan 2024 10:27:48 GMT
+< content-type: application/json; charset=utf-8
+< content-length: 496
+< vary: Origin
+< x-request-id: ec973b624fa94bf4d0f55a25875ffee9
+< strict-transport-security: max-age=15724800; includeSubDomains
+< cf-cache-status: DYNAMIC
+< set-cookie: __cf_bm=.q5SNLyj0dddJArPbIYt7EfMeJIQfinspdNv0bratiE-1705919268-1-AU2loOnptRc85dnMEdEdID1FP0yyvFc0L3mXAtNx05gWYykXModr6NRxXasOI73tyBwOOWLLlPoeDCba/FEnBX4=; path=/; expires=Mon, 22-Jan-24 10:57:48 GMT; domain=.api.openai.com; HttpOnly; Secure; SameSite=None
+< set-cookie: _cfuvid=OspMp8gWG82H6kGFdrfMMQ3L6IewcOefL4kMFb4FLIc-1705919268244-0-604800000; path=/; domain=.api.openai.com; HttpOnly; Secure; SameSite=None
+< server: cloudflare
+< cf-ray: 84971b421901c386-SEA
+< alt-svc: h3=":443"; ma=86400
+<
+{
+    "error": {
+        "message": "You didn't provide an API key. You need to provide your API key in an Authorization header using Bearer auth (i.e. Authorization: Bearer YOUR_KEY), or as the password field (with blank username) if you're accessing the API from your browser and are prompted for a username and password. You can obtain an API key from https://platform.openai.com/account/api-keys.",
+        "type": "invalid_request_error",
+        "param": null,
+        "code": null
+    }
+}
+* Connection #0 to host api.openai.com left intact
+
+
+kat@katbook ~> curl https://api.openai.com/v1/chat/completions \
+                     -H "Content-Type: application/json" \
+                     -H "Authorization: Bearer sk-wSll66OaYgfvtyt1XFIxT3BlbkFJoACxPeNNiooie0g55wh" \
+                     -d '{
+                 "model": "gpt-3.5-turbo",
+                 "prompt": "hey there",
+                 "temperature": 0.8,
+                 "max_tokens": 1024,
+                 "top_p": 1,
+                 "frequency_penalty": 0,
+                 "presence_penalty": 0
+               }' -vvv
+*   Trying 104.18.6.192:443...
+* Connected to api.openai.com (104.18.6.192) port 443
+* ALPN: curl offers h2,http/1.1
+* (304) (OUT), TLS handshake, Client hello (1):
+*  CAfile: /etc/ssl/cert.pem
+*  CApath: none
+* (304) (IN), TLS handshake, Server hello (2):
+* (304) (IN), TLS handshake, Unknown (8):
+* (304) (IN), TLS handshake, Certificate (11):
+* (304) (IN), TLS handshake, CERT verify (15):
+* (304) (IN), TLS handshake, Finished (20):
+* (304) (OUT), TLS handshake, Finished (20):
+* SSL connection using TLSv1.3 / AEAD-CHACHA20-POLY1305-SHA256
+* ALPN: server accepted h2
+* Server certificate:
+*  subject: C=US; ST=California; L=San Francisco; O=Cloudflare, Inc.; CN=sni.cloudflaressl.com
+*  start date: Mar 28 00:00:00 2023 GMT
+*  expire date: Mar 26 23:59:59 2024 GMT
+*  subjectAltName: host "api.openai.com" matched cert's "api.openai.com"
+*  issuer: C=US; O=Cloudflare, Inc.; CN=Cloudflare Inc ECC CA-3
+*  SSL certificate verify ok.
+* using HTTP/2
+* [HTTP/2] [1] OPENED stream for https://api.openai.com/v1/chat/completions
+* [HTTP/2] [1] [:method: POST]
+* [HTTP/2] [1] [:scheme: https]
+* [HTTP/2] [1] [:authority: api.openai.com]
+* [HTTP/2] [1] [:path: /v1/chat/completions]
+* [HTTP/2] [1] [user-agent: curl/8.4.0]
+* [HTTP/2] [1] [accept: */*]
+* [HTTP/2] [1] [content-type: application/json]
+* [HTTP/2] [1] [authorization: Bearer sk-wSll66OaYgfvtyt1XFIxT3BlbkFJoACxPeNNiooie0g55wh]
+* [HTTP/2] [1] [content-length: 164]
+> POST /v1/chat/completions HTTP/2
+> Host: api.openai.com
+> User-Agent: curl/8.4.0
+> Accept: */*
+> Content-Type: application/json
+> Authorization: Bearer sk-wSll66OaYgfvtyt1XFIxT3BlbkFJoACxPeNNiooie0g55wh
+> Content-Length: 164
+>
+< HTTP/2 401
+< date: Mon, 22 Jan 2024 10:29:04 GMT
+< content-type: application/json; charset=utf-8
+< content-length: 300
+< vary: Origin
+< x-request-id: c8e42ea33066fb725e0cb37d06c92b0b
+< strict-transport-security: max-age=15724800; includeSubDomains
+< cf-cache-status: DYNAMIC
+< set-cookie: __cf_bm=yovMcd51nhR8zqTcs_Dy4h5i0dK7BE2KelL1A4gfxLI-1705919344-1-Ad/e3gPLH8X9OHo0rg72lmGMrFB/oDttbP4mwWZSgzhtNk8o74ASFPYQ9k1CHoyXMAx/Jr3vLfA7PzqbAoZcbEk=; path=/; expires=Mon, 22-Jan-24 10:59:04 GMT; domain=.api.openai.com; HttpOnly; Secure; SameSite=None
+< set-cookie: _cfuvid=DKu2R2ANuGdjufIkOukVkbPh4n5MhB7c.SlJvvs9EFc-1705919344996-0-604800000; path=/; domain=.api.openai.com; HttpOnly; Secure; SameSite=None
+< server: cloudflare
+< cf-ray: 84971d21ac2fec44-SEA
+< alt-svc: h3=":443"; ma=86400
+<
+{
+    "error": {
+        "message": "Incorrect API key provided: sk-wSll6**************************************55wh. You can find your API key at https://platform.openai.com/account/api-keys.",
+        "type": "invalid_request_error",
+        "param": null,
+        "code": "invalid_api_key"
+    }
+}
+* Connection #0 to host api.openai.com left intact
+
+< HTTP/2 404
+< date: Mon, 22 Jan 2024 10:28:10 GMT
+< content-type: application/json; charset=utf-8
+< content-length: 178
+< vary: Origin
+< x-request-id: 769edfa7f74f52616cb1243ec643fa85
+< strict-transport-security: max-age=15724800; includeSubDomains
+< cf-cache-status: DYNAMIC
+< set-cookie: __cf_bm=b6gUj5pi5FDRGw2TkK4J3OiFAm2GPXF6eDBXeBNtgyQ-1705919290-1-AbAwJBo6GDoY2nKdxV2f3NwLhjiGjhSVQaCAXIdemiZkttvo7zm9uTaC2ZB1aUSXvsCHrxYib5Pp8tWTHiRvKNs=; path=/; expires=Mon, 22-Jan-24 10:58:10 GMT; domain=.api.openai.com; HttpOnly; Secure; SameSite=None
+< set-cookie: _cfuvid=7WsiP_T_dfUTqzpLfjuRFVG17C_EGITc53PW7j6giYM-1705919290194-0-604800000; path=/; domain=.api.openai.com; HttpOnly; Secure; SameSite=None
+< server: cloudflare
+< cf-ray: 84971bcb4c093080-SEA
+< alt-svc: h3=":443"; ma=86400
+<
+{
+    "error": {
+        "message": "The model `gpt-3` does not exist",
+        "type": "invalid_request_error",
+        "param": null,
+        "code": "model_not_found"
+    }
+}
+* Connection #0 to host api.openai.com left intact
+
+  Status code 500
+{
+  "error": {
+    "message": "The server had an error processing your request. Sorry about that! You can retry your request, or contact us through our help center at help.openai.com if you keep seeing this error. (Please include the request ID abc123 in your email.)",
+    "type": "server_error",
+    "param": null,
+    "code": null
+  }
+}
+
+  Status code 503
+{
+  "error": {
+    "message": "That model is currently overloaded with other requests. You can retry your request, or contact us through our help center at help.openai.com if the error persists. (Please include the request ID 7ef84fe5909aa6768fb8d39a081a5ccc in your message.)",
+    "type": "server_error",
+    "param": null,
+    "code": null
+  }
+}
+
+kat@katbook ~> curl https://api.openai.com/v1/chat/completions \
+                     -H "Content-Type: application/json" \
+                     -H "Authorization: Bearer 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" \
+                     -d '{
+                 "model": "gpt-3",
+                 "prompt": "hey there",
+                 "temperature": 0.8,
+                 "max_tokens": 1024,
+                 "top_p": 1
+                 "frequency_penalty": 0,
+                 "presence_penalty": 0
+               }' -vvv
+*   Trying 104.18.6.192:443...
+* Connected to api.openai.com (104.18.6.192) port 443
+* ALPN: curl offers h2,http/1.1
+* (304) (OUT), TLS handshake, Client hello (1):
+*  CAfile: /etc/ssl/cert.pem
+*  CApath: none
+* (304) (IN), TLS handshake, Server hello (2):
+* (304) (IN), TLS handshake, Unknown (8):
+* (304) (IN), TLS handshake, Certificate (11):
+* (304) (IN), TLS handshake, CERT verify (15):
+* (304) (IN), TLS handshake, Finished (20):
+* (304) (OUT), TLS handshake, Finished (20):
+* SSL connection using TLSv1.3 / AEAD-CHACHA20-POLY1305-SHA256
+* ALPN: server accepted h2
+* Server certificate:
+*  subject: C=US; ST=California; L=San Francisco; O=Cloudflare, Inc.; CN=sni.cloudflaressl.com
+*  start date: Mar 28 00:00:00 2023 GMT
+*  expire date: Mar 26 23:59:59 2024 GMT
+*  subjectAltName: host "api.openai.com" matched cert's "api.openai.com"
+*  issuer: C=US; O=Cloudflare, Inc.; CN=Cloudflare Inc ECC CA-3
+*  SSL certificate verify ok.
+* using HTTP/2
+* [HTTP/2] [1] OPENED stream for https://api.openai.com/v1/chat/completions
+* [HTTP/2] [1] [:method: POST]
+* [HTTP/2] [1] [:scheme: https]
+* [HTTP/2] [1] [:authority: api.openai.com]
+* [HTTP/2] [1] [:path: /v1/chat/completions]
+* [HTTP/2] [1] [user-agent: curl/8.4.0]
+* [HTTP/2] [1] [accept: */*]
+* [HTTP/2] [1] [content-type: application/json]
+* [HTTP/2] [1] [authorization: Bearer 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]
+* [HTTP/2] [1] [content-length: 155]
+> POST /v1/chat/completions HTTP/2
+> Host: api.openai.com
+> User-Agent: curl/8.4.0
+> Accept: */*
+> Content-Type: application/json
+> Authorization: Bearer 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
+> Content-Length: 155
+>
+< HTTP/2 400
+< date: Mon, 22 Jan 2024 12:32:15 GMT
+< content-type: application/json; charset=utf-8
+< content-length: 443
+< vary: Origin
+< x-request-id: 9ecb0215e98aea366b14a9bc17d0d250
+< strict-transport-security: max-age=15724800; includeSubDomains
+< cf-cache-status: DYNAMIC
+< set-cookie: __cf_bm=cjL6UBAx4Z57v52bR57su5TmEBjayzLpFYvNia9AYeo-1705926735-1-Af9YJoYGegkIMWiZ5o4FbfpLkkFZRrez+A9V/GCQt6cUU7LP9dFx9SZs8yrf31m1FKLikwUmxTotHs8f937xSac=; path=/; expires=Mon, 22-Jan-24 13:02:15 GMT; domain=.api.openai.com; HttpOnly; Secure; SameSite=None
+< set-cookie: _cfuvid=Ox31sEz8uIyHzuCjjqs1i2Nmp6QyqdDajG8vWv63kSE-1705926735505-0-604800000; path=/; domain=.api.openai.com; HttpOnly; Secure; SameSite=None
+< server: cloudflare
+< cf-ray: 8497d190783c6838-SEA
+< alt-svc: h3=":443"; ma=86400
+<
+{
+    "error": {
+        "message": "We could not parse the JSON body of your request. (HINT: This likely means you aren't using your HTTP library correctly. The OpenAI API expects a JSON payload, but what was sent was not valid JSON. If you have trouble figuring out how to fix this, please contact us through our help center at help.openai.com.)",
+        "type": "invalid_request_error",
+        "param": null,
+        "code": null
+    }
+}
+* Connection #0 to host api.openai.com left intact
