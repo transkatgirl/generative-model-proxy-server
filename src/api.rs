@@ -49,10 +49,10 @@ pub struct Model {
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Quota {
-    pub requests_per_minute: Option<usize>,
-    pub requests_per_day: Option<usize>,
-    pub tokens_per_minute: Option<usize>,
-    pub tokens_per_day: Option<usize>,
+    pub requests_per_minute: u32,
+    pub requests_per_day: u32,
+    pub tokens_per_minute: u32,
+    pub tokens_per_day: u32,
     pub max_queue_size: usize,
 }
 

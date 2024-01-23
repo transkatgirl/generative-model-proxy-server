@@ -1,4 +1,4 @@
-use std::{collections::HashMap, hash::Hash, sync::Arc};
+use std::{collections::HashMap, hash::Hash, num::NonZeroU32, sync::Arc};
 
 use serde::{Deserialize, Serialize};
 
@@ -18,16 +18,41 @@ use async_openai::{
 use serde_json::value::Value;
 use tokio::sync::{mpsc, oneshot, RwLock};
 
-use crate::{api, openai_client};
+use crate::{
+    api::{self},
+    openai_client,
+};
 
-use governor::DefaultDirectRateLimiter;
+use governor::{
+    clock::{Clock, QuantaClock, QuantaUpkeepClock, SystemClock},
+    DefaultDirectRateLimiter, Quota, RateLimiter,
+};
 //use governor::{Quota, RateLimiter};
 
 struct Limiter {
     requests_per_minute: DefaultDirectRateLimiter,
-    requests_per_day: DefaultDirectRateLimiter,
+    requests_per_hour: DefaultDirectRateLimiter,
     tokens_per_minute: DefaultDirectRateLimiter,
-    tokens_per_day: DefaultDirectRateLimiter,
+    tokens_per_hour: DefaultDirectRateLimiter,
+}
+
+impl Limiter {
+    pub fn new(quota: api::Quota) -> Self {
+        Limiter {
+            requests_per_minute: RateLimiter::direct(Quota::per_minute(
+                NonZeroU32::new(quota.requests_per_minute).unwrap_or(NonZeroU32::MAX),
+            )),
+            requests_per_hour: RateLimiter::direct(Quota::per_hour(
+                NonZeroU32::new(quota.requests_per_day / 24).unwrap_or(NonZeroU32::MAX),
+            )),
+            tokens_per_minute: RateLimiter::direct(Quota::per_minute(
+                NonZeroU32::new(quota.tokens_per_minute).unwrap_or(NonZeroU32::MAX),
+            )),
+            tokens_per_hour: RateLimiter::direct(Quota::per_hour(
+                NonZeroU32::new(quota.tokens_per_day / 24).unwrap_or(NonZeroU32::MAX),
+            )),
+        }
+    }
 }
 
 struct RoutableRequest {
@@ -166,19 +191,18 @@ impl ModelResponse {
 }
 
 pub struct ModelRequestRouter {
-    endpoints: HashMap<Uuid, mpsc::UnboundedSender<RoutableRequest>>,
+    endpoints: HashMap<Uuid, mpsc::Sender<RoutableRequest>>,
 }
 
 impl ModelRequestRouter {
     pub fn new(models: Vec<api::Model>) -> Self {
-        let mut endpoints = HashMap::new();
+        let mut endpoints: HashMap<Uuid, mpsc::Sender<RoutableRequest>> = HashMap::new();
 
         for model in models {
             let (tx, mut rx) = mpsc::unbounded_channel::<RoutableRequest>();
 
             tokio::spawn(async move {
                 match model.api {
-                    // todo: add model rate limiting
                     ModelAPI::OpenAIChat(m) => {
                         let client = m.init_client();
                         let mut encode_buffer = Uuid::encode_buffer();
@@ -322,7 +346,39 @@ impl ModelRequestRouter {
                 };
             });
 
-            endpoints.insert(model.uuid, tx);
+            let (tx_2, mut rx_2) =
+                mpsc::channel::<RoutableRequest>(if model.quota.max_queue_size == 0 {
+                    usize::MAX
+                } else {
+                    model.quota.max_queue_size
+                });
+
+            tokio::spawn(async move {
+                let mut limiter = Limiter::new(model.quota);
+
+                while let Some(mut request) = rx_2.recv().await {
+                    let tx_4 = request.response_channel;
+                    let (tx_3, rx_3) = oneshot::channel();
+                    request.response_channel = tx_3;
+
+                    // TODO: Add token-based rate limits!
+
+                    limiter.requests_per_minute.until_ready().await;
+                    limiter.requests_per_hour.until_ready().await;
+
+                    let response = if tx.send(request).is_err() {
+                        ModelResponse::server_error()
+                    } else {
+                        rx_3.await.unwrap_or(ModelResponse::server_error())
+                    };
+
+                    // TODO: Add usage statistics!
+
+                    tx_4.send(response);
+                }
+            });
+
+            endpoints.insert(model.uuid, tx_2);
         }
 
         Self { endpoints }
@@ -347,7 +403,7 @@ impl ModelRequestRouter {
 
         let mut response = match self.endpoints.get(&model_id) {
             Some(m) => {
-                m.send(routeable).unwrap();
+                m.try_send(routeable).unwrap();
                 rx.await.unwrap_or(ModelResponse::server_error())
             }
             None => ModelResponse::model_not_found(&model_name),

@@ -1,6 +1,6 @@
 #![allow(deprecated)]
 use async_openai::{
-    config::{self, OpenAIConfig},
+    config::OpenAIConfig,
     error::{ApiError, OpenAIError},
     types::{
         CreateChatCompletionRequest, CreateChatCompletionResponse, CreateCompletionRequest,
@@ -14,72 +14,27 @@ use async_openai::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::value::Value;
+use tracing::{event, Level};
 
-// TODO: Improve error handling, add logging
-// TODO: Add proxy for image output URLs
-/// async_openai::types::ImagesResponse.save()
+// TODO: Add proxy for image output URLs?
+/// See async_openai::types::ImagesResponse.save()
+// TODO: Add proxy for GPT-4 image input URLs?
 
 fn convert_openai_error(error: OpenAIError) -> ApiError {
-    match error {
-        OpenAIError::ApiError(err) => err,
-        OpenAIError::Reqwest(err) => {
-            println!("{:?}", err);
-            ApiError {
-				message: "The proxy server had an error processing your request. You can retry your request, or contact the proxy's administrator if you keep seeing this error.".to_string(),
-				r#type: Some("server_error".to_string()),
-				param: Some(Value::Null),
-				code: Some(Value::Null),
-			}
-        }
-        OpenAIError::JSONDeserialize(err) => {
-            println!("{:?}", err);
-            ApiError {
-				message: "The proxy server had an error processing your request. You can retry your request, or contact the proxy's administrator if you keep seeing this error.".to_string(),
-				r#type: Some("server_error".to_string()),
-				param: Some(Value::Null),
-				code: Some(Value::Null),
-			}
-        }
-        OpenAIError::FileSaveError(err) => {
-            println!("{:?}", err);
-            ApiError {
-				message: "The proxy server had an error processing your request. You can retry your request, or contact the proxy's administrator if you keep seeing this error.".to_string(),
-				r#type: Some("server_error".to_string()),
-				param: Some(Value::Null),
-				code: Some(Value::Null),
-			}
-        }
-        OpenAIError::FileReadError(err) => {
-            println!("{:?}", err);
-            ApiError {
-				message: "The proxy server had an error processing your request. You can retry your request, or contact the proxy's administrator if you keep seeing this error.".to_string(),
-				r#type: Some("server_error".to_string()),
-				param: Some(Value::Null),
-				code: Some(Value::Null),
-			}
-        }
-        OpenAIError::StreamError(err) => {
-            println!("{:?}", err);
-            ApiError {
-				message: "The proxy server had an error processing your request. You can retry your request, or contact the proxy's administrator if you keep seeing this error.".to_string(),
-				r#type: Some("server_error".to_string()),
-				param: Some(Value::Null),
-				code: Some(Value::Null),
-			}
-        }
-        OpenAIError::InvalidArgument(err) => {
-            println!("{:?}", err);
-            ApiError {
-				message: "The proxy server had an error processing your request. You can retry your request, or contact the proxy's administrator if you keep seeing this error.".to_string(),
-				r#type: Some("server_error".to_string()),
-				param: Some(Value::Null),
-				code: Some(Value::Null),
-			}
-        }
+    event!(Level::WARN, "OpenAIError {:?}", error);
+
+    ApiError {
+        message: "The proxy server had an error processing your request. You can retry your request, or contact the proxy's administrator if you keep seeing this error.".to_string(),
+        r#type: Some("server_error".to_string()),
+        param: Some(Value::Null),
+        code: Some(Value::Null),
     }
 }
 
+#[tracing::instrument(level = "trace")]
 fn init_openai_client(endpoint: OpenAIEndpoint) -> Client<OpenAIConfig> {
+    event!(Level::TRACE, "Init client {:?}", endpoint);
+
     let mut config = OpenAIConfig::new()
         .with_api_base(endpoint.openai_api_base)
         .with_api_key(endpoint.openai_api_key);
@@ -91,7 +46,7 @@ fn init_openai_client(endpoint: OpenAIEndpoint) -> Client<OpenAIConfig> {
     async_openai::Client::with_config(config)
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct OpenAIEndpoint {
     openai_api_base: String,
     openai_api_key: String,
@@ -99,52 +54,53 @@ pub struct OpenAIEndpoint {
     proxy_user_ids: bool,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct OpenAIChatModel {
     endpoint: OpenAIEndpoint,
     model_id: String,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct OpenAIEditModel {
     endpoint: OpenAIEndpoint,
     model_id: String,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct OpenAICompletionModel {
     endpoint: OpenAIEndpoint,
     model_id: String,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct OpenAIModerationModel {
     endpoint: OpenAIEndpoint,
     model_id: String,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct OpenAIEmbeddingModel {
     endpoint: OpenAIEndpoint,
     model_id: String,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct OpenAIImageModel {
     endpoint: OpenAIEndpoint,
     model_id: String,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct OpenAIAudioModel {
     endpoint: OpenAIEndpoint,
     model_id: String,
 }
 
 impl OpenAIChatModel {
-    pub async fn generate<C: config::Config>(
+    #[tracing::instrument(level = "trace")]
+    pub async fn generate(
         &self,
-        client: &Client<C>,
+        client: &Client<OpenAIConfig>,
         user: &str,
         mut request: CreateChatCompletionRequest,
     ) -> Result<CreateChatCompletionResponse, ApiError> {
@@ -168,9 +124,10 @@ impl OpenAIChatModel {
 }
 
 impl OpenAIEditModel {
-    pub async fn generate<C: config::Config>(
+    #[tracing::instrument(level = "trace")]
+    pub async fn generate(
         &self,
-        client: &Client<C>,
+        client: &Client<OpenAIConfig>,
         mut request: CreateEditRequest,
     ) -> Result<CreateEditResponse, ApiError> {
         request.model = self.model_id.clone();
@@ -187,9 +144,10 @@ impl OpenAIEditModel {
 }
 
 impl OpenAICompletionModel {
-    pub async fn generate<C: config::Config>(
+    #[tracing::instrument(level = "trace")]
+    pub async fn generate(
         &self,
-        client: &Client<C>,
+        client: &Client<OpenAIConfig>,
         user: &str,
         mut request: CreateCompletionRequest,
     ) -> Result<CreateCompletionResponse, ApiError> {
@@ -213,9 +171,10 @@ impl OpenAICompletionModel {
 }
 
 impl OpenAIModerationModel {
-    pub async fn generate<C: config::Config>(
+    #[tracing::instrument(level = "trace")]
+    pub async fn generate(
         &self,
-        client: &Client<C>,
+        client: &Client<OpenAIConfig>,
         mut request: CreateModerationRequest,
     ) -> Result<CreateModerationResponse, ApiError> {
         request.model = match &*self.model_id {
@@ -236,9 +195,10 @@ impl OpenAIModerationModel {
 }
 
 impl OpenAIEmbeddingModel {
-    pub async fn generate<C: config::Config>(
+    #[tracing::instrument(level = "trace")]
+    pub async fn generate(
         &self,
-        client: &Client<C>,
+        client: &Client<OpenAIConfig>,
         mut request: CreateEmbeddingRequest,
     ) -> Result<CreateEmbeddingResponse, ApiError> {
         request.model = self.model_id.clone();
@@ -255,9 +215,10 @@ impl OpenAIEmbeddingModel {
 }
 
 impl OpenAIImageModel {
-    pub async fn generate<C: config::Config>(
+    #[tracing::instrument(level = "trace")]
+    pub async fn generate(
         &self,
-        client: &Client<C>,
+        client: &Client<OpenAIConfig>,
         user: &str,
         mut request: CreateImageRequest,
     ) -> Result<ImagesResponse, ApiError> {
@@ -278,9 +239,10 @@ impl OpenAIImageModel {
         }
     }
 
-    pub async fn generate_edit<C: config::Config>(
+    #[tracing::instrument(level = "trace")]
+    pub async fn generate_edit(
         &self,
-        client: &Client<C>,
+        client: &Client<OpenAIConfig>,
         user: &str,
         mut request: CreateImageEditRequest,
     ) -> Result<ImagesResponse, ApiError> {
@@ -301,9 +263,10 @@ impl OpenAIImageModel {
         }
     }
 
-    pub async fn generate_variation<C: config::Config>(
+    #[tracing::instrument(level = "trace")]
+    pub async fn generate_variation(
         &self,
-        client: &Client<C>,
+        client: &Client<OpenAIConfig>,
         user: &str,
         mut request: CreateImageVariationRequest,
     ) -> Result<ImagesResponse, ApiError> {
@@ -330,9 +293,10 @@ impl OpenAIImageModel {
 }
 
 impl OpenAIAudioModel {
-    pub async fn generate_transcription<C: config::Config>(
+    #[tracing::instrument(level = "trace")]
+    pub async fn generate_transcription(
         &self,
-        client: &Client<C>,
+        client: &Client<OpenAIConfig>,
         mut request: CreateTranscriptionRequest,
     ) -> Result<CreateTranscriptionResponse, ApiError> {
         request.model = self.model_id.clone();
@@ -343,9 +307,10 @@ impl OpenAIAudioModel {
         }
     }
 
-    pub async fn generate_translation<C: config::Config>(
+    #[tracing::instrument(level = "trace")]
+    pub async fn generate_translation(
         &self,
-        client: &Client<C>,
+        client: &Client<OpenAIConfig>,
         mut request: CreateTranslationRequest,
     ) -> Result<CreateTranslationResponse, ApiError> {
         request.model = self.model_id.clone();
