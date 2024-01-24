@@ -1,8 +1,9 @@
-use std::{num::NonZeroU32, time::{Instant, Duration}};
-
-use governor::{
-    middleware::StateInformationMiddleware, Quota, RateLimiter,
+use std::{
+    num::NonZeroU32,
+    time::{Duration, Instant},
 };
+
+use governor::{middleware::StateInformationMiddleware, Quota, RateLimiter};
 
 use crate::api;
 
@@ -37,14 +38,16 @@ impl Limiter {
         Limiter {
             requests_per_minute: RateLimiter::direct(Quota::per_minute(
                 NonZeroU32::new(quota.requests_per_minute).unwrap_or(NonZeroU32::MAX),
-            )).with_middleware::<StateInformationMiddleware>(),
+            ))
+            .with_middleware::<StateInformationMiddleware>(),
             requests_per_day: RateLimiter::direct(
                 Quota::with_period(Duration::new(86400, 0) / quota.requests_per_day)
                     .unwrap()
                     .allow_burst(
                         NonZeroU32::new(quota.requests_per_day).unwrap_or(NonZeroU32::MAX),
                     ),
-            ).with_middleware::<StateInformationMiddleware>(),
+            )
+            .with_middleware::<StateInformationMiddleware>(),
             tokens_per_minute: RateLimiter::direct(Quota::per_minute(
                 NonZeroU32::new(quota.tokens_per_minute).unwrap_or(NonZeroU32::MAX),
             ))
@@ -66,7 +69,7 @@ impl Limiter {
         match self.requests_per_minute.check() {
             Ok(snapshot) => {
                 capacity = capacity.min(snapshot.remaining_burst_capacity());
-            },
+            }
             Err(notuntil) => {
                 capacity = 0;
                 earliest = earliest.max(notuntil.earliest_possible());
@@ -76,7 +79,7 @@ impl Limiter {
         match self.requests_per_day.check() {
             Ok(snapshot) => {
                 capacity = capacity.min(snapshot.remaining_burst_capacity());
-            },
+            }
             Err(notuntil) => {
                 capacity = 0;
                 earliest = earliest.max(notuntil.earliest_possible());
@@ -99,11 +102,11 @@ impl Limiter {
             Ok(check) => match check {
                 Ok(snapshot) => {
                     capacity = capacity.min(snapshot.remaining_burst_capacity());
-                },
+                }
                 Err(notuntil) => {
                     capacity = 0;
                     earliest = earliest.max(notuntil.earliest_possible());
-                },
+                }
             },
             Err(_) => {
                 return TokenQuotaStatus::Oversized;
@@ -114,11 +117,11 @@ impl Limiter {
             Ok(check) => match check {
                 Ok(snapshot) => {
                     capacity = capacity.min(snapshot.remaining_burst_capacity());
-                },
+                }
                 Err(notuntil) => {
                     capacity = 0;
                     earliest = earliest.max(notuntil.earliest_possible());
-                },
+                }
             },
             Err(_) => {
                 return TokenQuotaStatus::Oversized;
@@ -133,7 +136,9 @@ impl Limiter {
     }
 
     pub fn tokens_bounded(&self, min_tokens: u32, max_tokens: u32) -> TokenQuotaStatus {
-        if min_tokens > max_tokens || max_tokens > self.quota.tokens_per_minute.min(self.quota.tokens_per_day) {
+        if min_tokens > max_tokens
+            || max_tokens > self.quota.tokens_per_minute.min(self.quota.tokens_per_day)
+        {
             return TokenQuotaStatus::Oversized;
         }
 
@@ -149,15 +154,20 @@ impl Limiter {
                     capacity = capacity.min(static_capacity);
 
                     if additional_tokens > static_capacity {
-                        earliest = earliest.max(Instant::now().checked_add(Duration::new(60, 0).mul_f32(
-                            (additional_tokens as f32 - static_capacity as f32) / self.quota.tokens_per_minute as f32,
-                        )).unwrap());
+                        earliest = earliest.max(
+                            Instant::now()
+                                .checked_add(Duration::new(60, 0).mul_f32(
+                                    (additional_tokens as f32 - static_capacity as f32)
+                                        / self.quota.tokens_per_minute as f32,
+                                ))
+                                .unwrap(),
+                        );
                     }
-                },
+                }
                 Err(notuntil) => {
                     capacity = 0;
                     earliest = earliest.max(notuntil.earliest_possible());
-                },
+                }
             },
             Err(_) => {
                 return TokenQuotaStatus::Oversized;
@@ -171,15 +181,20 @@ impl Limiter {
                     capacity = capacity.min(static_capacity);
 
                     if additional_tokens > static_capacity {
-                        earliest = earliest.max(Instant::now().checked_add(Duration::new(86400, 0).mul_f32(
-                            (additional_tokens as f32 - static_capacity as f32) / self.quota.tokens_per_day as f32,
-                        )).unwrap());
+                        earliest = earliest.max(
+                            Instant::now()
+                                .checked_add(Duration::new(86400, 0).mul_f32(
+                                    (additional_tokens as f32 - static_capacity as f32)
+                                        / self.quota.tokens_per_day as f32,
+                                ))
+                                .unwrap(),
+                        );
                     }
-                },
+                }
                 Err(notuntil) => {
                     capacity = 0;
                     earliest = earliest.max(notuntil.earliest_possible());
-                },
+                }
             },
             Err(_) => {
                 return TokenQuotaStatus::Oversized;

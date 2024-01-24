@@ -18,10 +18,13 @@ use governor::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::value::Value;
-use tokio::{time::{self, Instant}, sync::{
-    mpsc::{self, UnboundedReceiver},
-    oneshot, RwLock,
-}};
+use tokio::{
+    sync::{
+        mpsc::{self, UnboundedReceiver},
+        oneshot, RwLock,
+    },
+    time::{self, Instant},
+};
 use uuid::Uuid;
 
 use crate::api;
@@ -261,22 +264,26 @@ fn spawn_model_handler(
 
                     match request.body.get_max_tokens(&model_metadata) {
                         Some(max) => match limiter.tokens_bounded(tokens as u32, max as u32) {
-                            TokenQuotaStatus::Ready(_) => {},
+                            TokenQuotaStatus::Ready(_) => {}
                             TokenQuotaStatus::LimitedUntil(point) => {
                                 time::sleep_until(Instant::from_std(point)).await;
-                            },
-                            TokenQuotaStatus::Oversized => {todo!()},
-                        }
+                            }
+                            TokenQuotaStatus::Oversized => {
+                                todo!()
+                            }
+                        },
                         None => match limiter.tokens(tokens as u32) {
-                            TokenQuotaStatus::Ready(_) => {},
+                            TokenQuotaStatus::Ready(_) => {}
                             TokenQuotaStatus::LimitedUntil(point) => {
                                 time::sleep_until(Instant::from_std(point)).await;
-                            },
-                            TokenQuotaStatus::Oversized => {todo!()},
+                            }
+                            TokenQuotaStatus::Oversized => {
+                                todo!()
+                            }
                         },
                     };
                 }
-                None => {},
+                None => {}
             }
 
             request.response_channel.send(

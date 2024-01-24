@@ -16,8 +16,8 @@ use tiktoken_rs::{
     tokenizer::{self, Tokenizer},
 };
 
-use crate::api;
 use super::{ModelRequest, ModelResponse};
+use crate::api;
 
 impl api::Model {
     fn get_tokenizer(&self) -> Option<Tokenizer> {
