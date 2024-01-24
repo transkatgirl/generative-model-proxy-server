@@ -12,10 +12,6 @@ use async_openai::{
         CreateTranslationResponse, ImageModel, ImagesResponse, Model, TextModerationModel,
     },
 };
-use governor::{
-    middleware::{StateInformationMiddleware, StateSnapshot},
-    DefaultDirectRateLimiter, Quota, RateLimiter,
-};
 use serde::{Deserialize, Serialize};
 use serde_json::value::Value;
 use tokio::{
@@ -225,13 +221,6 @@ struct RoutableRequest {
     user_id: Uuid,
     response_channel: oneshot::Sender<ModelResponse>,
 }
-
-type StateInformationDirectRateLimiter<MW = StateInformationMiddleware> = RateLimiter<
-    governor::state::direct::NotKeyed,
-    governor::state::InMemoryState,
-    governor::clock::DefaultClock,
-    MW,
->;
 
 fn spawn_model_handler(
     model_metadata: api::Model,

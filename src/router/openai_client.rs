@@ -1,14 +1,13 @@
 use async_openai::{
     config::OpenAIConfig,
     types::{ImageModel, TextModerationModel},
+    error::OpenAIError,
     Client,
 };
 use serde::{Deserialize, Serialize};
 use tracing::{event, Level};
 
 use super::{ModelAPICallable, ModelRequest, ModelResponse};
-
-// TODO: Improve error handling, forward a *subset* of errors to the user
 
 #[tracing::instrument(level = "trace")]
 fn init_openai_client(endpoint: OpenAIEndpoint) -> Client<OpenAIConfig> {
@@ -21,6 +20,16 @@ fn init_openai_client(endpoint: OpenAIEndpoint) -> Client<OpenAIConfig> {
     }
 
     async_openai::Client::with_config(config)
+}
+
+fn convert_openai_error(error: OpenAIError) -> ModelResponse {
+    match error {
+        OpenAIError::ApiError(err) => ModelResponse::Error(err),
+        _ => {
+            event!(Level::WARN, "OpenAIError {:?}", error);
+            ModelResponse::error_internal()
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -94,10 +103,7 @@ impl ModelAPICallable for OpenAIChatModel {
 
             match client.chat().create(req).await {
                 Ok(g) => Some(ModelResponse::Chat(g)),
-                Err(e) => {
-                    event!(Level::WARN, "OpenAIError {:?}", e);
-                    Some(ModelResponse::error_internal())
-                }
+                Err(e) => Some(convert_openai_error(e)),
             }
         } else {
             None
@@ -125,10 +131,7 @@ impl ModelAPICallable for OpenAIEditModel {
             #[allow(deprecated)]
             match client.edits().create(req).await {
                 Ok(g) => Some(ModelResponse::Edit(g)),
-                Err(e) => {
-                    event!(Level::WARN, "OpenAIError {:?}", e);
-                    Some(ModelResponse::error_internal())
-                }
+                Err(e) => Some(convert_openai_error(e)),
             }
         } else {
             None
@@ -161,10 +164,7 @@ impl ModelAPICallable for OpenAICompletionModel {
 
             match client.completions().create(req).await {
                 Ok(g) => Some(ModelResponse::Completion(g)),
-                Err(e) => {
-                    event!(Level::WARN, "OpenAIError {:?}", e);
-                    Some(ModelResponse::error_internal())
-                }
+                Err(e) => Some(convert_openai_error(e)),
             }
         } else {
             None
@@ -195,10 +195,7 @@ impl ModelAPICallable for OpenAIModerationModel {
 
             match client.moderations().create(req).await {
                 Ok(g) => Some(ModelResponse::Moderation(g)),
-                Err(e) => {
-                    event!(Level::WARN, "OpenAIError {:?}", e);
-                    Some(ModelResponse::error_internal())
-                }
+                Err(e) => Some(convert_openai_error(e)),
             }
         } else {
             None
@@ -225,10 +222,7 @@ impl ModelAPICallable for OpenAIEmbeddingModel {
 
             match client.embeddings().create(req).await {
                 Ok(g) => Some(ModelResponse::Embedding(g)),
-                Err(e) => {
-                    event!(Level::WARN, "OpenAIError {:?}", e);
-                    Some(ModelResponse::error_internal())
-                }
+                Err(e) => Some(convert_openai_error(e)),
             }
         } else {
             None
@@ -265,10 +259,7 @@ impl ModelAPICallable for OpenAIImageModel {
 
                 match client.images().create(req).await {
                     Ok(g) => Some(ModelResponse::Image(g)),
-                    Err(e) => {
-                        event!(Level::WARN, "OpenAIError {:?}", e);
-                        Some(ModelResponse::error_internal())
-                    }
+                    Err(e) => Some(convert_openai_error(e)),
                 }
             }
             ModelRequest::ImageEdit(mut req) => {
@@ -285,10 +276,7 @@ impl ModelAPICallable for OpenAIImageModel {
 
                 match client.images().create_edit(req).await {
                     Ok(g) => Some(ModelResponse::Image(g)),
-                    Err(e) => {
-                        event!(Level::WARN, "OpenAIError {:?}", e);
-                        Some(ModelResponse::error_internal())
-                    }
+                    Err(e) => Some(convert_openai_error(e)),
                 }
             }
             ModelRequest::ImageVariation(mut req) => {
@@ -305,10 +293,7 @@ impl ModelAPICallable for OpenAIImageModel {
 
                 match client.images().create_variation(req).await {
                     Ok(g) => Some(ModelResponse::Image(g)),
-                    Err(e) => {
-                        event!(Level::WARN, "OpenAIError {:?}", e);
-                        Some(ModelResponse::error_internal())
-                    }
+                    Err(e) => Some(convert_openai_error(e)),
                 }
             }
             _ => None,
@@ -336,10 +321,7 @@ impl ModelAPICallable for OpenAIAudioModel {
 
                 match client.audio().transcribe(req).await {
                     Ok(g) => Some(ModelResponse::Transcription(g)),
-                    Err(e) => {
-                        event!(Level::WARN, "OpenAIError {:?}", e);
-                        Some(ModelResponse::error_internal())
-                    }
+                    Err(e) => Some(convert_openai_error(e)),
                 }
             }
             ModelRequest::Translation(mut req) => {
@@ -347,10 +329,7 @@ impl ModelAPICallable for OpenAIAudioModel {
 
                 match client.audio().translate(req).await {
                     Ok(g) => Some(ModelResponse::Translation(g)),
-                    Err(e) => {
-                        event!(Level::WARN, "OpenAIError {:?}", e);
-                        Some(ModelResponse::error_internal())
-                    }
+                    Err(e) => Some(convert_openai_error(e)),
                 }
             }
             _ => None,

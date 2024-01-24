@@ -14,6 +14,7 @@ type StateInformationDirectRateLimiter<MW = StateInformationMiddleware> = RateLi
     MW,
 >;
 
+#[derive(Debug)]
 pub struct Limiter {
     requests_per_minute: StateInformationDirectRateLimiter,
     requests_per_day: StateInformationDirectRateLimiter,
@@ -22,11 +23,13 @@ pub struct Limiter {
     quota: api::Quota,
 }
 
+#[derive(Debug)]
 pub enum RequestQuotaStatus {
     Ready(u32),
     LimitedUntil(Instant),
 }
 
+#[derive(Debug)]
 pub enum TokenQuotaStatus {
     Ready(u32),
     LimitedUntil(Instant),
@@ -34,6 +37,7 @@ pub enum TokenQuotaStatus {
 }
 
 impl Limiter {
+    #[tracing::instrument(level = "trace")]
     pub fn new(quota: api::Quota) -> Self {
         Limiter {
             requests_per_minute: RateLimiter::direct(Quota::per_minute(
@@ -62,6 +66,7 @@ impl Limiter {
         }
     }
 
+    #[tracing::instrument(level = "trace")]
     pub fn request(&self) -> RequestQuotaStatus {
         let mut capacity = u32::MAX;
         let mut earliest = Instant::now();
@@ -93,6 +98,7 @@ impl Limiter {
         }
     }
 
+    #[tracing::instrument(level = "trace")]
     pub fn tokens(&self, tokens: u32) -> TokenQuotaStatus {
         let tokens = NonZeroU32::new(tokens).unwrap_or(NonZeroU32::MIN);
         let mut capacity = u32::MAX;
@@ -135,6 +141,7 @@ impl Limiter {
         }
     }
 
+    #[tracing::instrument(level = "trace")]
     pub fn tokens_bounded(&self, min_tokens: u32, max_tokens: u32) -> TokenQuotaStatus {
         if min_tokens > max_tokens
             || max_tokens > self.quota.tokens_per_minute.min(self.quota.tokens_per_day)
