@@ -1,6 +1,3 @@
-use core::num;
-use std::{collections::HashMap, future::Future, hash::Hash, num::NonZeroU32, sync::Arc};
-
 use async_openai::{
     error::ApiError,
     types::{
@@ -14,26 +11,12 @@ use async_openai::{
         EmbeddingInput, ImageModel, ImagesResponse, ModerationInput, Prompt, TextModerationModel,
     },
 };
-use governor::{
-    middleware::{StateInformationMiddleware, StateSnapshot},
-    DefaultDirectRateLimiter, Quota, RateLimiter,
-};
-use serde::{Deserialize, Serialize};
-use serde_json::value::Value;
 use tiktoken_rs::{
     model,
     tokenizer::{self, Tokenizer},
-    CoreBPE,
 };
-//use tiktoken_rs;
-use tokio::sync::{
-    mpsc::{self, UnboundedReceiver},
-    oneshot, RwLock,
-};
-use uuid::Uuid;
 
-use crate::{api, router};
-
+use crate::api;
 use super::{ModelRequest, ModelResponse};
 
 impl api::Model {

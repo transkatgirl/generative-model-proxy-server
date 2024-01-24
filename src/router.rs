@@ -18,13 +18,15 @@ use governor::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::value::Value;
-use tokio::sync::{
+use tokio::{time::{self, Instant}, sync::{
     mpsc::{self, UnboundedReceiver},
     oneshot, RwLock,
-};
+}};
 use uuid::Uuid;
 
 use crate::api;
+
+use self::limiter::{RequestQuotaStatus, TokenQuotaStatus};
 
 mod limiter;
 mod openai_client;
@@ -249,16 +251,32 @@ fn spawn_model_handler(
 
             let tokens = request.body.get_input_tokens(&model_metadata);
 
+            if let RequestQuotaStatus::LimitedUntil(point) = limiter.request() {
+                time::sleep_until(Instant::from_std(point)).await;
+            }
+
             match tokens {
-                Some(t) => {
+                Some(tokens) => {
                     // TODO: Error handling!
 
                     match request.body.get_max_tokens(&model_metadata) {
-                        Some(m) => limiter.wait_until_bounded_token_request_ready(t as u32, m as u32).await,
-                        None => limiter.wait_until_token_request_ready(t as u32).await,
+                        Some(max) => match limiter.tokens_bounded(tokens as u32, max as u32) {
+                            TokenQuotaStatus::Ready(_) => {},
+                            TokenQuotaStatus::LimitedUntil(point) => {
+                                time::sleep_until(Instant::from_std(point)).await;
+                            },
+                            TokenQuotaStatus::Oversized => {todo!()},
+                        }
+                        None => match limiter.tokens(tokens as u32) {
+                            TokenQuotaStatus::Ready(_) => {},
+                            TokenQuotaStatus::LimitedUntil(point) => {
+                                time::sleep_until(Instant::from_std(point)).await;
+                            },
+                            TokenQuotaStatus::Oversized => {todo!()},
+                        },
                     };
                 }
-                None => limiter.wait_until_request_ready().await,
+                None => {},
             }
 
             request.response_channel.send(

@@ -6,7 +6,7 @@ use async_openai::{
 use serde::{Deserialize, Serialize};
 use tracing::{event, Level};
 
-use crate::router::{ModelAPICallable, ModelRequest, ModelResponse};
+use super::{ModelAPICallable, ModelRequest, ModelResponse};
 
 // TODO: Improve error handling, forward a *subset* of errors to the user
 
