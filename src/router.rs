@@ -9,7 +9,7 @@ use async_openai::{
         CreateEmbeddingResponse, CreateImageEditRequest, CreateImageRequest,
         CreateImageVariationRequest, CreateModerationRequest, CreateModerationResponse,
         CreateTranscriptionRequest, CreateTranscriptionResponse, CreateTranslationRequest,
-        CreateTranslationResponse, ImageModel, ImagesResponse, TextModerationModel,
+        CreateTranslationResponse, ImageModel, ImagesResponse, Model, TextModerationModel,
     },
 };
 use governor::{
@@ -247,7 +247,19 @@ fn spawn_model_handler(
         while let Some(request) = rx.recv().await {
             let user: &mut str = request.user_id.simple().encode_lower(&mut encode_buffer);
 
-            limiter.wait_until_request_ready().await;
+            let tokens = request.body.get_input_tokens(&model_metadata);
+
+            match tokens {
+                Some(t) => {
+                    // TODO: Error handling!
+
+                    match request.body.get_max_tokens(&model_metadata) {
+                        Some(m) => limiter.wait_until_bounded_token_request_ready(t as u32, m as u32).await,
+                        None => limiter.wait_until_token_request_ready(t as u32).await,
+                    };
+                }
+                None => limiter.wait_until_request_ready().await,
+            }
 
             request.response_channel.send(
                 match model_callable.generate(&client, user, request.body).await {

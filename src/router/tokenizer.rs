@@ -107,7 +107,20 @@ impl ModelRequest {
         }
     }
 
-    //pub fn get_max_tokens() -> Option<usize> {}
+    pub fn get_max_tokens(&self, model: &api::Model) -> Option<usize> {
+        match self {
+            Self::Chat(r) => Some(model.get_context_len()),
+            Self::Edit(r) => Some(model.get_context_len()),
+            Self::Completion(r) => Some(model.get_context_len()),
+            Self::Moderation(r) => None,
+            Self::Embedding(r) => None,
+            Self::Image(r) => None,
+            Self::ImageEdit(r) => None,
+            Self::ImageVariation(r) => None,
+            Self::Transcription(r) => None,
+            Self::Translation(r) => None,
+        }
+    }
 }
 
 impl ModelResponse {
