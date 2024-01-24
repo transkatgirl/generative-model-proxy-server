@@ -1,7 +1,7 @@
 use async_openai::{
     config::OpenAIConfig,
-    types::{ImageModel, TextModerationModel},
     error::OpenAIError,
+    types::{ImageModel, TextModerationModel},
     Client,
 };
 use serde::{Deserialize, Serialize};

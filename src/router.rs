@@ -23,9 +23,8 @@ use tokio::{
 };
 use uuid::Uuid;
 
-use crate::api;
-
 use self::limiter::{RequestQuotaStatus, TokenQuotaStatus};
+use crate::api;
 
 mod limiter;
 mod openai_client;
@@ -241,7 +240,7 @@ fn spawn_model_handler(
         while let Some(request) = rx.recv().await {
             let user: &mut str = request.user_id.simple().encode_lower(&mut encode_buffer);
 
-            let tokens = request.body.get_input_tokens(&model_metadata);
+            let tokens = request.body.get_token_count(&model_metadata);
 
             if let RequestQuotaStatus::LimitedUntil(point) = limiter.request() {
                 time::sleep_until(Instant::from_std(point)).await;
