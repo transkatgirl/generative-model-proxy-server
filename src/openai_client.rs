@@ -1,8 +1,6 @@
 use async_openai::{
     config::OpenAIConfig,
-    types::{
-        ImageModel, TextModerationModel,
-    },
+    types::{ImageModel, TextModerationModel},
     Client,
 };
 use serde::{Deserialize, Serialize};
@@ -83,7 +81,12 @@ impl ModelAPICallable for OpenAIChatModel {
     type Client = Client<OpenAIConfig>;
 
     #[tracing::instrument(level = "trace")]
-    async fn generate(&self, client: &Self::Client, user: &str, request: ModelRequest) -> Option<ModelResponse> {
+    async fn generate(
+        &self,
+        client: &Self::Client,
+        user: &str,
+        request: ModelRequest,
+    ) -> Option<ModelResponse> {
         if let ModelRequest::Chat(mut req) = request {
             req.model = self.model_id.clone();
             req.stream = None;
@@ -98,7 +101,7 @@ impl ModelAPICallable for OpenAIChatModel {
                 Err(e) => {
                     event!(Level::WARN, "OpenAIError {:?}", e);
                     Some(ModelResponse::error_internal())
-                },
+                }
             }
         } else {
             None
@@ -114,7 +117,12 @@ impl ModelAPICallable for OpenAIEditModel {
     type Client = Client<OpenAIConfig>;
 
     #[tracing::instrument(level = "trace")]
-    async fn generate(&self, client: &Self::Client, _user: &str, request: ModelRequest) -> Option<ModelResponse> {
+    async fn generate(
+        &self,
+        client: &Self::Client,
+        _user: &str,
+        request: ModelRequest,
+    ) -> Option<ModelResponse> {
         if let ModelRequest::Edit(mut req) = request {
             req.model = self.model_id.clone();
 
@@ -124,7 +132,7 @@ impl ModelAPICallable for OpenAIEditModel {
                 Err(e) => {
                     event!(Level::WARN, "OpenAIError {:?}", e);
                     Some(ModelResponse::error_internal())
-                },
+                }
             }
         } else {
             None
@@ -140,7 +148,12 @@ impl ModelAPICallable for OpenAICompletionModel {
     type Client = Client<OpenAIConfig>;
 
     #[tracing::instrument(level = "trace")]
-    async fn generate(&self, client: &Self::Client, user: &str, request: ModelRequest) -> Option<ModelResponse> {
+    async fn generate(
+        &self,
+        client: &Self::Client,
+        user: &str,
+        request: ModelRequest,
+    ) -> Option<ModelResponse> {
         if let ModelRequest::Completion(mut req) = request {
             req.model = self.model_id.clone();
             req.stream = None;
@@ -155,7 +168,7 @@ impl ModelAPICallable for OpenAICompletionModel {
                 Err(e) => {
                     event!(Level::WARN, "OpenAIError {:?}", e);
                     Some(ModelResponse::error_internal())
-                },
+                }
             }
         } else {
             None
@@ -171,7 +184,12 @@ impl ModelAPICallable for OpenAIModerationModel {
     type Client = Client<OpenAIConfig>;
 
     #[tracing::instrument(level = "trace")]
-    async fn generate(&self, client: &Self::Client, _user: &str, request: ModelRequest) -> Option<ModelResponse> {
+    async fn generate(
+        &self,
+        client: &Self::Client,
+        _user: &str,
+        request: ModelRequest,
+    ) -> Option<ModelResponse> {
         if let ModelRequest::Moderation(mut req) = request {
             req.model = match &*self.model_id {
                 "text-moderation-stable" => Some(TextModerationModel::Stable),
@@ -184,7 +202,7 @@ impl ModelAPICallable for OpenAIModerationModel {
                 Err(e) => {
                     event!(Level::WARN, "OpenAIError {:?}", e);
                     Some(ModelResponse::error_internal())
-                },
+                }
             }
         } else {
             None
@@ -200,7 +218,12 @@ impl ModelAPICallable for OpenAIEmbeddingModel {
     type Client = Client<OpenAIConfig>;
 
     #[tracing::instrument(level = "trace")]
-    async fn generate(&self, client: &Self::Client, _user: &str, request: ModelRequest) -> Option<ModelResponse> {
+    async fn generate(
+        &self,
+        client: &Self::Client,
+        _user: &str,
+        request: ModelRequest,
+    ) -> Option<ModelResponse> {
         if let ModelRequest::Embedding(mut req) = request {
             req.model = self.model_id.clone();
 
@@ -209,7 +232,7 @@ impl ModelAPICallable for OpenAIEmbeddingModel {
                 Err(e) => {
                     event!(Level::WARN, "OpenAIError {:?}", e);
                     Some(ModelResponse::error_internal())
-                },
+                }
             }
         } else {
             None
@@ -225,7 +248,12 @@ impl ModelAPICallable for OpenAIImageModel {
     type Client = Client<OpenAIConfig>;
 
     #[tracing::instrument(level = "trace")]
-    async fn generate(&self, client: &Self::Client, user: &str, request: ModelRequest) -> Option<ModelResponse> {
+    async fn generate(
+        &self,
+        client: &Self::Client,
+        user: &str,
+        request: ModelRequest,
+    ) -> Option<ModelResponse> {
         match request {
             ModelRequest::Image(mut req) => {
                 req.model = match &*self.model_id {
@@ -244,9 +272,9 @@ impl ModelAPICallable for OpenAIImageModel {
                     Err(e) => {
                         event!(Level::WARN, "OpenAIError {:?}", e);
                         Some(ModelResponse::error_internal())
-                    },
+                    }
                 }
-            },
+            }
             ModelRequest::ImageEdit(mut req) => {
                 req.model = match &*self.model_id {
                     "dall-e-3" => Some(ImageModel::DallE3),
@@ -264,9 +292,9 @@ impl ModelAPICallable for OpenAIImageModel {
                     Err(e) => {
                         event!(Level::WARN, "OpenAIError {:?}", e);
                         Some(ModelResponse::error_internal())
-                    },
+                    }
                 }
-            },
+            }
             ModelRequest::ImageVariation(mut req) => {
                 req.model = match &*self.model_id {
                     "dall-e-3" => Some(ImageModel::DallE3),
@@ -284,9 +312,9 @@ impl ModelAPICallable for OpenAIImageModel {
                     Err(e) => {
                         event!(Level::WARN, "OpenAIError {:?}", e);
                         Some(ModelResponse::error_internal())
-                    },
+                    }
                 }
-            },
+            }
             _ => None,
         }
     }
@@ -300,7 +328,12 @@ impl ModelAPICallable for OpenAIAudioModel {
     type Client = Client<OpenAIConfig>;
 
     #[tracing::instrument(level = "trace")]
-    async fn generate(&self, client: &Self::Client, user: &str, request: ModelRequest) -> Option<ModelResponse> {
+    async fn generate(
+        &self,
+        client: &Self::Client,
+        user: &str,
+        request: ModelRequest,
+    ) -> Option<ModelResponse> {
         match request {
             ModelRequest::Transcription(mut req) => {
                 req.model = self.model_id.clone();
@@ -310,9 +343,9 @@ impl ModelAPICallable for OpenAIAudioModel {
                     Err(e) => {
                         event!(Level::WARN, "OpenAIError {:?}", e);
                         Some(ModelResponse::error_internal())
-                    },
+                    }
                 }
-            },
+            }
             ModelRequest::Translation(mut req) => {
                 req.model = self.model_id.clone();
 
@@ -321,9 +354,9 @@ impl ModelAPICallable for OpenAIAudioModel {
                     Err(e) => {
                         event!(Level::WARN, "OpenAIError {:?}", e);
                         Some(ModelResponse::error_internal())
-                    },
+                    }
                 }
-            },
+            }
             _ => None,
         }
     }

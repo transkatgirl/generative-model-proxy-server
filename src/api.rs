@@ -58,7 +58,7 @@ pub struct ModelMetadata {
     pub context_len: Option<usize>,
 }
 
-#[derive(Default, Serialize, Deserialize, Clone, Debug)]
+#[derive(Default, Serialize, Deserialize, Copy, Clone, Debug)]
 #[serde(default)]
 pub struct Quota {
     pub requests_per_minute: u32,

@@ -1,4 +1,4 @@
-use std::{collections::HashMap, hash::Hash, num::NonZeroU32, sync::Arc, future::Future};
+use std::{collections::HashMap, future::Future, hash::Hash, num::NonZeroU32, sync::Arc};
 
 use serde::{Deserialize, Serialize};
 
@@ -16,7 +16,10 @@ use async_openai::{
     },
 };
 use serde_json::value::Value;
-use tokio::sync::{mpsc::{self, UnboundedReceiver}, oneshot, RwLock};
+use tokio::sync::{
+    mpsc::{self, UnboundedReceiver},
+    oneshot, RwLock,
+};
 
 use crate::{
     api::{self},
@@ -266,35 +269,39 @@ impl ModelResponse {
     // add get_status_code()
 }
 
-fn spawn_model_handler(model_metadata: api::Model, model_callable: impl ModelAPICallable + Send + 'static) -> mpsc::Sender<RoutableRequest>
-{
-    let (tx, mut rx) = mpsc::channel::<RoutableRequest>(if model_metadata.quota.max_queue_size == 0 {
-        usize::MAX
-    } else {
-        model_metadata.quota.max_queue_size
-    });
+fn spawn_model_handler(
+    model_metadata: api::Model,
+    model_callable: impl ModelAPICallable + Send + 'static,
+) -> mpsc::Sender<RoutableRequest> {
+    let (tx, mut rx) =
+        mpsc::channel::<RoutableRequest>(if model_metadata.quota.max_queue_size == 0 {
+            usize::MAX
+        } else {
+            model_metadata.quota.max_queue_size
+        });
 
     tokio::spawn(async move {
         let client = model_callable.init();
-        let limiter: Limiter = Limiter::new(model_metadata.quota);
+        let limiter = Limiter::new(model_metadata.quota);
         let mut encode_buffer: [u8; 45] = Uuid::encode_buffer();
 
         while let Some(request) = rx.recv().await {
-            let user: &mut str =
-                request.user_id.simple().encode_lower(&mut encode_buffer);
+            let user: &mut str = request.user_id.simple().encode_lower(&mut encode_buffer);
 
             limiter.requests_per_minute.until_ready().await;
             limiter.requests_per_hour.until_ready().await;
 
             // TODO: Add token-based rate limits!
 
-            request.response_channel.send(match model_callable.generate(&client, user, request.body).await {
-                Some(mut g) => {
-                    g.replace_model_id(model_metadata.label.clone());
-                    g
-                }
-                None => ModelResponse::error_not_found(&model_metadata.label),
-            });
+            request.response_channel.send(
+                match model_callable.generate(&client, user, request.body).await {
+                    Some(mut g) => {
+                        g.replace_model_id(model_metadata.label.clone());
+                        g
+                    }
+                    None => ModelResponse::error_not_found(&model_metadata.label),
+                },
+            );
 
             // TODO: Add usage statistics!
         }
@@ -315,14 +322,15 @@ impl ModelRequestRouter {
             endpoints.insert(
                 model.uuid,
                 match model.clone().api {
-                ModelAPI::OpenAIChat(inner) => spawn_model_handler(model.clone(), inner),
-                ModelAPI::OpenAIEdit(inner) => spawn_model_handler(model.clone(), inner),
-                ModelAPI::OpenAICompletion(inner) => spawn_model_handler(model.clone(), inner),
-                ModelAPI::OpenAIModeration(inner) => spawn_model_handler(model.clone(), inner),
-                ModelAPI::OpenAIEmbedding(inner) => spawn_model_handler(model.clone(), inner),
-                ModelAPI::OpenAIImage(inner) => spawn_model_handler(model.clone(), inner),
-                ModelAPI::OpenAIAudio(inner) => spawn_model_handler(model.clone(), inner),
-            });
+                    ModelAPI::OpenAIChat(inner) => spawn_model_handler(model.clone(), inner),
+                    ModelAPI::OpenAIEdit(inner) => spawn_model_handler(model.clone(), inner),
+                    ModelAPI::OpenAICompletion(inner) => spawn_model_handler(model.clone(), inner),
+                    ModelAPI::OpenAIModeration(inner) => spawn_model_handler(model.clone(), inner),
+                    ModelAPI::OpenAIEmbedding(inner) => spawn_model_handler(model.clone(), inner),
+                    ModelAPI::OpenAIImage(inner) => spawn_model_handler(model.clone(), inner),
+                    ModelAPI::OpenAIAudio(inner) => spawn_model_handler(model.clone(), inner),
+                },
+            );
         }
 
         Self { endpoints }
