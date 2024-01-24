@@ -5,7 +5,7 @@ use uuid::Uuid;
 use reqwest::Client;
 use tokio::sync::{mpsc, RwLock};
 
-use crate::{openai_client, router};
+use crate::router;
 
 use axum::{
     extract::{Path, Request, State},
@@ -55,6 +55,8 @@ pub struct ModelMetadata {
     pub created: Option<u64>,
     pub owned_by: Option<String>,
     pub tokenizer: Option<String>,
+    pub tokens_per_message: Option<i32>,
+    pub tokens_per_name: Option<i32>,
     pub context_len: Option<usize>,
 }
 

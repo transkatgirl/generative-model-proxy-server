@@ -8,14 +8,10 @@ use tracing::{event, Level};
 
 use crate::router::{ModelAPICallable, ModelRequest, ModelResponse};
 
-// TODO: Add proxy for image output URLs?
-/// See async_openai::types::ImagesResponse.save()
-// TODO: Add proxy for GPT-4 image input URLs?
+// TODO: Improve error handling, forward a *subset* of errors to the user
 
 #[tracing::instrument(level = "trace")]
 fn init_openai_client(endpoint: OpenAIEndpoint) -> Client<OpenAIConfig> {
-    event!(Level::TRACE, "Init client {:?}", endpoint);
-
     let mut config = OpenAIConfig::new()
         .with_api_base(endpoint.openai_api_base)
         .with_api_key(endpoint.openai_api_key);
@@ -80,7 +76,7 @@ pub struct OpenAIAudioModel {
 impl ModelAPICallable for OpenAIChatModel {
     type Client = Client<OpenAIConfig>;
 
-    #[tracing::instrument(level = "trace")]
+    #[tracing::instrument(level = "debug")]
     async fn generate(
         &self,
         client: &Self::Client,
@@ -116,7 +112,7 @@ impl ModelAPICallable for OpenAIChatModel {
 impl ModelAPICallable for OpenAIEditModel {
     type Client = Client<OpenAIConfig>;
 
-    #[tracing::instrument(level = "trace")]
+    #[tracing::instrument(level = "debug")]
     async fn generate(
         &self,
         client: &Self::Client,
@@ -147,7 +143,7 @@ impl ModelAPICallable for OpenAIEditModel {
 impl ModelAPICallable for OpenAICompletionModel {
     type Client = Client<OpenAIConfig>;
 
-    #[tracing::instrument(level = "trace")]
+    #[tracing::instrument(level = "debug")]
     async fn generate(
         &self,
         client: &Self::Client,
@@ -183,7 +179,7 @@ impl ModelAPICallable for OpenAICompletionModel {
 impl ModelAPICallable for OpenAIModerationModel {
     type Client = Client<OpenAIConfig>;
 
-    #[tracing::instrument(level = "trace")]
+    #[tracing::instrument(level = "debug")]
     async fn generate(
         &self,
         client: &Self::Client,
@@ -217,7 +213,7 @@ impl ModelAPICallable for OpenAIModerationModel {
 impl ModelAPICallable for OpenAIEmbeddingModel {
     type Client = Client<OpenAIConfig>;
 
-    #[tracing::instrument(level = "trace")]
+    #[tracing::instrument(level = "debug")]
     async fn generate(
         &self,
         client: &Self::Client,
@@ -247,7 +243,7 @@ impl ModelAPICallable for OpenAIEmbeddingModel {
 impl ModelAPICallable for OpenAIImageModel {
     type Client = Client<OpenAIConfig>;
 
-    #[tracing::instrument(level = "trace")]
+    #[tracing::instrument(level = "debug")]
     async fn generate(
         &self,
         client: &Self::Client,
@@ -327,7 +323,7 @@ impl ModelAPICallable for OpenAIImageModel {
 impl ModelAPICallable for OpenAIAudioModel {
     type Client = Client<OpenAIConfig>;
 
-    #[tracing::instrument(level = "trace")]
+    #[tracing::instrument(level = "debug")]
     async fn generate(
         &self,
         client: &Self::Client,

@@ -2,8 +2,6 @@ use tokio::net::TcpListener;
 use tower_http::trace::TraceLayer;
 
 mod api;
-mod client;
-mod openai_client;
 mod router;
 
 #[tokio::main]

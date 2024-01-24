@@ -1,8 +1,5 @@
+use core::num;
 use std::{collections::HashMap, future::Future, hash::Hash, num::NonZeroU32, sync::Arc};
-
-use serde::{Deserialize, Serialize};
-
-use uuid::Uuid;
 
 use async_openai::{
     error::ApiError,
@@ -15,58 +12,27 @@ use async_openai::{
         CreateTranslationResponse, ImageModel, ImagesResponse, TextModerationModel,
     },
 };
+use governor::{
+    middleware::{StateInformationMiddleware, StateSnapshot},
+    DefaultDirectRateLimiter, Quota, RateLimiter,
+};
+use serde::{Deserialize, Serialize};
 use serde_json::value::Value;
 use tokio::sync::{
     mpsc::{self, UnboundedReceiver},
     oneshot, RwLock,
 };
+use uuid::Uuid;
 
-use crate::{
-    api::{self},
-    openai_client,
-};
+use crate::api;
 
-use governor::{
-    clock::{Clock, QuantaClock, QuantaUpkeepClock, SystemClock},
-    middleware::{StateInformationMiddleware, StateSnapshot},
-    DefaultDirectRateLimiter, Quota, RateLimiter,
-};
-//use governor::{Quota, RateLimiter};
-
-struct Limiter {
-    requests_per_minute: DefaultDirectRateLimiter,
-    requests_per_hour: DefaultDirectRateLimiter,
-    tokens_per_minute: DefaultDirectRateLimiter,
-    tokens_per_hour: DefaultDirectRateLimiter,
-}
-
-impl Limiter {
-    pub fn new(quota: api::Quota) -> Self {
-        Limiter {
-            requests_per_minute: RateLimiter::direct(Quota::per_minute(
-                NonZeroU32::new(quota.requests_per_minute).unwrap_or(NonZeroU32::MAX),
-            )),
-            requests_per_hour: RateLimiter::direct(Quota::per_hour(
-                NonZeroU32::new(quota.requests_per_day / 24).unwrap_or(NonZeroU32::MAX),
-            )),
-            tokens_per_minute: RateLimiter::direct(Quota::per_minute(
-                NonZeroU32::new(quota.tokens_per_minute).unwrap_or(NonZeroU32::MAX),
-            )), /*.with_middleware::<StateInformationMiddleware>();*/
-            tokens_per_hour: RateLimiter::direct(Quota::per_hour(
-                NonZeroU32::new(quota.tokens_per_day / 24).unwrap_or(NonZeroU32::MAX),
-            )), /*.with_middleware::<StateInformationMiddleware>();*/
-        }
-    }
-}
-
-struct RoutableRequest {
-    body: ModelRequest,
-    user_id: Uuid,
-    response_channel: oneshot::Sender<ModelResponse>,
-}
+mod limiter;
+mod openai_client;
+mod tokenizer;
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(tag = "type")]
+#[allow(clippy::enum_variant_names)]
 pub enum ModelAPI {
     OpenAIChat(openai_client::OpenAIChatModel),
     OpenAIEdit(openai_client::OpenAIEditModel),
@@ -142,14 +108,6 @@ impl ModelRequest {
             Self::Translation(r) => r.model.clone(),
         }
     }
-
-    /*pub fn get_input_token_count(&self, model: &api::Model) -> Option<u32> {
-
-    }
-
-    pub fn get_max_tokens(&self, model: &api::Model) -> Option<u32> {
-
-    }*/
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -168,20 +126,6 @@ pub enum ModelResponse {
 }
 
 impl ModelResponse {
-    pub fn get_token_count(&self) -> Option<u32> {
-        match self {
-            Self::Error(_) => None,
-            Self::Chat(r) => r.usage.clone().map(|u| u.total_tokens),
-            Self::Edit(r) => Some(r.usage.total_tokens),
-            Self::Completion(r) => r.usage.clone().map(|u| u.total_tokens),
-            Self::Moderation(_) => None,
-            Self::Embedding(r) => Some(r.usage.total_tokens),
-            Self::Image(_) => None,
-            Self::Transcription(_) => None,
-            Self::Translation(_) => None,
-        }
-    }
-
     pub fn replace_model_id(&mut self, model_id: String) {
         match self {
             Self::Error(_) => {}
@@ -269,29 +213,41 @@ impl ModelResponse {
     // add get_status_code()
 }
 
+// TODO: Add proxy for image URLs (GPT-4 input, image model output)
+
+struct RoutableRequest {
+    body: ModelRequest,
+    user_id: Uuid,
+    response_channel: oneshot::Sender<ModelResponse>,
+}
+
+type StateInformationDirectRateLimiter<MW = StateInformationMiddleware> = RateLimiter<
+    governor::state::direct::NotKeyed,
+    governor::state::InMemoryState,
+    governor::clock::DefaultClock,
+    MW,
+>;
+
 fn spawn_model_handler(
     model_metadata: api::Model,
     model_callable: impl ModelAPICallable + Send + 'static,
 ) -> mpsc::Sender<RoutableRequest> {
     let (tx, mut rx) =
         mpsc::channel::<RoutableRequest>(if model_metadata.quota.max_queue_size == 0 {
-            usize::MAX
+            64
         } else {
             model_metadata.quota.max_queue_size
         });
 
     tokio::spawn(async move {
         let client = model_callable.init();
-        let limiter = Limiter::new(model_metadata.quota);
+        let limiter = limiter::Limiter::new(model_metadata.quota);
         let mut encode_buffer: [u8; 45] = Uuid::encode_buffer();
 
         while let Some(request) = rx.recv().await {
             let user: &mut str = request.user_id.simple().encode_lower(&mut encode_buffer);
 
-            limiter.requests_per_minute.until_ready().await;
-            limiter.requests_per_hour.until_ready().await;
-
-            // TODO: Add token-based rate limits!
+            limiter.wait_until_request_ready().await;
 
             request.response_channel.send(
                 match model_callable.generate(&client, user, request.body).await {
@@ -311,6 +267,7 @@ fn spawn_model_handler(
 }
 
 pub struct ModelRequestRouter {
+    // TODO: Add concurrent mutable hashmap
     endpoints: HashMap<Uuid, mpsc::Sender<RoutableRequest>>,
 }
 
