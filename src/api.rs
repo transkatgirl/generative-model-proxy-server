@@ -38,15 +38,27 @@ pub struct Role {
     pub quota: Quota,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Model {
     pub label: String,
+
+    #[serde(default)]
+    pub metadata: ModelMetadata,
+
     pub uuid: Uuid,
     pub api: router::ModelAPI,
     pub quota: Quota,
 }
 
-#[derive(Clone, Default, Serialize, Deserialize)]
+#[derive(Default, Serialize, Deserialize, Clone, Debug)]
+pub struct ModelMetadata {
+    pub created: Option<u64>,
+    pub owned_by: Option<String>,
+    pub tokenizer: Option<String>,
+    pub context_len: Option<usize>,
+}
+
+#[derive(Default, Serialize, Deserialize, Clone, Debug)]
 #[serde(default)]
 pub struct Quota {
     pub requests_per_minute: u32,

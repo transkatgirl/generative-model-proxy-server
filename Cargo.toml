@@ -49,3 +49,6 @@ uuid = { version = "1.7", features = [
 	"serde",
 ] }
 priority-queue = "1.3"
+tiktoken-rs = { version = "0.5", features = [
+	"async-openai",
+] }

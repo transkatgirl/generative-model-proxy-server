@@ -1,4 +1,4 @@
-use std::{collections::HashMap, hash::Hash, num::NonZeroU32, sync::Arc};
+use std::{collections::HashMap, hash::Hash, num::NonZeroU32, sync::Arc, future::Future};
 
 use serde::{Deserialize, Serialize};
 
@@ -16,7 +16,7 @@ use async_openai::{
     },
 };
 use serde_json::value::Value;
-use tokio::sync::{mpsc, oneshot, RwLock};
+use tokio::sync::{mpsc::{self, UnboundedReceiver}, oneshot, RwLock};
 
 use crate::{
     api::{self},
@@ -25,6 +25,7 @@ use crate::{
 
 use governor::{
     clock::{Clock, QuantaClock, QuantaUpkeepClock, SystemClock},
+    middleware::{StateInformationMiddleware, StateSnapshot},
     DefaultDirectRateLimiter, Quota, RateLimiter,
 };
 //use governor::{Quota, RateLimiter};
@@ -47,10 +48,10 @@ impl Limiter {
             )),
             tokens_per_minute: RateLimiter::direct(Quota::per_minute(
                 NonZeroU32::new(quota.tokens_per_minute).unwrap_or(NonZeroU32::MAX),
-            )),
+            )), /*.with_middleware::<StateInformationMiddleware>();*/
             tokens_per_hour: RateLimiter::direct(Quota::per_hour(
                 NonZeroU32::new(quota.tokens_per_day / 24).unwrap_or(NonZeroU32::MAX),
-            )),
+            )), /*.with_middleware::<StateInformationMiddleware>();*/
         }
     }
 }
@@ -61,7 +62,7 @@ struct RoutableRequest {
     response_channel: oneshot::Sender<ModelResponse>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(tag = "type")]
 pub enum ModelAPI {
     OpenAIChat(openai_client::OpenAIChatModel),
@@ -73,7 +74,20 @@ pub enum ModelAPI {
     OpenAIAudio(openai_client::OpenAIAudioModel),
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+pub trait ModelAPICallable {
+    type Client: Send;
+
+    fn init(&self) -> Self::Client;
+
+    fn generate(
+        &self,
+        client: &Self::Client,
+        user: &str,
+        request: ModelRequest,
+    ) -> impl Future<Output = Option<ModelResponse>> + Send;
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(untagged)]
 #[allow(clippy::large_enum_variant)]
 // Note: Image/Audio inputs must be added manually, as they will not be serialized/deserialized!
@@ -125,9 +139,17 @@ impl ModelRequest {
             Self::Translation(r) => r.model.clone(),
         }
     }
+
+    /*pub fn get_input_token_count(&self, model: &api::Model) -> Option<u32> {
+
+    }
+
+    pub fn get_max_tokens(&self, model: &api::Model) -> Option<u32> {
+
+    }*/
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
 #[serde(untagged)]
 #[allow(clippy::large_enum_variant)]
 pub enum ModelResponse {
@@ -171,16 +193,38 @@ impl ModelResponse {
         }
     }
 
-    pub fn server_error() -> Self {
+    // Status code 400
+    pub fn error_failed_parse() -> Self {
         Self::Error(ApiError {
-            message: "The proxy server had an error processing your request. You can retry your request, or contact the proxy's administrator if you keep seeing this error.".to_string(),
-            r#type: Some("server_error".to_string()),
+            message: "We could not parse the JSON body of your request. (HINT: This likely means you aren't using your HTTP library correctly. The OpenAI API expects a JSON payload, but what was sent was not valid JSON. If you have trouble figuring out how to fix this, please contact the proxy's administrator.)".to_string(),
+            r#type: Some("invalid_request_error".to_string()),
             param: Some(Value::Null),
             code: Some(Value::Null),
         })
     }
 
-    pub fn model_not_found(model: &str) -> Self {
+    // Status code 401
+    pub fn error_auth_missing() -> Self {
+        Self::Error(ApiError {
+            message: "You didn't provide an API key. You need to provide your API key in an Authorization header using Bearer auth (i.e. Authorization: Bearer YOUR_KEY), or as the password field (with blank username) if you're accessing the API from your browser and are prompted for a username and password. You can obtain an API key from the proxy's administrator.".to_string(),
+            r#type: Some("invalid_request_error".to_string()),
+            param: Some(Value::Null),
+            code: Some(Value::Null),
+        })
+    }
+
+    // Status code 401
+    pub fn error_auth_incorrect() -> Self {
+        Self::Error(ApiError {
+            message: "Incorrect API key provided. You can obtain an API key from the proxy's administrator.".to_string(),
+            r#type: Some("invalid_request_error".to_string()),
+            param: Some(Value::Null),
+            code: Some(Value::String("invalid_api_key".to_string())),
+        })
+    }
+
+    // Status code 404
+    pub fn error_not_found(model: &str) -> Self {
         Self::Error(ApiError {
             message: ["The model `", model, "` does not exist."].concat(),
             r#type: Some("invalid_request_error".to_string()),
@@ -188,6 +232,75 @@ impl ModelResponse {
             code: Some(Value::String("model_not_found".to_string())),
         })
     }
+
+    // Status code 429
+    pub fn error_user_rate_limit() -> Self {
+        Self::Error(ApiError {
+            message: "You exceeded your current quota, please check your API key's rate limits. For more information on this error, contact the proxy's administrator.".to_string(),
+            r#type: Some("insufficient_quota".to_string()),
+            param: Some(Value::Null),
+            code: Some(Value::String("insufficient_quota".to_string())),
+        })
+    }
+
+    // Status code 500
+    pub fn error_internal() -> Self {
+        Self::Error(ApiError {
+            message: "The proxy server had an error processing your request. Sorry about that! You can retry your request, or contact the proxy's administrator if the error persists.".to_string(),
+            r#type: Some("server_error".to_string()),
+            param: Some(Value::Null),
+            code: Some(Value::Null),
+        })
+    }
+
+    // Status code 503
+    pub fn error_internal_rate_limit() -> Self {
+        Self::Error(ApiError {
+            message: "That model is currently overloaded with other requests. You can retry your request, or contact the proxy's administrator if the error persists.".to_string(),
+            r#type: Some("server_error".to_string()),
+            param: Some(Value::Null),
+            code: Some(Value::Null),
+        })
+    }
+
+    // add get_status_code()
+}
+
+fn spawn_model_handler(model_metadata: api::Model, model_callable: impl ModelAPICallable + Send + 'static) -> mpsc::Sender<RoutableRequest>
+{
+    let (tx, mut rx) = mpsc::channel::<RoutableRequest>(if model_metadata.quota.max_queue_size == 0 {
+        usize::MAX
+    } else {
+        model_metadata.quota.max_queue_size
+    });
+
+    tokio::spawn(async move {
+        let client = model_callable.init();
+        let limiter: Limiter = Limiter::new(model_metadata.quota);
+        let mut encode_buffer: [u8; 45] = Uuid::encode_buffer();
+
+        while let Some(request) = rx.recv().await {
+            let user: &mut str =
+                request.user_id.simple().encode_lower(&mut encode_buffer);
+
+            limiter.requests_per_minute.until_ready().await;
+            limiter.requests_per_hour.until_ready().await;
+
+            // TODO: Add token-based rate limits!
+
+            request.response_channel.send(match model_callable.generate(&client, user, request.body).await {
+                Some(mut g) => {
+                    g.replace_model_id(model_metadata.label.clone());
+                    g
+                }
+                None => ModelResponse::error_not_found(&model_metadata.label),
+            });
+
+            // TODO: Add usage statistics!
+        }
+    });
+
+    tx
 }
 
 pub struct ModelRequestRouter {
@@ -199,186 +312,17 @@ impl ModelRequestRouter {
         let mut endpoints: HashMap<Uuid, mpsc::Sender<RoutableRequest>> = HashMap::new();
 
         for model in models {
-            let (tx, mut rx) = mpsc::unbounded_channel::<RoutableRequest>();
-
-            tokio::spawn(async move {
-                match model.api {
-                    ModelAPI::OpenAIChat(m) => {
-                        let client = m.init_client();
-                        let mut encode_buffer = Uuid::encode_buffer();
-
-                        while let Some(request) = rx.recv().await {
-                            let user: &mut str =
-                                request.user_id.simple().encode_lower(&mut encode_buffer);
-
-                            request.response_channel.send(
-                                if let ModelRequest::Chat(r) = request.body {
-                                    match m.generate(&client, user, r).await {
-                                        Ok(g) => ModelResponse::Chat(g),
-                                        Err(g) => ModelResponse::Error(g),
-                                    }
-                                } else {
-                                    ModelResponse::model_not_found(&model.label)
-                                },
-                            );
-                        }
-                    }
-                    ModelAPI::OpenAIEdit(m) => {
-                        let client = m.init_client();
-
-                        while let Some(request) = rx.recv().await {
-                            request.response_channel.send(
-                                if let ModelRequest::Edit(r) = request.body {
-                                    match m.generate(&client, r).await {
-                                        Ok(g) => ModelResponse::Edit(g),
-                                        Err(g) => ModelResponse::Error(g),
-                                    }
-                                } else {
-                                    ModelResponse::model_not_found(&model.label)
-                                },
-                            );
-                        }
-                    }
-                    ModelAPI::OpenAICompletion(m) => {
-                        let client = m.init_client();
-                        let mut encode_buffer = Uuid::encode_buffer();
-
-                        while let Some(request) = rx.recv().await {
-                            let user: &mut str =
-                                request.user_id.simple().encode_lower(&mut encode_buffer);
-
-                            request.response_channel.send(
-                                if let ModelRequest::Completion(r) = request.body {
-                                    match m.generate(&client, user, r).await {
-                                        Ok(g) => ModelResponse::Completion(g),
-                                        Err(g) => ModelResponse::Error(g),
-                                    }
-                                } else {
-                                    ModelResponse::model_not_found(&model.label)
-                                },
-                            );
-                        }
-                    }
-                    ModelAPI::OpenAIModeration(m) => {
-                        let client = m.init_client();
-
-                        while let Some(request) = rx.recv().await {
-                            request.response_channel.send(
-                                if let ModelRequest::Moderation(r) = request.body {
-                                    match m.generate(&client, r).await {
-                                        Ok(g) => ModelResponse::Moderation(g),
-                                        Err(g) => ModelResponse::Error(g),
-                                    }
-                                } else {
-                                    ModelResponse::model_not_found(&model.label)
-                                },
-                            );
-                        }
-                    }
-                    ModelAPI::OpenAIEmbedding(m) => {
-                        let client = m.init_client();
-
-                        while let Some(request) = rx.recv().await {
-                            request.response_channel.send(
-                                if let ModelRequest::Embedding(r) = request.body {
-                                    match m.generate(&client, r).await {
-                                        Ok(g) => ModelResponse::Embedding(g),
-                                        Err(g) => ModelResponse::Error(g),
-                                    }
-                                } else {
-                                    ModelResponse::model_not_found(&model.label)
-                                },
-                            );
-                        }
-                    }
-                    ModelAPI::OpenAIImage(m) => {
-                        let client = m.init_client();
-                        let mut encode_buffer = Uuid::encode_buffer();
-
-                        while let Some(request) = rx.recv().await {
-                            let user: &mut str =
-                                request.user_id.simple().encode_lower(&mut encode_buffer);
-
-                            request.response_channel.send(match request.body {
-                                ModelRequest::Image(r) => {
-                                    match m.generate(&client, user, r).await {
-                                        Ok(g) => ModelResponse::Image(g),
-                                        Err(g) => ModelResponse::Error(g),
-                                    }
-                                }
-                                ModelRequest::ImageEdit(r) => {
-                                    match m.generate_edit(&client, user, r).await {
-                                        Ok(g) => ModelResponse::Image(g),
-                                        Err(g) => ModelResponse::Error(g),
-                                    }
-                                }
-                                ModelRequest::ImageVariation(r) => {
-                                    match m.generate_variation(&client, user, r).await {
-                                        Ok(g) => ModelResponse::Image(g),
-                                        Err(g) => ModelResponse::Error(g),
-                                    }
-                                }
-                                _ => ModelResponse::model_not_found(&model.label),
-                            });
-                        }
-                    }
-                    ModelAPI::OpenAIAudio(m) => {
-                        let client = m.init_client();
-
-                        while let Some(request) = rx.recv().await {
-                            request.response_channel.send(match request.body {
-                                ModelRequest::Transcription(r) => {
-                                    match m.generate_transcription(&client, r).await {
-                                        Ok(g) => ModelResponse::Transcription(g),
-                                        Err(g) => ModelResponse::Error(g),
-                                    }
-                                }
-                                ModelRequest::Translation(r) => {
-                                    match m.generate_translation(&client, r).await {
-                                        Ok(g) => ModelResponse::Translation(g),
-                                        Err(g) => ModelResponse::Error(g),
-                                    }
-                                }
-                                _ => ModelResponse::model_not_found(&model.label),
-                            });
-                        }
-                    }
-                };
+            endpoints.insert(
+                model.uuid,
+                match model.clone().api {
+                ModelAPI::OpenAIChat(inner) => spawn_model_handler(model.clone(), inner),
+                ModelAPI::OpenAIEdit(inner) => spawn_model_handler(model.clone(), inner),
+                ModelAPI::OpenAICompletion(inner) => spawn_model_handler(model.clone(), inner),
+                ModelAPI::OpenAIModeration(inner) => spawn_model_handler(model.clone(), inner),
+                ModelAPI::OpenAIEmbedding(inner) => spawn_model_handler(model.clone(), inner),
+                ModelAPI::OpenAIImage(inner) => spawn_model_handler(model.clone(), inner),
+                ModelAPI::OpenAIAudio(inner) => spawn_model_handler(model.clone(), inner),
             });
-
-            let (tx_2, mut rx_2) =
-                mpsc::channel::<RoutableRequest>(if model.quota.max_queue_size == 0 {
-                    usize::MAX
-                } else {
-                    model.quota.max_queue_size
-                });
-
-            tokio::spawn(async move {
-                let mut limiter = Limiter::new(model.quota);
-
-                while let Some(mut request) = rx_2.recv().await {
-                    let tx_4 = request.response_channel;
-                    let (tx_3, rx_3) = oneshot::channel();
-                    request.response_channel = tx_3;
-
-                    // TODO: Add token-based rate limits!
-
-                    limiter.requests_per_minute.until_ready().await;
-                    limiter.requests_per_hour.until_ready().await;
-
-                    let response = if tx.send(request).is_err() {
-                        ModelResponse::server_error()
-                    } else {
-                        rx_3.await.unwrap_or(ModelResponse::server_error())
-                    };
-
-                    // TODO: Add usage statistics!
-
-                    tx_4.send(response);
-                }
-            });
-
-            endpoints.insert(model.uuid, tx_2);
         }
 
         Self { endpoints }
@@ -404,9 +348,9 @@ impl ModelRequestRouter {
         let mut response = match self.endpoints.get(&model_id) {
             Some(m) => {
                 m.try_send(routeable).unwrap();
-                rx.await.unwrap_or(ModelResponse::server_error())
+                rx.await.unwrap_or(ModelResponse::error_internal())
             }
-            None => ModelResponse::model_not_found(&model_name),
+            None => ModelResponse::error_not_found(&model_name),
         };
 
         response.replace_model_id(model_name);
