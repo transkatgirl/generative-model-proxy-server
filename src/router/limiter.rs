@@ -41,7 +41,7 @@ impl Limiter {
             ))
             .with_middleware::<StateInformationMiddleware>(),
             requests_per_day: RateLimiter::direct(
-                Quota::with_period(Duration::new(86400, 0) / quota.requests_per_day)
+                Quota::with_period(Duration::new(86400, 0))
                     .unwrap()
                     .allow_burst(
                         NonZeroU32::new(quota.requests_per_day).unwrap_or(NonZeroU32::MAX),
@@ -53,7 +53,7 @@ impl Limiter {
             ))
             .with_middleware::<StateInformationMiddleware>(),
             tokens_per_day: RateLimiter::direct(
-                Quota::with_period(Duration::new(86400, 0) / quota.tokens_per_day)
+                Quota::with_period(Duration::new(86400, 0))
                     .unwrap()
                     .allow_burst(NonZeroU32::new(quota.tokens_per_day).unwrap_or(NonZeroU32::MAX)),
             )
