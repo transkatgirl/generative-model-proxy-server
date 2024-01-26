@@ -9,11 +9,10 @@ use async_openai::{
         CreateEmbeddingResponse, CreateImageEditRequest, CreateImageRequest,
         CreateImageVariationRequest, CreateModerationRequest, CreateModerationResponse,
         CreateTranscriptionRequest, CreateTranscriptionResponse, CreateTranslationRequest,
-        CreateTranslationResponse, ImageModel, ImagesResponse, Model, TextModerationModel,
+        CreateTranslationResponse, ImageModel, ImagesResponse, TextModerationModel,
     },
 };
 use serde::{Deserialize, Serialize};
-use serde_json::value::Value;
 use tokio::{
     sync::{
         mpsc::{self, UnboundedReceiver},
@@ -29,6 +28,7 @@ use crate::api;
 mod limiter;
 mod openai_client;
 mod tokenizer;
+mod error;
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(tag = "type")]
@@ -59,7 +59,6 @@ pub trait ModelAPICallable {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(untagged)]
 #[allow(clippy::large_enum_variant)]
-// Note: Image/Audio inputs must be added manually, as they will not be serialized/deserialized!
 pub enum ModelRequest {
     Chat(CreateChatCompletionRequest),
     Edit(CreateEditRequest),
@@ -139,78 +138,6 @@ impl ModelResponse {
             Self::Translation(_) => {}
         }
     }
-
-    // Status code 400
-    pub fn error_failed_parse() -> Self {
-        Self::Error(ApiError {
-            message: "We could not parse the JSON body of your request. (HINT: This likely means you aren't using your HTTP library correctly. The OpenAI API expects a JSON payload, but what was sent was not valid JSON. If you have trouble figuring out how to fix this, please contact the proxy's administrator.)".to_string(),
-            r#type: Some("invalid_request_error".to_string()),
-            param: Some(Value::Null),
-            code: Some(Value::Null),
-        })
-    }
-
-    // Status code 401
-    pub fn error_auth_missing() -> Self {
-        Self::Error(ApiError {
-            message: "You didn't provide an API key. You need to provide your API key in an Authorization header using Bearer auth (i.e. Authorization: Bearer YOUR_KEY), or as the password field (with blank username) if you're accessing the API from your browser and are prompted for a username and password. You can obtain an API key from the proxy's administrator.".to_string(),
-            r#type: Some("invalid_request_error".to_string()),
-            param: Some(Value::Null),
-            code: Some(Value::Null),
-        })
-    }
-
-    // Status code 401
-    pub fn error_auth_incorrect() -> Self {
-        Self::Error(ApiError {
-            message: "Incorrect API key provided. You can obtain an API key from the proxy's administrator.".to_string(),
-            r#type: Some("invalid_request_error".to_string()),
-            param: Some(Value::Null),
-            code: Some(Value::String("invalid_api_key".to_string())),
-        })
-    }
-
-    // Status code 404
-    pub fn error_not_found(model: &str) -> Self {
-        Self::Error(ApiError {
-            message: ["The model `", model, "` does not exist."].concat(),
-            r#type: Some("invalid_request_error".to_string()),
-            param: Some(Value::Null),
-            code: Some(Value::String("model_not_found".to_string())),
-        })
-    }
-
-    // Status code 429
-    pub fn error_user_rate_limit() -> Self {
-        Self::Error(ApiError {
-            message: "You exceeded your current quota, please check your API key's rate limits. For more information on this error, contact the proxy's administrator.".to_string(),
-            r#type: Some("insufficient_quota".to_string()),
-            param: Some(Value::Null),
-            code: Some(Value::String("insufficient_quota".to_string())),
-        })
-    }
-
-    // Status code 500
-    pub fn error_internal() -> Self {
-        Self::Error(ApiError {
-            message: "The proxy server had an error processing your request. Sorry about that! You can retry your request, or contact the proxy's administrator if the error persists.".to_string(),
-            r#type: Some("server_error".to_string()),
-            param: Some(Value::Null),
-            code: Some(Value::Null),
-        })
-    }
-
-    // Status code 503
-    pub fn error_internal_rate_limit() -> Self {
-        Self::Error(ApiError {
-            message: "That model is currently overloaded with other requests. You can retry your request, or contact the proxy's administrator if the error persists.".to_string(),
-            r#type: Some("server_error".to_string()),
-            param: Some(Value::Null),
-            code: Some(Value::Null),
-        })
-    }
-
-    // add get_status_code()
 }
 
 // TODO: Add proxy for image URLs (GPT-4 input, image model output)
@@ -240,49 +167,61 @@ fn spawn_model_handler(
         while let Some(request) = rx.recv().await {
             let user: &mut str = request.user_id.simple().encode_lower(&mut encode_buffer);
 
-            let tokens = request.body.get_token_count(&model_metadata);
-
             if let RequestQuotaStatus::LimitedUntil(point) = limiter.request() {
                 time::sleep_until(Instant::from_std(point)).await;
             }
 
-            match tokens {
-                Some(tokens) => {
-                    // TODO: Error handling!
+            let tokens = request.body.get_token_count(&model_metadata);
+            if let Some(tokens) = tokens {
+                // TODO: Error handling!
 
-                    match request.body.get_max_tokens(&model_metadata) {
-                        Some(max) => match limiter.tokens_bounded(tokens as u32, max as u32) {
-                            TokenQuotaStatus::Ready(_) => {}
-                            TokenQuotaStatus::LimitedUntil(point) => {
-                                time::sleep_until(Instant::from_std(point)).await;
-                            }
-                            TokenQuotaStatus::Oversized => {
-                                todo!()
-                            }
-                        },
-                        None => match limiter.tokens(tokens as u32) {
-                            TokenQuotaStatus::Ready(_) => {}
-                            TokenQuotaStatus::LimitedUntil(point) => {
-                                time::sleep_until(Instant::from_std(point)).await;
-                            }
-                            TokenQuotaStatus::Oversized => {
-                                todo!()
-                            }
-                        },
-                    };
-                }
-                None => {}
+                match request.body.get_max_tokens(&model_metadata) {
+                    Some(max) => match limiter.tokens_bounded(tokens as u32, max as u32) {
+                        TokenQuotaStatus::Ready(_) => {}
+                        TokenQuotaStatus::LimitedUntil(point) => {
+                            time::sleep_until(Instant::from_std(point)).await;
+                        }
+                        TokenQuotaStatus::Oversized => {
+                            todo!()
+                        }
+                    },
+                    None => match limiter.tokens(tokens as u32) {
+                        TokenQuotaStatus::Ready(_) => {}
+                        TokenQuotaStatus::LimitedUntil(point) => {
+                            time::sleep_until(Instant::from_std(point)).await;
+                        }
+                        TokenQuotaStatus::Oversized => {
+                            todo!()
+                        }
+                    },
+                };
             }
 
-            request.response_channel.send(
-                match model_callable.generate(&client, user, request.body).await {
-                    Some(mut g) => {
-                        g.replace_model_id(model_metadata.label.clone());
-                        g
+            let response = match model_callable.generate(&client, user, request.body).await {
+                Some(mut g) => {
+                    g.replace_model_id(model_metadata.label.clone());
+                    g
+                }
+                None => ModelResponse::error_not_found(&model_metadata.label),
+            };
+
+            let result_tokens = response.get_token_count();
+
+            request.response_channel.send(response);
+
+            if let Some(result_tokens) = result_tokens {
+                if result_tokens > tokens.unwrap_or(0) as u32 {
+                    match limiter.tokens(result_tokens - tokens.unwrap_or(0) as u32) {
+                        TokenQuotaStatus::Ready(_) => {}
+                        TokenQuotaStatus::LimitedUntil(point) => {
+                            time::sleep_until(Instant::from_std(point)).await;
+                        }
+                        TokenQuotaStatus::Oversized => {
+                            todo!()
+                        }
                     }
-                    None => ModelResponse::error_not_found(&model_metadata.label),
-                },
-            );
+                }
+            }
 
             // TODO: Add usage statistics!
         }

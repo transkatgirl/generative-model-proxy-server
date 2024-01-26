@@ -91,7 +91,10 @@ struct AppState {
 pub fn api_router() -> Router {
     Router::new()
         .route("/v1/chat/completions", post(openai_model_request))
+        .route("/v1/edits", post(openai_model_request))
         .route("/v1/completions", post(openai_model_request))
+        .route("/v1/moderations", post(openai_model_request))
+        .route("/v1/embeddings", post(openai_model_request))
         .with_state(AppState {
             users: Arc::new(RwLock::new(HashMap::new())),
             roles: Arc::new(RwLock::new(HashMap::new())),
@@ -110,6 +113,8 @@ async fn openai_model_request(
     1. auth
     2.
      */
+
+    // ! Image/Audio inputs must be added manually, as they will not be serialized/deserialized!
 
     todo!()
 }
