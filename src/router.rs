@@ -1,6 +1,5 @@
-use core::num;
 use std::{
-    collections::HashMap, future::Future, hash::Hash, num::NonZeroU32, sync::Arc, thread::spawn, fmt::Debug,
+    collections::HashMap, fmt::Debug, future::Future, sync::Arc,
 };
 
 use async_openai::{
@@ -17,15 +16,15 @@ use async_openai::{
 use serde::{Deserialize, Serialize};
 use tokio::{
     sync::{
-        mpsc::{self, error::SendTimeoutError, UnboundedReceiver},
+        mpsc::{self, error::SendTimeoutError},
         oneshot, RwLock,
     },
-    time::{self, Duration, Instant},
+    time::Duration,
 };
 use tracing::{event, Level};
 use uuid::Uuid;
 
-use self::limiter::{RequestQuotaStatus, TokenQuotaStatus};
+use self::limiter::Limiter;
 use crate::api;
 
 mod error;
@@ -47,7 +46,7 @@ pub enum ModelAPI {
 }
 
 pub trait ModelAPICallable {
-    type Client: Send;
+    type Client: Send + Sync;
 
     fn init(&self) -> Self::Client;
 
@@ -152,11 +151,10 @@ struct RoutableRequest {
 }
 
 // TODO: Add proxy for image URLs (GPT-4 input, image model output)
-
 #[tracing::instrument(level = "trace")]
 fn spawn_model_handler(
     model_metadata: api::Model,
-    model_callable: impl ModelAPICallable + Send + Debug + 'static,
+    model_callable: impl ModelAPICallable + Send + Sync + Debug + 'static,
 ) -> mpsc::Sender<RoutableRequest> {
     let (tx, mut rx) =
         mpsc::channel::<RoutableRequest>(if model_metadata.quota.max_queue_size == 0 {
@@ -166,84 +164,67 @@ fn spawn_model_handler(
         });
 
     tokio::spawn(async move {
-        let client = model_callable.init();
-        let limiter = limiter::Limiter::new(model_metadata.quota);
+        let client = Arc::new(model_callable.init());
+        let limiter = Arc::new(Limiter::new(model_metadata.quota));
         let mut encode_buffer: [u8; 45] = Uuid::encode_buffer();
+        let model_callable = Arc::new(model_callable);
+        let model_metadata = Arc::new(model_metadata);
 
         while let Some(request) = rx.recv().await {
             let user: &mut str = request.user_id.simple().encode_lower(&mut encode_buffer);
 
-            if let RequestQuotaStatus::LimitedUntil(point) = limiter.request() {
-                time::sleep_until(Instant::from_std(point)).await;
-            }
-
-            let tokens = request.body.get_token_count(&model_metadata);
-            if let Some(tokens) = tokens {
-                match request.body.get_max_tokens(&model_metadata) {
-                    Some(max) => match limiter.tokens_bounded(tokens as u32, max as u32) {
-                        TokenQuotaStatus::Ready(_) => {}
-                        TokenQuotaStatus::LimitedUntil(point) => {
-                            time::sleep_until(Instant::from_std(point)).await;
-                        }
-                        TokenQuotaStatus::Oversized => {
-                            ModelResponse::error_prompt_too_long();
-                        }
-                    },
-                    None => match limiter.tokens(tokens as u32) {
-                        TokenQuotaStatus::Ready(_) => {}
-                        TokenQuotaStatus::LimitedUntil(point) => {
-                            time::sleep_until(Instant::from_std(point)).await;
-                        }
-                        TokenQuotaStatus::Oversized => {
-                            ModelResponse::error_user_rate_limit();
-                        }
-                    },
-                };
-            }
-
-            // TODO: Figure out how to spawn request handling into it's own Task
-
-            let response = match model_callable.generate(&client, user, request.body).await {
-                Some(mut g) => {
-                    g.replace_model_id(model_metadata.label.clone());
-                    g
+            let handle = match limiter
+                .wait_model_request(&model_metadata, &request.body)
+                .await
+            {
+                Ok(h) => h,
+                Err(_) => {
+                    if request
+                        .response_channel
+                        .send(ModelResponse::error_user_rate_limit())
+                        .is_err()
+                    {
+                        event!(
+                            Level::WARN,
+                            "Unable to send response to {}",
+                            request.user_id
+                        );
+                    };
+                    continue;
                 }
-                None => ModelResponse::error_model_not_found(&model_metadata.label),
             };
 
-            let result_tokens = response.get_token_count();
-
-            if request.response_channel.send(response).is_err() {
-                event!(
-                    Level::WARN,
-                    "Unable to send response to {}",
-                    request.user_id
-                );
-            };
-
-            if let Some(result_tokens) = result_tokens {
-                if result_tokens > tokens.unwrap_or(0) as u32 {
-                    match limiter.tokens(result_tokens - tokens.unwrap_or(0) as u32) {
-                        TokenQuotaStatus::Ready(_) => {}
-                        TokenQuotaStatus::LimitedUntil(point) => {
-                            time::sleep_until(Instant::from_std(point)).await;
-                        }
-                        TokenQuotaStatus::Oversized => {
-                            event!(
-                                Level::WARN,
-                                "Request by {} to {:?} exceeded maximum request tokens",
-                                request.user_id,
-                                model_metadata.uuid
-                            );
-                            if let TokenQuotaStatus::LimitedUntil(point) =
-                                limiter.tokens(model_metadata.quota.tokens_per_minute)
-                            {
-                                time::sleep_until(Instant::from_std(point)).await;
-                            }
-                        }
+            let user = user.to_string();
+            let limiter = limiter.clone();
+            let client = client.clone();
+            let model_callable = model_callable.clone();
+            let model_metadata = model_metadata.clone();
+            tokio::spawn(async move {
+                let response = match model_callable.generate(&client, &user, request.body).await {
+                    Some(mut g) => {
+                        g.replace_model_id(model_metadata.label.clone());
+                        g
                     }
+                    None => ModelResponse::error_model_not_found(&model_metadata.label),
+                };
+
+                if limiter.model_response(handle, &response).await.is_err() {
+                    event!(
+                        Level::WARN,
+                        "Request by {} to {:?} exceeded maximum request tokens",
+                        request.user_id,
+                        model_metadata.uuid
+                    );
                 }
-            }
+
+                if request.response_channel.send(response).is_err() {
+                    event!(
+                        Level::WARN,
+                        "Unable to send response to {}",
+                        request.user_id
+                    );
+                };
+            });
 
             // TODO: Add usage statistics!
         }
