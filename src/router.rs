@@ -1,5 +1,7 @@
 use core::num;
-use std::{collections::HashMap, future::Future, hash::Hash, num::NonZeroU32, sync::Arc};
+use std::{
+    collections::HashMap, future::Future, hash::Hash, num::NonZeroU32, sync::Arc, thread::spawn,
+};
 
 use async_openai::{
     error::ApiError,
@@ -15,20 +17,21 @@ use async_openai::{
 use serde::{Deserialize, Serialize};
 use tokio::{
     sync::{
-        mpsc::{self, UnboundedReceiver},
+        mpsc::{self, error::SendTimeoutError, UnboundedReceiver},
         oneshot, RwLock,
     },
-    time::{self, Instant},
+    time::{self, Duration, Instant},
 };
+use tracing::{event, Level};
 use uuid::Uuid;
 
 use self::limiter::{RequestQuotaStatus, TokenQuotaStatus};
 use crate::api;
 
+mod error;
 mod limiter;
 mod openai_client;
 mod tokenizer;
-mod error;
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(tag = "type")]
@@ -140,13 +143,13 @@ impl ModelResponse {
     }
 }
 
-// TODO: Add proxy for image URLs (GPT-4 input, image model output)
-
 struct RoutableRequest {
     body: ModelRequest,
     user_id: Uuid,
     response_channel: oneshot::Sender<ModelResponse>,
 }
+
+// TODO: Add proxy for image URLs (GPT-4 input, image model output)
 
 fn spawn_model_handler(
     model_metadata: api::Model,
@@ -173,8 +176,6 @@ fn spawn_model_handler(
 
             let tokens = request.body.get_token_count(&model_metadata);
             if let Some(tokens) = tokens {
-                // TODO: Error handling!
-
                 match request.body.get_max_tokens(&model_metadata) {
                     Some(max) => match limiter.tokens_bounded(tokens as u32, max as u32) {
                         TokenQuotaStatus::Ready(_) => {}
@@ -182,7 +183,7 @@ fn spawn_model_handler(
                             time::sleep_until(Instant::from_std(point)).await;
                         }
                         TokenQuotaStatus::Oversized => {
-                            todo!()
+                            ModelResponse::error_prompt_too_long();
                         }
                     },
                     None => match limiter.tokens(tokens as u32) {
@@ -191,23 +192,31 @@ fn spawn_model_handler(
                             time::sleep_until(Instant::from_std(point)).await;
                         }
                         TokenQuotaStatus::Oversized => {
-                            todo!()
+                            ModelResponse::error_user_rate_limit();
                         }
                     },
                 };
             }
+
+            // TODO: Figure out how to spawn request handling into it's own Task
 
             let response = match model_callable.generate(&client, user, request.body).await {
                 Some(mut g) => {
                     g.replace_model_id(model_metadata.label.clone());
                     g
                 }
-                None => ModelResponse::error_not_found(&model_metadata.label),
+                None => ModelResponse::error_model_not_found(&model_metadata.label),
             };
 
             let result_tokens = response.get_token_count();
 
-            request.response_channel.send(response);
+            if request.response_channel.send(response).is_err() {
+                event!(
+                    Level::WARN,
+                    "Unable to send response to {}",
+                    request.user_id
+                );
+            };
 
             if let Some(result_tokens) = result_tokens {
                 if result_tokens > tokens.unwrap_or(0) as u32 {
@@ -217,7 +226,17 @@ fn spawn_model_handler(
                             time::sleep_until(Instant::from_std(point)).await;
                         }
                         TokenQuotaStatus::Oversized => {
-                            todo!()
+                            event!(
+                                Level::WARN,
+                                "Request by {} to {:?} exceeded maximum request tokens",
+                                request.user_id,
+                                model_metadata.uuid
+                            );
+                            if let TokenQuotaStatus::LimitedUntil(point) =
+                                limiter.tokens(model_metadata.quota.tokens_per_minute)
+                            {
+                                time::sleep_until(Instant::from_std(point)).await;
+                            }
                         }
                     }
                 }
@@ -231,30 +250,36 @@ fn spawn_model_handler(
 }
 
 pub struct ModelRequestRouter {
-    // TODO: Add concurrent mutable hashmap
-    endpoints: HashMap<Uuid, mpsc::Sender<RoutableRequest>>,
+    endpoints: Arc<RwLock<HashMap<Uuid, mpsc::Sender<RoutableRequest>>>>,
 }
 
 impl ModelRequestRouter {
-    pub fn new(models: Vec<api::Model>) -> Self {
-        let mut endpoints: HashMap<Uuid, mpsc::Sender<RoutableRequest>> = HashMap::new();
-
-        for model in models {
-            endpoints.insert(
-                model.uuid,
-                match model.clone().api {
-                    ModelAPI::OpenAIChat(inner) => spawn_model_handler(model.clone(), inner),
-                    ModelAPI::OpenAIEdit(inner) => spawn_model_handler(model.clone(), inner),
-                    ModelAPI::OpenAICompletion(inner) => spawn_model_handler(model.clone(), inner),
-                    ModelAPI::OpenAIModeration(inner) => spawn_model_handler(model.clone(), inner),
-                    ModelAPI::OpenAIEmbedding(inner) => spawn_model_handler(model.clone(), inner),
-                    ModelAPI::OpenAIImage(inner) => spawn_model_handler(model.clone(), inner),
-                    ModelAPI::OpenAIAudio(inner) => spawn_model_handler(model.clone(), inner),
-                },
-            );
+    pub fn new() -> Self {
+        Self {
+            endpoints: Arc::new(RwLock::new(HashMap::new())),
         }
+    }
 
-        Self { endpoints }
+    pub async fn add_model(&self, model: api::Model) {
+        let handler = match model.clone().api {
+            ModelAPI::OpenAIChat(inner) => spawn_model_handler(model.clone(), inner),
+            ModelAPI::OpenAIEdit(inner) => spawn_model_handler(model.clone(), inner),
+            ModelAPI::OpenAICompletion(inner) => spawn_model_handler(model.clone(), inner),
+            ModelAPI::OpenAIModeration(inner) => spawn_model_handler(model.clone(), inner),
+            ModelAPI::OpenAIEmbedding(inner) => spawn_model_handler(model.clone(), inner),
+            ModelAPI::OpenAIImage(inner) => spawn_model_handler(model.clone(), inner),
+            ModelAPI::OpenAIAudio(inner) => spawn_model_handler(model.clone(), inner),
+        };
+
+        self.endpoints.write().await.insert(model.uuid, handler);
+    }
+
+    pub async fn remove_model(&self, model_id: &Uuid) -> Option<()> {
+        self.endpoints.write().await.remove(model_id).map(|_| ())
+    }
+
+    async fn get_endpoint(&self, model_id: &Uuid) -> Option<mpsc::Sender<RoutableRequest>> {
+        self.endpoints.read().await.get(model_id).cloned()
     }
 
     pub async fn route_request(
@@ -266,24 +291,22 @@ impl ModelRequestRouter {
     ) -> ModelResponse {
         let (tx, rx) = oneshot::channel();
 
+        let model_name = request.get_model();
         let routeable = RoutableRequest {
-            body: request.clone(),
+            body: request,
             user_id,
             response_channel: tx,
         };
 
-        let model_name = request.get_model();
-
-        let mut response = match self.endpoints.get(&model_id) {
-            Some(m) => {
-                m.try_send(routeable).unwrap();
-                rx.await.unwrap_or(ModelResponse::error_internal())
-            }
-            None => ModelResponse::error_not_found(&model_name),
-        };
-
-        response.replace_model_id(model_name);
-
-        response
+        match self.get_endpoint(&model_id).await {
+            Some(m) => match m.send_timeout(routeable, Duration::new(5, 0)).await {
+                Ok(_) => rx.await.unwrap_or(ModelResponse::error_internal()),
+                Err(err) => match err {
+                    SendTimeoutError::Closed(_) => ModelResponse::error_internal(),
+                    SendTimeoutError::Timeout(_) => ModelResponse::error_internal_rate_limit(),
+                },
+            },
+            None => ModelResponse::error_model_not_found(&model_name),
+        }
     }
 }

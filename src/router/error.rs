@@ -7,7 +7,17 @@ impl ModelResponse {
     // Status code 400
     pub fn error_failed_parse() -> Self {
         Self::Error(ApiError {
-            message: "We could not parse the JSON body of your request. (HINT: This likely means you aren't using your HTTP library correctly. The OpenAI API expects a JSON payload, but what was sent was not valid JSON. If you have trouble figuring out how to fix this, please contact the proxy's administrator.)".to_string(),
+            message: "We could not parse the JSON body of your request. (HINT: This likely means you aren't using your HTTP library correctly. The OpenAI API expects a JSON payload, but what was sent was not valid JSON. If you have trouble figuring out how to fix this, contact the proxy's administrator.)".to_string(),
+            r#type: Some("invalid_request_error".to_string()),
+            param: Some(Value::Null),
+            code: Some(Value::Null),
+        })
+    }
+
+    // Status code 400
+    pub fn error_prompt_too_long() -> Self {
+        Self::Error(ApiError {
+            message: "Your messages exceeded the model's maximum context length. Please reduce the length of the message. If you belive you are seeing this message in error, contact the proxy's administrator.".to_string(),
             r#type: Some("invalid_request_error".to_string()),
             param: Some(Value::Null),
             code: Some(Value::Null),
@@ -35,12 +45,27 @@ impl ModelResponse {
     }
 
     // Status code 404
-    pub fn error_not_found(model: &str) -> Self {
+    pub fn error_model_not_found(model: &str) -> Self {
         Self::Error(ApiError {
-            message: ["The model `", model, "` does not exist."].concat(),
+            message: [
+                "The model `",
+                model,
+                "` does not exist. Contact the proxy's administrator for more information.",
+            ]
+            .concat(),
             r#type: Some("invalid_request_error".to_string()),
             param: Some(Value::Null),
             code: Some(Value::String("model_not_found".to_string())),
+        })
+    }
+
+    // Status code 404
+    pub fn error_endpoint_not_found(method: &str, url: &str) -> Self {
+        Self::Error(ApiError {
+            message: ["Unknown request URL: ", method, " ", url, ". Please check the URL for typos, or contact the proxy's administrator for information regarding available endpoints."].concat(),
+            r#type: Some("invalid_request_error".to_string()),
+            param: Some(Value::Null),
+            code: Some(Value::String("unknown_url".to_string())),
         })
     }
 
