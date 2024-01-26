@@ -1,6 +1,6 @@
 use core::num;
 use std::{
-    collections::HashMap, future::Future, hash::Hash, num::NonZeroU32, sync::Arc, thread::spawn,
+    collections::HashMap, future::Future, hash::Hash, num::NonZeroU32, sync::Arc, thread::spawn, fmt::Debug,
 };
 
 use async_openai::{
@@ -76,6 +76,7 @@ pub enum ModelRequest {
 }
 
 impl ModelRequest {
+    #[tracing::instrument(level = "debug")]
     pub fn get_model(&self) -> String {
         match self {
             Self::Chat(r) => r.model.clone(),
@@ -128,6 +129,7 @@ pub enum ModelResponse {
 }
 
 impl ModelResponse {
+    #[tracing::instrument(level = "debug")]
     pub fn replace_model_id(&mut self, model_id: String) {
         match self {
             Self::Error(_) => {}
@@ -151,9 +153,10 @@ struct RoutableRequest {
 
 // TODO: Add proxy for image URLs (GPT-4 input, image model output)
 
+#[tracing::instrument(level = "trace")]
 fn spawn_model_handler(
     model_metadata: api::Model,
-    model_callable: impl ModelAPICallable + Send + 'static,
+    model_callable: impl ModelAPICallable + Send + Debug + 'static,
 ) -> mpsc::Sender<RoutableRequest> {
     let (tx, mut rx) =
         mpsc::channel::<RoutableRequest>(if model_metadata.quota.max_queue_size == 0 {
@@ -249,17 +252,20 @@ fn spawn_model_handler(
     tx
 }
 
+#[derive(Debug)]
 pub struct ModelRequestRouter {
     endpoints: Arc<RwLock<HashMap<Uuid, mpsc::Sender<RoutableRequest>>>>,
 }
 
 impl ModelRequestRouter {
+    #[tracing::instrument(level = "trace")]
     pub fn new() -> Self {
         Self {
             endpoints: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
+    #[tracing::instrument(level = "debug")]
     pub async fn add_model(&self, model: api::Model) {
         let handler = match model.clone().api {
             ModelAPI::OpenAIChat(inner) => spawn_model_handler(model.clone(), inner),
@@ -274,14 +280,17 @@ impl ModelRequestRouter {
         self.endpoints.write().await.insert(model.uuid, handler);
     }
 
+    #[tracing::instrument(level = "debug")]
     pub async fn remove_model(&self, model_id: &Uuid) -> Option<()> {
         self.endpoints.write().await.remove(model_id).map(|_| ())
     }
 
+    #[tracing::instrument(level = "trace")]
     async fn get_endpoint(&self, model_id: &Uuid) -> Option<mpsc::Sender<RoutableRequest>> {
         self.endpoints.read().await.get(model_id).cloned()
     }
 
+    #[tracing::instrument(level = "debug")]
     pub async fn route_request(
         &self,
         model_id: Uuid,

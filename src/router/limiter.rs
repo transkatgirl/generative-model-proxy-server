@@ -66,7 +66,7 @@ impl Limiter {
         }
     }
 
-    #[tracing::instrument(level = "trace")]
+    #[tracing::instrument(level = "debug")]
     pub fn request(&self) -> RequestQuotaStatus {
         let mut capacity = u32::MAX;
         let mut earliest = Instant::now();
@@ -98,7 +98,7 @@ impl Limiter {
         }
     }
 
-    #[tracing::instrument(level = "trace")]
+    #[tracing::instrument(level = "debug")]
     pub fn tokens(&self, tokens: u32) -> TokenQuotaStatus {
         let tokens = NonZeroU32::new(tokens).unwrap_or(NonZeroU32::MIN);
         let mut capacity = u32::MAX;
@@ -141,7 +141,7 @@ impl Limiter {
         }
     }
 
-    #[tracing::instrument(level = "trace")]
+    #[tracing::instrument(level = "debug")]
     pub fn tokens_bounded(&self, min_tokens: u32, max_tokens: u32) -> TokenQuotaStatus {
         if min_tokens > max_tokens
             || max_tokens > self.quota.tokens_per_minute.min(self.quota.tokens_per_day)

@@ -22,6 +22,7 @@ fn init_openai_client(endpoint: OpenAIEndpoint) -> Client<OpenAIConfig> {
     async_openai::Client::with_config(config)
 }
 
+#[tracing::instrument(level = "trace")]
 fn convert_openai_error(error: OpenAIError) -> ModelResponse {
     match error {
         OpenAIError::ApiError(err) => ModelResponse::Error(err),

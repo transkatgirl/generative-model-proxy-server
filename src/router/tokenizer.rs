@@ -11,6 +11,7 @@ use super::{ModelRequest, ModelResponse};
 use crate::api;
 
 impl api::Model {
+    #[tracing::instrument(level = "trace")]
     fn get_tokenizer(&self) -> Option<Tokenizer> {
         match self.metadata.tokenizer.as_deref() {
             Some("cl100k_base") => Some(Tokenizer::Cl100kBase),
@@ -22,6 +23,7 @@ impl api::Model {
         }
     }
 
+    #[tracing::instrument(level = "trace")]
     fn get_context_len(&self) -> usize {
         match self.metadata.context_len {
             Some(len) => len,
@@ -164,6 +166,7 @@ impl api::Model {
 }
 
 impl ModelRequest {
+    #[tracing::instrument(level = "debug")]
     pub fn get_token_count(&self, model: &api::Model) -> Option<usize> {
         match self {
             Self::Chat(r) => Some(model.get_token_count_messages(&r.messages)),
@@ -210,6 +213,7 @@ impl ModelRequest {
         }
     }
 
+    #[tracing::instrument(level = "debug")]
     pub fn get_max_tokens(&self, model: &api::Model) -> Option<usize> {
         match self {
             Self::Chat(r) => Some(
@@ -245,6 +249,7 @@ impl ModelRequest {
 }
 
 impl ModelResponse {
+    #[tracing::instrument(level = "debug")]
     pub fn get_token_count(&self) -> Option<u32> {
         match self {
             Self::Error(_) => None,
