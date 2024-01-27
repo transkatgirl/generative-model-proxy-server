@@ -1,11 +1,11 @@
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, hash::Hash, sync::Arc};
+use std::{collections::HashMap, fmt::Debug, hash::Hash, sync::Arc};
 use uuid::Uuid;
 
 use reqwest::Client;
 use tokio::sync::{mpsc, RwLock};
 
-use crate::router;
+use crate::router::{self, ModelAPI};
 
 use axum::{
     extract::{Path, Request, State},
@@ -46,7 +46,7 @@ pub struct Model {
     pub metadata: ModelMetadata,
 
     pub uuid: Uuid,
-    pub api: router::ModelAPI,
+    pub api: ModelAPI,
     pub quota: Quota,
 }
 
@@ -90,11 +90,11 @@ struct AppState {
 
 pub fn api_router() -> Router {
     Router::new()
-        .route("/v1/chat/completions", post(openai_model_request))
-        .route("/v1/edits", post(openai_model_request))
-        .route("/v1/completions", post(openai_model_request))
-        .route("/v1/moderations", post(openai_model_request))
-        .route("/v1/embeddings", post(openai_model_request))
+        .route("/v1/chat/completions", post(model_request))
+        .route("/v1/edits", post(model_request))
+        .route("/v1/completions", post(model_request))
+        .route("/v1/moderations", post(model_request))
+        .route("/v1/embeddings", post(model_request))
         .with_state(AppState {
             users: Arc::new(RwLock::new(HashMap::new())),
             roles: Arc::new(RwLock::new(HashMap::new())),
@@ -105,7 +105,7 @@ pub fn api_router() -> Router {
 
 //async fn authenticate(State(state): State<AppState>, mut req: Request, next: Next) -> Response {}
 
-async fn openai_model_request(
+async fn model_request(
     State(state): State<AppState>,
     Json(payload): Json<router::ModelRequest>,
 ) -> (StatusCode, Json<router::ModelResponse>) {

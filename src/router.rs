@@ -1,19 +1,9 @@
 use std::{
-    collections::HashMap, fmt::Debug, future::Future, sync::Arc,
+    any::Any, collections::HashMap, fmt::Debug,
+    future::Future, sync::Arc,
 };
 
-use async_openai::{
-    error::ApiError,
-    types::{
-        CreateChatCompletionRequest, CreateChatCompletionResponse, CreateCompletionRequest,
-        CreateCompletionResponse, CreateEditRequest, CreateEditResponse, CreateEmbeddingRequest,
-        CreateEmbeddingResponse, CreateImageEditRequest, CreateImageRequest,
-        CreateImageVariationRequest, CreateModerationRequest, CreateModerationResponse,
-        CreateTranscriptionRequest, CreateTranscriptionResponse, CreateTranslationRequest,
-        CreateTranslationResponse, ImageModel, ImagesResponse, TextModerationModel,
-    },
-};
-use serde::{Deserialize, Serialize};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use tokio::{
     sync::{
         mpsc::{self, error::SendTimeoutError},
@@ -27,134 +17,246 @@ use uuid::Uuid;
 use self::limiter::Limiter;
 use crate::api;
 
-mod error;
 mod limiter;
-mod openai_client;
+mod openai;
 mod tokenizer;
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(tag = "type")]
 #[allow(clippy::enum_variant_names)]
 pub enum ModelAPI {
-    OpenAIChat(openai_client::OpenAIChatModel),
-    OpenAIEdit(openai_client::OpenAIEditModel),
-    OpenAICompletion(openai_client::OpenAICompletionModel),
-    OpenAIModeration(openai_client::OpenAIModerationModel),
-    OpenAIEmbedding(openai_client::OpenAIEmbeddingModel),
-    OpenAIImage(openai_client::OpenAIImageModel),
-    OpenAIAudio(openai_client::OpenAIAudioModel),
+    OpenAIChat(openai::OpenAIChatModel),
+    OpenAIEdit(openai::OpenAIEditModel),
+    OpenAICompletion(openai::OpenAICompletionModel),
+    OpenAIModeration(openai::OpenAIModerationModel),
+    OpenAIEmbedding(openai::OpenAIEmbeddingModel),
+    //OpenAIImage(openai::OpenAIImageModel),
+    //OpenAIAudio(openai::OpenAIAudioModel),
 }
 
-pub trait ModelAPICallable {
+trait CallableModelAPI: Send + Sync + Debug + Serialize + DeserializeOwned {
     type Client: Send + Sync;
+    type ModelRequest: RoutableModelRequest;
+    type ModelResponse: RoutableModelResponse;
+    type ModelError: RoutableModelError;
 
     fn init(&self) -> Self::Client;
+
+    fn to_request(&self, request: impl RoutableModelRequest + 'static) -> Option<Self::ModelRequest>;
+
+    fn to_response(&self, error_code: ModelErrorCode) -> Self::ModelError;
 
     fn generate(
         &self,
         client: &Self::Client,
         user: &str,
-        request: ModelRequest,
-    ) -> impl Future<Output = Option<ModelResponse>> + Send;
+        request: Self::ModelRequest,
+    ) -> impl Future<Output = Result<Self::ModelResponse, Self::ModelError>> + Send;
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Debug)]
 #[serde(untagged)]
-#[allow(clippy::large_enum_variant)]
+#[allow(clippy::large_enum_variant, clippy::enum_variant_names)]
 pub enum ModelRequest {
-    Chat(CreateChatCompletionRequest),
-    Edit(CreateEditRequest),
-    Completion(CreateCompletionRequest),
-    Moderation(CreateModerationRequest),
-    Embedding(CreateEmbeddingRequest),
-    Image(CreateImageRequest),
-    ImageEdit(CreateImageEditRequest),
-    ImageVariation(CreateImageVariationRequest),
-    Transcription(CreateTranscriptionRequest),
-    Translation(CreateTranslationRequest),
+    OpenAIChat(openai::CreateChatCompletionRequest),
+    OpenAIEdit(openai::CreateEditRequest),
+    OpenAICompletion(openai::CreateCompletionRequest),
+    OpenAIModeration(openai::CreateModerationRequest),
+    OpenAIEmbedding(openai::CreateEmbeddingRequest),
+    /*OpenAIImage(openai::CreateImageRequest),
+    OpenAIImageEdit(openai::CreateImageEditRequest),
+    OpenAIImageVariation(openai::CreateImageVariationRequest),
+    OpenAITranscription(openai::CreateTranscriptionRequest),
+    OpenAITranslation(openai::CreateTranslationRequest),*/
 }
 
-impl ModelRequest {
-    #[tracing::instrument(level = "debug")]
-    pub fn get_model(&self) -> String {
+trait RoutableModelRequest: Send + Sync + Debug + Serialize + DeserializeOwned {
+    fn get_model(&self) -> String;
+
+    fn get_token_count(&self, model: &api::Model) -> Option<u32>;
+
+    fn get_max_tokens(&self, model: &api::Model) -> Option<u32>;
+}
+
+impl RoutableModelRequest for ModelRequest {
+    fn get_model(&self) -> String {
         match self {
-            Self::Chat(r) => r.model.clone(),
-            Self::Edit(r) => r.model.clone(),
-            Self::Completion(r) => r.model.clone(),
-            Self::Moderation(r) => match r.model {
-                Some(TextModerationModel::Stable) => "text-moderation-stable",
-                Some(TextModerationModel::Latest) => "text-moderation-latest",
-                None => "text-moderation-latest",
-            }
-            .to_string(),
-            Self::Embedding(r) => r.model.clone(),
-            Self::Image(r) => match r.model.clone() {
-                Some(ImageModel::DallE3) => "dall-e-3".to_string(),
-                Some(ImageModel::DallE2) => "dall-e-2".to_string(),
-                Some(ImageModel::Other(m)) => m,
-                None => "dall-e-2".to_string(),
-            },
-            Self::ImageEdit(r) => match r.model.clone() {
-                Some(ImageModel::DallE3) => "dall-e-3".to_string(),
-                Some(ImageModel::DallE2) => "dall-e-2".to_string(),
-                Some(ImageModel::Other(m)) => m,
-                None => "dall-e-2".to_string(),
-            },
-            Self::ImageVariation(r) => match r.model.clone() {
-                Some(ImageModel::DallE3) => "dall-e-3".to_string(),
-                Some(ImageModel::DallE2) => "dall-e-2".to_string(),
-                Some(ImageModel::Other(m)) => m,
-                None => "dall-e-2".to_string(),
-            },
-            Self::Transcription(r) => r.model.clone(),
-            Self::Translation(r) => r.model.clone(),
+            Self::OpenAIChat(r) => r.get_model(),
+            Self::OpenAIEdit(r) => r.get_model(),
+            Self::OpenAICompletion(r) => r.get_model(),
+            Self::OpenAIModeration(r) => r.get_model(),
+            Self::OpenAIEmbedding(r) => r.get_model(),
+        }
+    }
+
+    fn get_token_count(&self, model: &api::Model) -> Option<u32> {
+        match self {
+            Self::OpenAIChat(r) => r.get_token_count(model),
+            Self::OpenAIEdit(r) => r.get_token_count(model),
+            Self::OpenAICompletion(r) => r.get_token_count(model),
+            Self::OpenAIModeration(r) => r.get_token_count(model),
+            Self::OpenAIEmbedding(r) => r.get_token_count(model),
+        }
+    }
+
+    fn get_max_tokens(&self, model: &api::Model) -> Option<u32> {
+        match self {
+            Self::OpenAIChat(r) => r.get_max_tokens(model),
+            Self::OpenAIEdit(r) => r.get_max_tokens(model),
+            Self::OpenAICompletion(r) => r.get_max_tokens(model),
+            Self::OpenAIModeration(r) => r.get_max_tokens(model),
+            Self::OpenAIEmbedding(r) => r.get_max_tokens(model),
         }
     }
 }
 
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(untagged)]
-#[allow(clippy::large_enum_variant)]
+#[allow(clippy::large_enum_variant, clippy::enum_variant_names)]
 pub enum ModelResponse {
-    Error(ApiError),
-    Chat(CreateChatCompletionResponse),
-    Edit(CreateEditResponse),
-    Completion(CreateCompletionResponse),
-    Moderation(CreateModerationResponse),
-    Embedding(CreateEmbeddingResponse),
-    Image(ImagesResponse),
-    Transcription(CreateTranscriptionResponse),
-    Translation(CreateTranslationResponse),
+    OpenAIChat(openai::CreateChatCompletionResponse),
+    OpenAIEdit(openai::CreateEditResponse),
+    OpenAICompletion(openai::CreateCompletionResponse),
+    OpenAIModeration(openai::CreateModerationResponse),
+    OpenAIEmbedding(openai::CreateEmbeddingResponse),
+    /*OpenAIImage(openai::ImagesResponse),
+    OpenAITranscription(openai::CreateTranscriptionResponse),
+    OpenAITranslation(openai::CreateTranslationResponse),*/
+}
+
+trait RoutableModelResponse: Send + Sync + Debug + Serialize + DeserializeOwned {
+    fn replace_model_id(&mut self, model_id: String);
+
+    fn get_token_count(&self) -> Option<u32>;
+}
+
+impl RoutableModelResponse for ModelResponse {
+    fn replace_model_id(&mut self, model_id: String) {
+        match self {
+            Self::OpenAIChat(r) => r.replace_model_id(model_id),
+            Self::OpenAIEdit(r) => r.replace_model_id(model_id),
+            Self::OpenAICompletion(r) => r.replace_model_id(model_id),
+            Self::OpenAIModeration(r) => r.replace_model_id(model_id),
+            Self::OpenAIEmbedding(r) => r.replace_model_id(model_id),
+        }
+    }
+
+    fn get_token_count(&self) -> Option<u32> {
+        match self {
+            Self::OpenAIChat(r) => r.get_token_count(),
+            Self::OpenAIEdit(r) => r.get_token_count(),
+            Self::OpenAICompletion(r) => r.get_token_count(),
+            Self::OpenAIModeration(r) => r.get_token_count(),
+            Self::OpenAIEmbedding(r) => r.get_token_count(),
+        }
+    }
 }
 
 impl ModelResponse {
-    #[tracing::instrument(level = "debug")]
-    pub fn replace_model_id(&mut self, model_id: String) {
-        match self {
-            Self::Error(_) => {}
-            Self::Chat(r) => r.model = model_id,
-            Self::Edit(_) => {}
-            Self::Completion(r) => r.model = model_id,
-            Self::Moderation(r) => r.model = model_id,
-            Self::Embedding(r) => r.model = model_id,
-            Self::Image(_) => {}
-            Self::Transcription(_) => {}
-            Self::Translation(_) => {}
+    fn from(item: impl RoutableModelResponse + 'static) -> Self {
+        let item_any: Box<dyn Any> = Box::new(item);
+
+        if item_any.is::<openai::CreateChatCompletionResponse>() {
+            return ModelResponse::OpenAIChat(*item_any.downcast::<openai::CreateChatCompletionResponse>().unwrap())
         }
+
+        if item_any.is::<openai::CreateEditResponse>() {
+            return ModelResponse::OpenAIEdit(*item_any.downcast::<openai::CreateEditResponse>().unwrap())
+        }
+
+        if item_any.is::<openai::CreateCompletionResponse>() {
+            return ModelResponse::OpenAICompletion(*item_any.downcast::<openai::CreateCompletionResponse>().unwrap())
+        }
+
+        if item_any.is::<openai::CreateModerationResponse>() {
+            return ModelResponse::OpenAIModeration(*item_any.downcast::<openai::CreateModerationResponse>().unwrap())
+        }
+
+        if item_any.is::<openai::CreateEmbeddingResponse>() {
+            return ModelResponse::OpenAIEmbedding(*item_any.downcast::<openai::CreateEmbeddingResponse>().unwrap())
+        }
+
+        panic!()
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug)]
+pub enum ModelErrorCode {
+    FailedParse,
+    PromptTooLong,
+    AuthMissing,
+    AuthIncorrect,
+    ModelNotFound,
+    EndpointNotFound,
+    RateLimitUser,
+    RateLimitModel,
+    InternalError,
+    OtherModelError,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+#[serde(untagged)]
+pub enum ModelError {
+    OpenAIError(openai::ApiError),
+    NoAPI(ModelErrorCode),
+}
+
+trait RoutableModelError: RoutableModelResponse {
+    fn get_error_code(&self) -> ModelErrorCode;
+}
+
+impl RoutableModelResponse for ModelError {
+    fn replace_model_id(&mut self, model_id: String) {
+        match self {
+            Self::OpenAIError(r) => r.replace_model_id(model_id),
+            Self::NoAPI(_) => {}
+        }
+    }
+
+    fn get_token_count(&self) -> Option<u32> {
+        match self {
+            Self::OpenAIError(r) => r.get_token_count(),
+            Self::NoAPI(_) => None,
+        }
+    }
+}
+
+impl RoutableModelError for ModelError {
+    fn get_error_code(&self) -> ModelErrorCode {
+        match self {
+            Self::OpenAIError(e) => e.get_error_code(),
+            Self::NoAPI(e) => *e,
+        }
+    }
+}
+
+impl ModelError {
+    fn from(item: impl RoutableModelError + 'static) -> Self {
+        let item_any: Box<dyn Any> = Box::new(item);
+
+        if item_any.is::<openai::ApiError>() {
+            return ModelError::OpenAIError(*item_any.downcast::<openai::ApiError>().unwrap())
+        }
+
+        if item_any.is::<ModelErrorCode>() {
+            return ModelError::NoAPI(*item_any.downcast::<ModelErrorCode>().unwrap())
+        }
+
+        panic!()
     }
 }
 
 struct RoutableRequest {
     body: ModelRequest,
     user_id: Uuid,
-    response_channel: oneshot::Sender<ModelResponse>,
+    response_channel: oneshot::Sender<Result<ModelResponse, ModelError>>,
 }
 
 // TODO: Add proxy for image URLs (GPT-4 input, image model output)
 #[tracing::instrument(level = "trace")]
 fn spawn_model_handler(
     model_metadata: api::Model,
-    model_callable: impl ModelAPICallable + Send + Sync + Debug + 'static,
+    model_callable: impl CallableModelAPI + 'static,
 ) -> mpsc::Sender<RoutableRequest> {
     let (tx, mut rx) =
         mpsc::channel::<RoutableRequest>(if model_metadata.quota.max_queue_size == 0 {
@@ -181,7 +283,9 @@ fn spawn_model_handler(
                 Err(_) => {
                     if request
                         .response_channel
-                        .send(ModelResponse::error_user_rate_limit())
+                        .send(Err(ModelError::from(
+                            model_callable.to_response(ModelErrorCode::RateLimitUser),
+                        )))
                         .is_err()
                     {
                         event!(
@@ -200,15 +304,22 @@ fn spawn_model_handler(
             let model_callable = model_callable.clone();
             let model_metadata = model_metadata.clone();
             tokio::spawn(async move {
-                let response = match model_callable.generate(&client, &user, request.body).await {
-                    Some(mut g) => {
-                        g.replace_model_id(model_metadata.label.clone());
-                        g
-                    }
-                    None => ModelResponse::error_model_not_found(&model_metadata.label),
-                };
+                let response = match model_callable.to_request(request.body) {
+                    Some(request) => model_callable.generate(&client, &user, request).await,
+                    None => Err(model_callable.to_response(ModelErrorCode::ModelNotFound)),
+                }
+                .map(|mut response| {
+                    response.replace_model_id(model_metadata.label.clone());
+                    ModelResponse::from(response)
+                })
+                .map_err(ModelError::from);
 
-                if limiter.model_response(handle, &response).await.is_err() {
+                if match &response {
+                    Ok(r) => limiter.model_response(handle, r).await,
+                    Err(e) => limiter.model_response(handle, e).await,
+                }
+                .is_err()
+                {
                     event!(
                         Level::WARN,
                         "Request by {} to {:?} exceeded maximum request tokens",
@@ -254,8 +365,8 @@ impl ModelRequestRouter {
             ModelAPI::OpenAICompletion(inner) => spawn_model_handler(model.clone(), inner),
             ModelAPI::OpenAIModeration(inner) => spawn_model_handler(model.clone(), inner),
             ModelAPI::OpenAIEmbedding(inner) => spawn_model_handler(model.clone(), inner),
-            ModelAPI::OpenAIImage(inner) => spawn_model_handler(model.clone(), inner),
-            ModelAPI::OpenAIAudio(inner) => spawn_model_handler(model.clone(), inner),
+            //ModelAPI::OpenAIImage(inner) => spawn_model_handler(model.clone(), inner),
+            //ModelAPI::OpenAIAudio(inner) => spawn_model_handler(model.clone(), inner),
         };
 
         self.endpoints.write().await.insert(model.uuid, handler);
@@ -278,10 +389,9 @@ impl ModelRequestRouter {
         user_id: Uuid,
         priority: usize,
         request: ModelRequest,
-    ) -> ModelResponse {
+    ) -> Result<ModelResponse, ModelError> {
         let (tx, rx) = oneshot::channel();
 
-        let model_name = request.get_model();
         let routeable = RoutableRequest {
             body: request,
             user_id,
@@ -290,13 +400,19 @@ impl ModelRequestRouter {
 
         match self.get_endpoint(&model_id).await {
             Some(m) => match m.send_timeout(routeable, Duration::new(5, 0)).await {
-                Ok(_) => rx.await.unwrap_or(ModelResponse::error_internal()),
+                Ok(_) => rx
+                    .await
+                    .unwrap_or(Err(ModelError::NoAPI(ModelErrorCode::InternalError))),
                 Err(err) => match err {
-                    SendTimeoutError::Closed(_) => ModelResponse::error_internal(),
-                    SendTimeoutError::Timeout(_) => ModelResponse::error_internal_rate_limit(),
+                    SendTimeoutError::Closed(_) => {
+                        Err(ModelError::NoAPI(ModelErrorCode::InternalError))
+                    }
+                    SendTimeoutError::Timeout(_) => {
+                        Err(ModelError::NoAPI(ModelErrorCode::RateLimitModel))
+                    }
                 },
             },
-            None => ModelResponse::error_model_not_found(&model_name),
+            None => Err(ModelError::NoAPI(ModelErrorCode::ModelNotFound)),
         }
     }
 }

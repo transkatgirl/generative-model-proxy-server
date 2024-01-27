@@ -12,10 +12,8 @@ use tokio::{
     time,
 };
 
-use crate::{
-    api::{self, Model},
-    router::{ModelRequest, ModelResponse},
-};
+use super::{RoutableModelRequest, RoutableModelResponse};
+use crate::api::{self, Model};
 
 type StateInformationDirectRateLimiter<MW = StateInformationMiddleware> = RateLimiter<
     governor::state::direct::NotKeyed,
@@ -184,7 +182,7 @@ impl Limiter {
     pub fn immediate_model_request(
         &self,
         model: &Model,
-        request: &ModelRequest,
+        request: impl RoutableModelRequest,
     ) -> Result<ModelRequestHandle, ()> {
         if self.request().is_err() {
             return Err(());
@@ -192,7 +190,7 @@ impl Limiter {
 
         match request.get_token_count(model) {
             Some(tokens) => {
-                let max_tokens = request.get_max_tokens(model).unwrap_or(tokens) as u32;
+                let max_tokens = request.get_max_tokens(model).unwrap_or(tokens);
 
                 let minute_barrier = self
                     .tokens_per_minute_barrier
@@ -205,11 +203,11 @@ impl Limiter {
 
                 match (minute_barrier, day_barrier) {
                     (Ok(minute_barrier), Ok(day_barrier)) => {
-                        match self.tokens_bounded(tokens as u32, max_tokens) {
+                        match self.tokens_bounded(tokens, max_tokens) {
                             Ok(Ok(_)) => Ok(ModelRequestHandle {
                                 tokens_per_minute_handle: Some(minute_barrier),
                                 tokens_per_day_handle: Some(day_barrier),
-                                request_tokens: tokens as u32,
+                                request_tokens: tokens,
                                 held_tokens: max_tokens,
                             }),
                             _ => Err(()),
@@ -231,13 +229,13 @@ impl Limiter {
     pub async fn wait_model_request(
         &self,
         model: &Model,
-        request: &ModelRequest,
+        request: &impl RoutableModelRequest,
     ) -> Result<ModelRequestHandle, ()> {
         self.wait_request().await;
 
         match request.get_token_count(model) {
             Some(tokens) => {
-                let max_tokens = request.get_max_tokens(model).unwrap_or(tokens) as u32;
+                let max_tokens = request.get_max_tokens(model).unwrap_or(tokens);
 
                 let minute_barrier = self
                     .tokens_per_minute_barrier
@@ -252,11 +250,11 @@ impl Limiter {
 
                 match (minute_barrier, day_barrier) {
                     (Ok(minute_barrier), Ok(day_barrier)) => {
-                        match self.tokens_bounded(tokens as u32, max_tokens) {
+                        match self.tokens_bounded(tokens, max_tokens) {
                             Ok(Ok(_)) => Ok(ModelRequestHandle {
                                 tokens_per_minute_handle: Some(minute_barrier),
                                 tokens_per_day_handle: Some(day_barrier),
-                                request_tokens: tokens as u32,
+                                request_tokens: tokens,
                                 held_tokens: max_tokens,
                             }),
                             Ok(Err(point)) => {
@@ -264,7 +262,7 @@ impl Limiter {
                                 Ok(ModelRequestHandle {
                                     tokens_per_minute_handle: Some(minute_barrier),
                                     tokens_per_day_handle: Some(day_barrier),
-                                    request_tokens: tokens as u32,
+                                    request_tokens: tokens,
                                     held_tokens: max_tokens,
                                 })
                             }
@@ -287,7 +285,7 @@ impl Limiter {
     pub async fn model_response(
         &self,
         handle: ModelRequestHandle,
-        response: &ModelResponse,
+        response: &impl RoutableModelResponse,
     ) -> Result<(), ()> {
         if let Some(result_tokens) = response.get_token_count() {
             if result_tokens > handle.request_tokens {
