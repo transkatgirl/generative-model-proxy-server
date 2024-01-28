@@ -1,7 +1,4 @@
-use std::{
-    any::Any, collections::HashMap, fmt::Debug,
-    future::Future, sync::Arc,
-};
+use std::{any::Any, collections::HashMap, fmt::Debug, future::Future, sync::Arc};
 
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use tokio::{
@@ -30,8 +27,8 @@ pub enum ModelAPI {
     OpenAICompletion(openai::OpenAICompletionModel),
     OpenAIModeration(openai::OpenAIModerationModel),
     OpenAIEmbedding(openai::OpenAIEmbeddingModel),
-    //OpenAIImage(openai::OpenAIImageModel),
-    //OpenAIAudio(openai::OpenAIAudioModel),
+    OpenAIImage(openai::OpenAIImageModel),
+    OpenAIAudio(openai::OpenAIAudioModel),
 }
 
 trait CallableModelAPI: Send + Sync + Debug + Serialize + DeserializeOwned {
@@ -42,7 +39,10 @@ trait CallableModelAPI: Send + Sync + Debug + Serialize + DeserializeOwned {
 
     fn init(&self) -> Self::Client;
 
-    fn to_request(&self, request: impl RoutableModelRequest + 'static) -> Option<Self::ModelRequest>;
+    fn to_request(
+        &self,
+        request: impl RoutableModelRequest + 'static,
+    ) -> Option<Self::ModelRequest>;
 
     fn to_response(&self, error_code: ModelErrorCode) -> Self::ModelError;
 
@@ -54,7 +54,7 @@ trait CallableModelAPI: Send + Sync + Debug + Serialize + DeserializeOwned {
     ) -> impl Future<Output = Result<Self::ModelResponse, Self::ModelError>> + Send;
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Deserialize, Debug)]
 #[serde(untagged)]
 #[allow(clippy::large_enum_variant, clippy::enum_variant_names)]
 pub enum ModelRequest {
@@ -63,14 +63,11 @@ pub enum ModelRequest {
     OpenAICompletion(openai::CreateCompletionRequest),
     OpenAIModeration(openai::CreateModerationRequest),
     OpenAIEmbedding(openai::CreateEmbeddingRequest),
-    /*OpenAIImage(openai::CreateImageRequest),
-    OpenAIImageEdit(openai::CreateImageEditRequest),
-    OpenAIImageVariation(openai::CreateImageVariationRequest),
-    OpenAITranscription(openai::CreateTranscriptionRequest),
-    OpenAITranslation(openai::CreateTranslationRequest),*/
+    OpenAIImage(openai::ImagesRequest),
+    OpenAIAudio(openai::AudioRequest),
 }
 
-trait RoutableModelRequest: Send + Sync + Debug + Serialize + DeserializeOwned {
+trait RoutableModelRequest: Send + Debug + DeserializeOwned {
     fn get_model(&self) -> String;
 
     fn get_token_count(&self, model: &api::Model) -> Option<u32>;
@@ -86,6 +83,8 @@ impl RoutableModelRequest for ModelRequest {
             Self::OpenAICompletion(r) => r.get_model(),
             Self::OpenAIModeration(r) => r.get_model(),
             Self::OpenAIEmbedding(r) => r.get_model(),
+            Self::OpenAIImage(r) => r.get_model(),
+            Self::OpenAIAudio(r) => r.get_model(),
         }
     }
 
@@ -96,6 +95,8 @@ impl RoutableModelRequest for ModelRequest {
             Self::OpenAICompletion(r) => r.get_token_count(model),
             Self::OpenAIModeration(r) => r.get_token_count(model),
             Self::OpenAIEmbedding(r) => r.get_token_count(model),
+            Self::OpenAIImage(r) => r.get_token_count(model),
+            Self::OpenAIAudio(r) => r.get_token_count(model),
         }
     }
 
@@ -106,11 +107,13 @@ impl RoutableModelRequest for ModelRequest {
             Self::OpenAICompletion(r) => r.get_max_tokens(model),
             Self::OpenAIModeration(r) => r.get_max_tokens(model),
             Self::OpenAIEmbedding(r) => r.get_max_tokens(model),
+            Self::OpenAIImage(r) => r.get_max_tokens(model),
+            Self::OpenAIAudio(r) => r.get_max_tokens(model),
         }
     }
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Debug)]
 #[serde(untagged)]
 #[allow(clippy::large_enum_variant, clippy::enum_variant_names)]
 pub enum ModelResponse {
@@ -119,12 +122,11 @@ pub enum ModelResponse {
     OpenAICompletion(openai::CreateCompletionResponse),
     OpenAIModeration(openai::CreateModerationResponse),
     OpenAIEmbedding(openai::CreateEmbeddingResponse),
-    /*OpenAIImage(openai::ImagesResponse),
-    OpenAITranscription(openai::CreateTranscriptionResponse),
-    OpenAITranslation(openai::CreateTranslationResponse),*/
+    OpenAIImage(openai::ImagesResponse),
+    OpenAIAudio(openai::AudioResponse),
 }
 
-trait RoutableModelResponse: Send + Sync + Debug + Serialize + DeserializeOwned {
+trait RoutableModelResponse: Send + Debug + Serialize {
     fn replace_model_id(&mut self, model_id: String);
 
     fn get_token_count(&self) -> Option<u32>;
@@ -138,6 +140,8 @@ impl RoutableModelResponse for ModelResponse {
             Self::OpenAICompletion(r) => r.replace_model_id(model_id),
             Self::OpenAIModeration(r) => r.replace_model_id(model_id),
             Self::OpenAIEmbedding(r) => r.replace_model_id(model_id),
+            Self::OpenAIImage(r) => r.replace_model_id(model_id),
+            Self::OpenAIAudio(r) => r.replace_model_id(model_id),
         }
     }
 
@@ -148,6 +152,8 @@ impl RoutableModelResponse for ModelResponse {
             Self::OpenAICompletion(r) => r.get_token_count(),
             Self::OpenAIModeration(r) => r.get_token_count(),
             Self::OpenAIEmbedding(r) => r.get_token_count(),
+            Self::OpenAIImage(r) => r.get_token_count(),
+            Self::OpenAIAudio(r) => r.get_token_count(),
         }
     }
 }
@@ -157,30 +163,60 @@ impl ModelResponse {
         let item_any: Box<dyn Any> = Box::new(item);
 
         if item_any.is::<openai::CreateChatCompletionResponse>() {
-            return ModelResponse::OpenAIChat(*item_any.downcast::<openai::CreateChatCompletionResponse>().unwrap())
+            return ModelResponse::OpenAIChat(
+                *item_any
+                    .downcast::<openai::CreateChatCompletionResponse>()
+                    .unwrap(),
+            );
         }
 
         if item_any.is::<openai::CreateEditResponse>() {
-            return ModelResponse::OpenAIEdit(*item_any.downcast::<openai::CreateEditResponse>().unwrap())
+            return ModelResponse::OpenAIEdit(
+                *item_any.downcast::<openai::CreateEditResponse>().unwrap(),
+            );
         }
 
         if item_any.is::<openai::CreateCompletionResponse>() {
-            return ModelResponse::OpenAICompletion(*item_any.downcast::<openai::CreateCompletionResponse>().unwrap())
+            return ModelResponse::OpenAICompletion(
+                *item_any
+                    .downcast::<openai::CreateCompletionResponse>()
+                    .unwrap(),
+            );
         }
 
         if item_any.is::<openai::CreateModerationResponse>() {
-            return ModelResponse::OpenAIModeration(*item_any.downcast::<openai::CreateModerationResponse>().unwrap())
+            return ModelResponse::OpenAIModeration(
+                *item_any
+                    .downcast::<openai::CreateModerationResponse>()
+                    .unwrap(),
+            );
         }
 
         if item_any.is::<openai::CreateEmbeddingResponse>() {
-            return ModelResponse::OpenAIEmbedding(*item_any.downcast::<openai::CreateEmbeddingResponse>().unwrap())
+            return ModelResponse::OpenAIEmbedding(
+                *item_any
+                    .downcast::<openai::CreateEmbeddingResponse>()
+                    .unwrap(),
+            );
+        }
+
+        if item_any.is::<openai::ImagesResponse>() {
+            return ModelResponse::OpenAIImage(
+                *item_any.downcast::<openai::ImagesResponse>().unwrap(),
+            );
+        }
+
+        if item_any.is::<openai::AudioResponse>() {
+            return ModelResponse::OpenAIAudio(
+                *item_any.downcast::<openai::AudioResponse>().unwrap(),
+            );
         }
 
         panic!()
     }
 }
 
-#[derive(Serialize, Deserialize, Clone, Copy, Debug)]
+#[derive(Serialize, Clone, Copy, Debug)]
 pub enum ModelErrorCode {
     FailedParse,
     PromptTooLong,
@@ -194,7 +230,7 @@ pub enum ModelErrorCode {
     OtherModelError,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Debug)]
 #[serde(untagged)]
 pub enum ModelError {
     OpenAIError(openai::ApiError),
@@ -235,11 +271,11 @@ impl ModelError {
         let item_any: Box<dyn Any> = Box::new(item);
 
         if item_any.is::<openai::ApiError>() {
-            return ModelError::OpenAIError(*item_any.downcast::<openai::ApiError>().unwrap())
+            return ModelError::OpenAIError(*item_any.downcast::<openai::ApiError>().unwrap());
         }
 
         if item_any.is::<ModelErrorCode>() {
-            return ModelError::NoAPI(*item_any.downcast::<ModelErrorCode>().unwrap())
+            return ModelError::NoAPI(*item_any.downcast::<ModelErrorCode>().unwrap());
         }
 
         panic!()
@@ -365,8 +401,8 @@ impl ModelRequestRouter {
             ModelAPI::OpenAICompletion(inner) => spawn_model_handler(model.clone(), inner),
             ModelAPI::OpenAIModeration(inner) => spawn_model_handler(model.clone(), inner),
             ModelAPI::OpenAIEmbedding(inner) => spawn_model_handler(model.clone(), inner),
-            //ModelAPI::OpenAIImage(inner) => spawn_model_handler(model.clone(), inner),
-            //ModelAPI::OpenAIAudio(inner) => spawn_model_handler(model.clone(), inner),
+            ModelAPI::OpenAIImage(inner) => spawn_model_handler(model.clone(), inner),
+            ModelAPI::OpenAIAudio(inner) => spawn_model_handler(model.clone(), inner),
         };
 
         self.endpoints.write().await.insert(model.uuid, handler);

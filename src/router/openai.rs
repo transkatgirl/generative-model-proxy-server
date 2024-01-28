@@ -1,19 +1,24 @@
 use std::{any::Any, ops::Deref};
 
-pub use async_openai::{
+use async_openai::{
     config::OpenAIConfig,
-    error::{ApiError, OpenAIError},
+    error::OpenAIError,
     types::{
         ChatCompletionRequestMessage, ChatCompletionRequestMessageContentPart,
-        ChatCompletionRequestUserMessageContent, CreateChatCompletionRequest,
-        CreateChatCompletionResponse, CreateCompletionRequest, CreateCompletionResponse,
-        CreateEditRequest, CreateEditResponse, CreateEmbeddingRequest, CreateEmbeddingResponse,
-        CreateImageEditRequest, CreateImageRequest, CreateImageVariationRequest,
-        CreateModerationRequest, CreateModerationResponse, CreateTranscriptionRequest,
-        CreateTranscriptionResponse, CreateTranslationRequest, CreateTranslationResponse,
-        EmbeddingInput, ImageModel, ImagesResponse, ModerationInput, Prompt, TextModerationModel,
+        ChatCompletionRequestUserMessageContent, CreateImageEditRequest, CreateImageRequest,
+        CreateImageVariationRequest, CreateTranscriptionRequest, CreateTranscriptionResponse,
+        CreateTranslationRequest, CreateTranslationResponse, EmbeddingInput, ImageModel,
+        ModerationInput, Prompt, TextModerationModel,
     },
     Client,
+};
+pub(super) use async_openai::{
+    error::ApiError,
+    types::{
+        CreateChatCompletionRequest, CreateChatCompletionResponse, CreateCompletionRequest,
+        CreateCompletionResponse, CreateEditRequest, CreateEditResponse, CreateEmbeddingRequest,
+        CreateEmbeddingResponse, CreateModerationRequest, CreateModerationResponse, ImagesResponse,
+    },
 };
 use serde::{Deserialize, Serialize};
 use serde_json::value::Value;
@@ -21,8 +26,8 @@ use tracing::{event, Level};
 
 use super::{
     tokenizer::{self, Tokenizer},
-    CallableModelAPI, ModelErrorCode, ModelRequest, ModelResponse, RoutableModelError,
-    RoutableModelRequest, RoutableModelResponse,
+    CallableModelAPI, ModelErrorCode, RoutableModelError, RoutableModelRequest,
+    RoutableModelResponse,
 };
 use crate::api;
 
@@ -316,7 +321,7 @@ impl RoutableModelResponse for CreateEmbeddingResponse {
     }
 }
 
-/*impl RoutableModelRequest for CreateImageRequest {
+impl RoutableModelRequest for CreateImageRequest {
     #[tracing::instrument(level = "debug")]
     fn get_model(&self) -> String {
         match self.model.clone() {
@@ -444,7 +449,7 @@ impl RoutableModelResponse for CreateTranslationResponse {
     fn get_token_count(&self) -> Option<u32> {
         None
     }
-}*/
+}
 
 impl RoutableModelResponse for ApiError {
     #[tracing::instrument(level = "debug")]
@@ -582,7 +587,7 @@ fn convert_error_code(code: ModelErrorCode) -> ApiError {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct OpenAIEndpoint {
+pub(super) struct OpenAIEndpoint {
     openai_api_base: String,
     openai_api_key: String,
     openai_organization: Option<String>,
@@ -590,43 +595,43 @@ pub struct OpenAIEndpoint {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct OpenAIChatModel {
+pub(super) struct OpenAIChatModel {
     endpoint: OpenAIEndpoint,
     model_id: String,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct OpenAIEditModel {
+pub(super) struct OpenAIEditModel {
     endpoint: OpenAIEndpoint,
     model_id: String,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct OpenAICompletionModel {
+pub(super) struct OpenAICompletionModel {
     endpoint: OpenAIEndpoint,
     model_id: String,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct OpenAIModerationModel {
+pub(super) struct OpenAIModerationModel {
     endpoint: OpenAIEndpoint,
     model_id: String,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct OpenAIEmbeddingModel {
+pub(super) struct OpenAIEmbeddingModel {
     endpoint: OpenAIEndpoint,
     model_id: String,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct OpenAIImageModel {
+pub(super) struct OpenAIImageModel {
     endpoint: OpenAIEndpoint,
     model_id: String,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct OpenAIAudioModel {
+pub(super) struct OpenAIAudioModel {
     endpoint: OpenAIEndpoint,
     model_id: String,
 }
@@ -659,7 +664,10 @@ impl CallableModelAPI for OpenAIChatModel {
             .map_err(convert_openai_error)
     }
 
-    fn to_request(&self, request: impl RoutableModelRequest+ 'static) -> Option<Self::ModelRequest> {
+    fn to_request(
+        &self,
+        request: impl RoutableModelRequest + 'static,
+    ) -> Option<Self::ModelRequest> {
         let item_any: Box<dyn Any> = Box::new(request);
 
         match item_any.downcast::<Self::ModelRequest>() {
@@ -700,7 +708,10 @@ impl CallableModelAPI for OpenAIEditModel {
             .map_err(convert_openai_error)
     }
 
-    fn to_request(&self, request: impl RoutableModelRequest + 'static) -> Option<Self::ModelRequest> {
+    fn to_request(
+        &self,
+        request: impl RoutableModelRequest + 'static,
+    ) -> Option<Self::ModelRequest> {
         let item_any: Box<dyn Any> = Box::new(request);
 
         match item_any.downcast::<Self::ModelRequest>() {
@@ -746,7 +757,10 @@ impl CallableModelAPI for OpenAICompletionModel {
             .map_err(convert_openai_error)
     }
 
-    fn to_request(&self, request: impl RoutableModelRequest+ 'static) -> Option<Self::ModelRequest> {
+    fn to_request(
+        &self,
+        request: impl RoutableModelRequest + 'static,
+    ) -> Option<Self::ModelRequest> {
         let item_any: Box<dyn Any> = Box::new(request);
 
         match item_any.downcast::<Self::ModelRequest>() {
@@ -790,7 +804,10 @@ impl CallableModelAPI for OpenAIModerationModel {
             .map_err(convert_openai_error)
     }
 
-    fn to_request(&self, request: impl RoutableModelRequest+ 'static) -> Option<Self::ModelRequest> {
+    fn to_request(
+        &self,
+        request: impl RoutableModelRequest + 'static,
+    ) -> Option<Self::ModelRequest> {
         let item_any: Box<dyn Any> = Box::new(request);
 
         match item_any.downcast::<Self::ModelRequest>() {
@@ -830,7 +847,10 @@ impl CallableModelAPI for OpenAIEmbeddingModel {
             .map_err(convert_openai_error)
     }
 
-    fn to_request(&self, request: impl RoutableModelRequest+ 'static) -> Option<Self::ModelRequest> {
+    fn to_request(
+        &self,
+        request: impl RoutableModelRequest + 'static,
+    ) -> Option<Self::ModelRequest> {
         let item_any: Box<dyn Any> = Box::new(request);
 
         match item_any.downcast::<Self::ModelRequest>() {
@@ -848,70 +868,124 @@ impl CallableModelAPI for OpenAIEmbeddingModel {
     }
 }
 
-/*impl ModelAPICallable for OpenAIImageModel {
-    type Client = Client<OpenAIConfig>;
+#[derive(Deserialize, Debug)]
+#[serde(untagged)]
+pub(super) enum ImagesRequest {
+    Image(CreateImageRequest),
+    Edit(CreateImageEditRequest),
+    Variation(CreateImageVariationRequest),
+}
 
-    #[tracing::instrument(level = "debug")]
+impl RoutableModelRequest for ImagesRequest {
+    fn get_model(&self) -> String {
+        match self {
+            Self::Image(r) => r.get_model(),
+            Self::Edit(r) => r.get_model(),
+            Self::Variation(r) => r.get_model(),
+        }
+    }
+
+    fn get_token_count(&self, model: &api::Model) -> Option<u32> {
+        match self {
+            Self::Image(r) => r.get_token_count(model),
+            Self::Edit(r) => r.get_token_count(model),
+            Self::Variation(r) => r.get_token_count(model),
+        }
+    }
+
+    fn get_max_tokens(&self, model: &api::Model) -> Option<u32> {
+        match self {
+            Self::Image(r) => r.get_max_tokens(model),
+            Self::Edit(r) => r.get_max_tokens(model),
+            Self::Variation(r) => r.get_max_tokens(model),
+        }
+    }
+}
+
+impl CallableModelAPI for OpenAIImageModel {
+    type Client = Client<OpenAIConfig>;
+    type ModelRequest = ImagesRequest;
+    type ModelResponse = ImagesResponse;
+    type ModelError = ApiError;
+
     async fn generate(
         &self,
         client: &Self::Client,
         user: &str,
-        request: ModelRequest,
-    ) -> Option<ModelResponse> {
+        request: Self::ModelRequest,
+    ) -> Result<Self::ModelResponse, Self::ModelError> {
         match request {
-            ModelRequest::Image(mut req) => {
-                req.model = match &*self.model_id {
+            ImagesRequest::Image(mut request) => {
+                request.model = match &*self.model_id {
                     "dall-e-3" => Some(ImageModel::DallE3),
                     "dall-e-2" => Some(ImageModel::DallE2),
                     _ => Some(ImageModel::Other(self.model_id.clone())),
                 };
-                req.user = if self.endpoint.proxy_user_ids {
+                request.user = if self.endpoint.proxy_user_ids {
                     Some(user.to_string())
                 } else {
                     None
                 };
 
-                match client.images().create(req).await {
-                    Ok(g) => Some(ModelResponse::Image(g)),
-                    Err(e) => Some(convert_openai_error(e)),
-                }
+                client
+                    .images()
+                    .create(request)
+                    .await
+                    .map_err(convert_openai_error)
             }
-            ModelRequest::ImageEdit(mut req) => {
-                req.model = match &*self.model_id {
+            ImagesRequest::Edit(mut request) => {
+                request.model = match &*self.model_id {
                     "dall-e-3" => Some(ImageModel::DallE3),
                     "dall-e-2" => Some(ImageModel::DallE2),
                     _ => Some(ImageModel::Other(self.model_id.clone())),
                 };
-                req.user = if self.endpoint.proxy_user_ids {
+                request.user = if self.endpoint.proxy_user_ids {
                     Some(user.to_string())
                 } else {
                     None
                 };
 
-                match client.images().create_edit(req).await {
-                    Ok(g) => Some(ModelResponse::Image(g)),
-                    Err(e) => Some(convert_openai_error(e)),
-                }
+                client
+                    .images()
+                    .create_edit(request)
+                    .await
+                    .map_err(convert_openai_error)
             }
-            ModelRequest::ImageVariation(mut req) => {
-                req.model = match &*self.model_id {
+            ImagesRequest::Variation(mut request) => {
+                request.model = match &*self.model_id {
                     "dall-e-3" => Some(ImageModel::DallE3),
                     "dall-e-2" => Some(ImageModel::DallE2),
                     _ => Some(ImageModel::Other(self.model_id.clone())),
                 };
-                req.user = if self.endpoint.proxy_user_ids {
+                request.user = if self.endpoint.proxy_user_ids {
                     Some(user.to_string())
                 } else {
                     None
                 };
 
-                match client.images().create_variation(req).await {
-                    Ok(g) => Some(ModelResponse::Image(g)),
-                    Err(e) => Some(convert_openai_error(e)),
-                }
+                client
+                    .images()
+                    .create_variation(request)
+                    .await
+                    .map_err(convert_openai_error)
             }
-            _ => None,
         }
+    }
+
+    fn to_request(
+        &self,
+        request: impl RoutableModelRequest + 'static,
+    ) -> Option<Self::ModelRequest> {
+        let item_any: Box<dyn Any> = Box::new(request);
+
+        match item_any.downcast::<Self::ModelRequest>() {
+            Ok(item) => Some(*item),
+            Err(_) => None,
+        }
+    }
+
+    fn to_response(&self, error_code: ModelErrorCode) -> Self::ModelError {
+        convert_error_code(error_code)
     }
 
     fn init(&self) -> Self::Client {
@@ -919,39 +993,112 @@ impl CallableModelAPI for OpenAIEmbeddingModel {
     }
 }
 
-impl ModelAPICallable for OpenAIAudioModel {
-    type Client = Client<OpenAIConfig>;
+#[derive(Deserialize, Debug)]
+#[serde(untagged)]
+pub(super) enum AudioRequest {
+    Transcription(CreateTranscriptionRequest),
+    Translation(CreateTranslationRequest),
+}
 
-    #[tracing::instrument(level = "debug")]
+impl RoutableModelRequest for AudioRequest {
+    fn get_model(&self) -> String {
+        match self {
+            Self::Transcription(r) => r.get_model(),
+            Self::Translation(r) => r.get_model(),
+        }
+    }
+
+    fn get_token_count(&self, model: &api::Model) -> Option<u32> {
+        match self {
+            Self::Transcription(r) => r.get_token_count(model),
+            Self::Translation(r) => r.get_token_count(model),
+        }
+    }
+
+    fn get_max_tokens(&self, model: &api::Model) -> Option<u32> {
+        match self {
+            Self::Transcription(r) => r.get_max_tokens(model),
+            Self::Translation(r) => r.get_max_tokens(model),
+        }
+    }
+}
+
+#[derive(Serialize, Debug)]
+#[serde(untagged)]
+pub(super) enum AudioResponse {
+    Transcription(CreateTranscriptionResponse),
+    Translation(CreateTranslationResponse),
+}
+
+impl RoutableModelResponse for AudioResponse {
+    fn replace_model_id(&mut self, model_id: String) {
+        match self {
+            Self::Transcription(r) => r.replace_model_id(model_id),
+            Self::Translation(r) => r.replace_model_id(model_id),
+        }
+    }
+
+    fn get_token_count(&self) -> Option<u32> {
+        match self {
+            Self::Transcription(r) => r.get_token_count(),
+            Self::Translation(r) => r.get_token_count(),
+        }
+    }
+}
+
+impl CallableModelAPI for OpenAIAudioModel {
+    type Client = Client<OpenAIConfig>;
+    type ModelRequest = AudioRequest;
+    type ModelResponse = AudioResponse;
+    type ModelError = ApiError;
+
     async fn generate(
         &self,
         client: &Self::Client,
-        user: &str,
-        request: ModelRequest,
-    ) -> Option<ModelResponse> {
+        _user: &str,
+        request: Self::ModelRequest,
+    ) -> Result<Self::ModelResponse, Self::ModelError> {
         match request {
-            ModelRequest::Transcription(mut req) => {
-                req.model = self.model_id.clone();
+            AudioRequest::Transcription(mut request) => {
+                request.model = self.model_id.clone();
 
-                match client.audio().transcribe(req).await {
-                    Ok(g) => Some(ModelResponse::Transcription(g)),
-                    Err(e) => Some(convert_openai_error(e)),
-                }
+                client
+                    .audio()
+                    .transcribe(request)
+                    .await
+                    .map(AudioResponse::Transcription)
+                    .map_err(convert_openai_error)
             }
-            ModelRequest::Translation(mut req) => {
-                req.model = self.model_id.clone();
+            AudioRequest::Translation(mut request) => {
+                request.model = self.model_id.clone();
 
-                match client.audio().translate(req).await {
-                    Ok(g) => Some(ModelResponse::Translation(g)),
-                    Err(e) => Some(convert_openai_error(e)),
-                }
+                client
+                    .audio()
+                    .translate(request)
+                    .await
+                    .map(AudioResponse::Translation)
+                    .map_err(convert_openai_error)
             }
-            _ => None,
         }
+    }
+
+    fn to_request(
+        &self,
+        request: impl RoutableModelRequest + 'static,
+    ) -> Option<Self::ModelRequest> {
+        let item_any: Box<dyn Any> = Box::new(request);
+
+        match item_any.downcast::<Self::ModelRequest>() {
+            Ok(item) => Some(*item),
+            Err(_) => None,
+        }
+    }
+
+    fn to_response(&self, error_code: ModelErrorCode) -> Self::ModelError {
+        convert_error_code(error_code)
     }
 
     fn init(&self) -> Self::Client {
         init_openai_client(self.endpoint.clone())
     }
 }
-*/
