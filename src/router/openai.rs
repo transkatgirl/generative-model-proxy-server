@@ -461,9 +461,80 @@ impl RoutableModelResponse for ApiError {
     }
 }
 
-impl RoutableModelError for ApiError {
-    #[tracing::instrument(level = "debug")]
-    fn get_error_code(&self) -> ModelErrorCode {
+impl RoutableModelError for ApiError {}
+
+impl From<ModelErrorCode> for ApiError {
+    #[tracing::instrument(level = "trace")]
+    fn from(value: ModelErrorCode) -> Self {
+        match value {
+            ModelErrorCode::FailedParse => ApiError {
+                message: "We could not parse the JSON body of your request. (HINT: This likely means you aren't using your HTTP library correctly. The OpenAI API expects a JSON payload, but what was sent was not valid JSON. If you have trouble figuring out how to fix this, contact the proxy's administrator.)".to_string(),
+                r#type: Some("invalid_request_error".to_string()),
+                param: Some(Value::Null),
+                code: Some(Value::Null),
+            },
+            ModelErrorCode::PromptTooLong => ApiError {
+                message: "Your messages exceeded the model's maximum context length. Please reduce the length of the message. If you belive you are seeing this message in error, contact the proxy's administrator.".to_string(),
+                r#type: Some("invalid_request_error".to_string()),
+                param: Some(Value::Null),
+                code: Some(Value::Null),
+            },
+            ModelErrorCode::AuthMissing => ApiError {
+                message: "You didn't provide an API key. You need to provide your API key in an Authorization header using Bearer auth (i.e. Authorization: Bearer YOUR_KEY), or as the password field (with blank username) if you're accessing the API from your browser and are prompted for a username and password. You can obtain an API key from the proxy's administrator.".to_string(),
+                r#type: Some("invalid_request_error".to_string()),
+                param: Some(Value::Null),
+                code: Some(Value::Null),
+            },
+            ModelErrorCode::AuthIncorrect => ApiError {
+                message: "Incorrect API key provided. You can obtain an API key from the proxy's administrator.".to_string(),
+                r#type: Some("invalid_request_error".to_string()),
+                param: Some(Value::Null),
+                code: Some(Value::String("invalid_api_key".to_string())),
+            },
+            ModelErrorCode::ModelNotFound => ApiError {
+                message: "The requested model does not exist.  Contact the proxy's administrator for more information.".to_string(),
+                r#type: Some("invalid_request_error".to_string()),
+                param: Some(Value::Null),
+                code: Some(Value::String("model_not_found".to_string())),
+            },
+            ModelErrorCode::EndpointNotFound => ApiError {
+                message: "Unknown request URL. Please check the URL for typos, or contact the proxy's administrator for information regarding available endpoints.".to_string(),
+                r#type: Some("invalid_request_error".to_string()),
+                param: Some(Value::Null),
+                code: Some(Value::String("unknown_url".to_string())),
+            },
+            ModelErrorCode::RateLimitUser => ApiError {
+                message: "You exceeded your current quota, please check your API key's rate limits. For more information on this error, contact the proxy's administrator.".to_string(),
+                r#type: Some("insufficient_quota".to_string()),
+                param: Some(Value::Null),
+                code: Some(Value::String("insufficient_quota".to_string())),
+            },
+            ModelErrorCode::RateLimitModel => ApiError {
+                message: "That model is currently overloaded with other requests. You can retry your request, or contact the proxy's administrator if the error persists.".to_string(),
+                r#type: Some("server_error".to_string()),
+                param: Some(Value::Null),
+                code: Some(Value::Null),
+            },
+            ModelErrorCode::InternalError => ApiError {
+                message: "The proxy server had an error processing your request. Sorry about that! You can retry your request, or contact the proxy's administrator if the error persists.".to_string(),
+                r#type: Some("server_error".to_string()),
+                param: Some(Value::Null),
+                code: Some(Value::Null),
+            },
+            ModelErrorCode::OtherModelError => ApiError {
+                message: "The proxy backend had an error processing your request. Sorry about that! Contact the proxy's administrator for more information.".to_string(),
+                r#type: Some("invalid_request_error".to_string()),
+                param: Some(Value::Null),
+                code: Some(Value::Null),
+            },
+        }
+    }
+}
+
+#[allow(clippy::from_over_into)]
+impl Into<ModelErrorCode> for ApiError {
+    #[tracing::instrument(level = "trace")]
+    fn into(self) -> ModelErrorCode {
         match self.r#type.as_deref() {
             Some("invalid_request_error") => match self.code.clone().unwrap_or(Value::Null) {
                 Value::String(code) => {
@@ -517,72 +588,6 @@ fn convert_openai_error(error: OpenAIError) -> ApiError {
                 code: Some(Value::Null),
             }
         }
-    }
-}
-
-#[tracing::instrument(level = "trace")]
-fn convert_error_code(code: ModelErrorCode) -> ApiError {
-    match code {
-        ModelErrorCode::FailedParse => ApiError {
-            message: "We could not parse the JSON body of your request. (HINT: This likely means you aren't using your HTTP library correctly. The OpenAI API expects a JSON payload, but what was sent was not valid JSON. If you have trouble figuring out how to fix this, contact the proxy's administrator.)".to_string(),
-            r#type: Some("invalid_request_error".to_string()),
-            param: Some(Value::Null),
-            code: Some(Value::Null),
-        },
-        ModelErrorCode::PromptTooLong => ApiError {
-            message: "Your messages exceeded the model's maximum context length. Please reduce the length of the message. If you belive you are seeing this message in error, contact the proxy's administrator.".to_string(),
-            r#type: Some("invalid_request_error".to_string()),
-            param: Some(Value::Null),
-            code: Some(Value::Null),
-        },
-        ModelErrorCode::AuthMissing => ApiError {
-            message: "You didn't provide an API key. You need to provide your API key in an Authorization header using Bearer auth (i.e. Authorization: Bearer YOUR_KEY), or as the password field (with blank username) if you're accessing the API from your browser and are prompted for a username and password. You can obtain an API key from the proxy's administrator.".to_string(),
-            r#type: Some("invalid_request_error".to_string()),
-            param: Some(Value::Null),
-            code: Some(Value::Null),
-        },
-        ModelErrorCode::AuthIncorrect => ApiError {
-            message: "Incorrect API key provided. You can obtain an API key from the proxy's administrator.".to_string(),
-            r#type: Some("invalid_request_error".to_string()),
-            param: Some(Value::Null),
-            code: Some(Value::String("invalid_api_key".to_string())),
-        },
-        ModelErrorCode::ModelNotFound => ApiError {
-            message: "The requested model does not exist.  Contact the proxy's administrator for more information.".to_string(),
-            r#type: Some("invalid_request_error".to_string()),
-            param: Some(Value::Null),
-            code: Some(Value::String("model_not_found".to_string())),
-        },
-        ModelErrorCode::EndpointNotFound => ApiError {
-            message: "Unknown request URL. Please check the URL for typos, or contact the proxy's administrator for information regarding available endpoints.".to_string(),
-            r#type: Some("invalid_request_error".to_string()),
-            param: Some(Value::Null),
-            code: Some(Value::String("unknown_url".to_string())),
-        },
-        ModelErrorCode::RateLimitUser => ApiError {
-            message: "You exceeded your current quota, please check your API key's rate limits. For more information on this error, contact the proxy's administrator.".to_string(),
-            r#type: Some("insufficient_quota".to_string()),
-            param: Some(Value::Null),
-            code: Some(Value::String("insufficient_quota".to_string())),
-        },
-        ModelErrorCode::RateLimitModel => ApiError {
-            message: "That model is currently overloaded with other requests. You can retry your request, or contact the proxy's administrator if the error persists.".to_string(),
-            r#type: Some("server_error".to_string()),
-            param: Some(Value::Null),
-            code: Some(Value::Null),
-        },
-        ModelErrorCode::InternalError => ApiError {
-            message: "The proxy server had an error processing your request. Sorry about that! You can retry your request, or contact the proxy's administrator if the error persists.".to_string(),
-            r#type: Some("server_error".to_string()),
-            param: Some(Value::Null),
-            code: Some(Value::Null),
-        },
-        ModelErrorCode::OtherModelError => ApiError {
-            message: "The proxy backend had an error processing your request. Sorry about that! Contact the proxy's administrator for more information.".to_string(),
-            r#type: Some("invalid_request_error".to_string()),
-            param: Some(Value::Null),
-            code: Some(Value::Null),
-        },
     }
 }
 
@@ -676,10 +681,6 @@ impl CallableModelAPI for OpenAIChatModel {
         }
     }
 
-    fn to_response(&self, error_code: ModelErrorCode) -> Self::ModelError {
-        convert_error_code(error_code)
-    }
-
     fn init(&self) -> Self::Client {
         init_openai_client(self.endpoint.clone())
     }
@@ -718,10 +719,6 @@ impl CallableModelAPI for OpenAIEditModel {
             Ok(item) => Some(*item),
             Err(_) => None,
         }
-    }
-
-    fn to_response(&self, error_code: ModelErrorCode) -> Self::ModelError {
-        convert_error_code(error_code)
     }
 
     fn init(&self) -> Self::Client {
@@ -769,10 +766,6 @@ impl CallableModelAPI for OpenAICompletionModel {
         }
     }
 
-    fn to_response(&self, error_code: ModelErrorCode) -> Self::ModelError {
-        convert_error_code(error_code)
-    }
-
     fn init(&self) -> Self::Client {
         init_openai_client(self.endpoint.clone())
     }
@@ -816,10 +809,6 @@ impl CallableModelAPI for OpenAIModerationModel {
         }
     }
 
-    fn to_response(&self, error_code: ModelErrorCode) -> Self::ModelError {
-        convert_error_code(error_code)
-    }
-
     fn init(&self) -> Self::Client {
         init_openai_client(self.endpoint.clone())
     }
@@ -857,10 +846,6 @@ impl CallableModelAPI for OpenAIEmbeddingModel {
             Ok(item) => Some(*item),
             Err(_) => None,
         }
-    }
-
-    fn to_response(&self, error_code: ModelErrorCode) -> Self::ModelError {
-        convert_error_code(error_code)
     }
 
     fn init(&self) -> Self::Client {
@@ -984,10 +969,6 @@ impl CallableModelAPI for OpenAIImageModel {
         }
     }
 
-    fn to_response(&self, error_code: ModelErrorCode) -> Self::ModelError {
-        convert_error_code(error_code)
-    }
-
     fn init(&self) -> Self::Client {
         init_openai_client(self.endpoint.clone())
     }
@@ -1092,10 +1073,6 @@ impl CallableModelAPI for OpenAIAudioModel {
             Ok(item) => Some(*item),
             Err(_) => None,
         }
-    }
-
-    fn to_response(&self, error_code: ModelErrorCode) -> Self::ModelError {
-        convert_error_code(error_code)
     }
 
     fn init(&self) -> Self::Client {

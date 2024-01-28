@@ -5,7 +5,7 @@ use uuid::Uuid;
 use reqwest::Client;
 use tokio::sync::{mpsc, RwLock};
 
-use crate::router::{self, ModelAPI};
+use crate::router;
 
 use axum::{
     extract::{Path, Request, State},
@@ -46,7 +46,7 @@ pub struct Model {
     pub metadata: ModelMetadata,
 
     pub uuid: Uuid,
-    pub api: ModelAPI,
+    pub api: router::ModelAPI,
     pub quota: Quota,
 }
 

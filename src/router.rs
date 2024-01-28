@@ -20,7 +20,7 @@ mod tokenizer;
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(tag = "type")]
-#[allow(clippy::enum_variant_names)]
+#[allow(private_interfaces, clippy::enum_variant_names)]
 pub enum ModelAPI {
     OpenAIChat(openai::OpenAIChatModel),
     OpenAIEdit(openai::OpenAIEditModel),
@@ -44,8 +44,6 @@ trait CallableModelAPI: Send + Sync + Debug + Serialize + DeserializeOwned {
         request: impl RoutableModelRequest + 'static,
     ) -> Option<Self::ModelRequest>;
 
-    fn to_response(&self, error_code: ModelErrorCode) -> Self::ModelError;
-
     fn generate(
         &self,
         client: &Self::Client,
@@ -56,7 +54,7 @@ trait CallableModelAPI: Send + Sync + Debug + Serialize + DeserializeOwned {
 
 #[derive(Deserialize, Debug)]
 #[serde(untagged)]
-#[allow(clippy::large_enum_variant, clippy::enum_variant_names)]
+#[allow(private_interfaces, clippy::large_enum_variant, clippy::enum_variant_names)]
 pub enum ModelRequest {
     OpenAIChat(openai::CreateChatCompletionRequest),
     OpenAIEdit(openai::CreateEditRequest),
@@ -115,7 +113,7 @@ impl RoutableModelRequest for ModelRequest {
 
 #[derive(Serialize, Debug)]
 #[serde(untagged)]
-#[allow(clippy::large_enum_variant, clippy::enum_variant_names)]
+#[allow(private_interfaces, clippy::large_enum_variant, clippy::enum_variant_names)]
 pub enum ModelResponse {
     OpenAIChat(openai::CreateChatCompletionResponse),
     OpenAIEdit(openai::CreateEditResponse),
@@ -216,6 +214,7 @@ impl ModelResponse {
     }
 }
 
+// TODO: Expand error code list
 #[derive(Serialize, Clone, Copy, Debug)]
 pub enum ModelErrorCode {
     FailedParse,
@@ -237,9 +236,7 @@ pub enum ModelError {
     NoAPI(ModelErrorCode),
 }
 
-trait RoutableModelError: RoutableModelResponse {
-    fn get_error_code(&self) -> ModelErrorCode;
-}
+trait RoutableModelError: RoutableModelResponse + From<ModelErrorCode> + Into<ModelErrorCode> {}
 
 impl RoutableModelResponse for ModelError {
     fn replace_model_id(&mut self, model_id: String) {
@@ -257,11 +254,18 @@ impl RoutableModelResponse for ModelError {
     }
 }
 
-impl RoutableModelError for ModelError {
-    fn get_error_code(&self) -> ModelErrorCode {
+impl From<ModelErrorCode> for ModelError {
+    fn from(value: ModelErrorCode) -> Self {
+        ModelError::NoAPI(value)
+    }
+}
+
+#[allow(clippy::from_over_into)]
+impl Into<ModelErrorCode> for ModelError {
+    fn into(self) -> ModelErrorCode {
         match self {
-            Self::OpenAIError(e) => e.get_error_code(),
-            Self::NoAPI(e) => *e,
+            Self::OpenAIError(e) => e.into(),
+            Self::NoAPI(e) => e,
         }
     }
 }
@@ -290,9 +294,9 @@ struct RoutableRequest {
 
 // TODO: Add proxy for image URLs (GPT-4 input, image model output)
 #[tracing::instrument(level = "trace")]
-fn spawn_model_handler(
+fn spawn_model_handler<M: CallableModelAPI + 'static>(
     model_metadata: api::Model,
-    model_callable: impl CallableModelAPI + 'static,
+    model_callable: M,
 ) -> mpsc::Sender<RoutableRequest> {
     let (tx, mut rx) =
         mpsc::channel::<RoutableRequest>(if model_metadata.quota.max_queue_size == 0 {
@@ -320,7 +324,7 @@ fn spawn_model_handler(
                     if request
                         .response_channel
                         .send(Err(ModelError::from(
-                            model_callable.to_response(ModelErrorCode::RateLimitUser),
+                            M::ModelError::from(ModelErrorCode::RateLimitUser),
                         )))
                         .is_err()
                     {
@@ -342,7 +346,7 @@ fn spawn_model_handler(
             tokio::spawn(async move {
                 let response = match model_callable.to_request(request.body) {
                     Some(request) => model_callable.generate(&client, &user, request).await,
-                    None => Err(model_callable.to_response(ModelErrorCode::ModelNotFound)),
+                    None => Err(M::ModelError::from(ModelErrorCode::ModelNotFound)),
                 }
                 .map(|mut response| {
                     response.replace_model_id(model_metadata.label.clone());
