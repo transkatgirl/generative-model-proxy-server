@@ -22,13 +22,13 @@ mod tokenizer;
 #[serde(tag = "type")]
 #[allow(private_interfaces, clippy::enum_variant_names)]
 pub enum ModelAPI {
-    OpenAIChat(openai::OpenAIChatModel),
-    OpenAIEdit(openai::OpenAIEditModel),
-    OpenAICompletion(openai::OpenAICompletionModel),
-    OpenAIModeration(openai::OpenAIModerationModel),
-    OpenAIEmbedding(openai::OpenAIEmbeddingModel),
-    OpenAIImage(openai::OpenAIImageModel),
-    OpenAIAudio(openai::OpenAIAudioModel),
+    OpenAIChat(Arc<openai::OpenAIChatModel>),
+    OpenAIEdit(Arc<openai::OpenAIEditModel>),
+    OpenAICompletion(Arc<openai::OpenAICompletionModel>),
+    OpenAIModeration(Arc<openai::OpenAIModerationModel>),
+    OpenAIEmbedding(Arc<openai::OpenAIEmbeddingModel>),
+    OpenAIImage(Arc<openai::OpenAIImageModel>),
+    OpenAIAudio(Arc<openai::OpenAIAudioModel>),
 }
 
 trait CallableModelAPI: Send + Sync + Debug + Serialize + DeserializeOwned + 'static {
@@ -304,8 +304,8 @@ struct RoutableRequest {
 // TODO: Add proxy for image URLs (GPT-4 input, image model output)
 #[tracing::instrument(level = "trace")]
 fn spawn_model_handler<M: CallableModelAPI>(
-    model_metadata: api::Model,
-    model_callable: M,
+    model_metadata: Arc<api::Model>,
+    model_callable: Arc<M>,
 ) -> mpsc::Sender<RoutableRequest> {
     let (tx, mut rx) =
         mpsc::channel::<RoutableRequest>(if model_metadata.quota.max_queue_size == 0 {
@@ -318,8 +318,6 @@ fn spawn_model_handler<M: CallableModelAPI>(
         let client = Arc::new(model_callable.init());
         let limiter = Arc::new(Limiter::new(model_metadata.quota));
         let mut encode_buffer: [u8; 45] = Uuid::encode_buffer();
-        let model_callable = Arc::new(model_callable);
-        let model_metadata = Arc::new(model_metadata);
 
         while let Some(request) = rx.recv().await {
             let user: &mut str = request.user_id.simple().encode_lower(&mut encode_buffer);
@@ -407,18 +405,19 @@ impl ModelRequestRouter {
     }
 
     #[tracing::instrument(level = "debug")]
-    pub async fn add_model(&self, model: api::Model) {
-        let handler = match model.clone().api {
-            ModelAPI::OpenAIChat(inner) => spawn_model_handler(model.clone(), inner),
-            ModelAPI::OpenAIEdit(inner) => spawn_model_handler(model.clone(), inner),
-            ModelAPI::OpenAICompletion(inner) => spawn_model_handler(model.clone(), inner),
-            ModelAPI::OpenAIModeration(inner) => spawn_model_handler(model.clone(), inner),
-            ModelAPI::OpenAIEmbedding(inner) => spawn_model_handler(model.clone(), inner),
-            ModelAPI::OpenAIImage(inner) => spawn_model_handler(model.clone(), inner),
-            ModelAPI::OpenAIAudio(inner) => spawn_model_handler(model.clone(), inner),
+    pub async fn add_model(&self, model: Arc<api::Model>) {
+        let uuid = model.uuid;
+        let handler = match model.api.clone() {
+            ModelAPI::OpenAIChat(inner) => spawn_model_handler(model, inner),
+            ModelAPI::OpenAIEdit(inner) => spawn_model_handler(model, inner),
+            ModelAPI::OpenAICompletion(inner) => spawn_model_handler(model, inner),
+            ModelAPI::OpenAIModeration(inner) => spawn_model_handler(model, inner),
+            ModelAPI::OpenAIEmbedding(inner) => spawn_model_handler(model, inner),
+            ModelAPI::OpenAIImage(inner) => spawn_model_handler(model, inner),
+            ModelAPI::OpenAIAudio(inner) => spawn_model_handler(model, inner),
         };
 
-        self.endpoints.write().await.insert(model.uuid, handler);
+        self.endpoints.write().await.insert(uuid, handler);
     }
 
     #[tracing::instrument(level = "debug")]

@@ -1,4 +1,4 @@
-use std::{any::Any, ops::Deref};
+use std::ops::Deref;
 
 use async_openai::{
     config::OpenAIConfig,
@@ -159,7 +159,7 @@ impl RoutableModelResponse for CreateChatCompletionResponse {
 
     #[tracing::instrument(level = "debug")]
     fn get_token_count(&self) -> Option<u32> {
-        self.usage.clone().map(|u| u.total_tokens)
+        self.usage.as_ref().map(|u| u.total_tokens)
     }
 }
 
@@ -172,10 +172,10 @@ impl RoutableModelRequest for CreateEditRequest {
     #[tracing::instrument(level = "debug")]
     fn get_token_count(&self, model: &api::Model) -> Option<u32> {
         let mut input = Vec::new();
-        if let Some(i) = self.input.clone() {
+        if let Some(i) = &self.input {
             input.push(i);
         }
-        input.push(self.instruction.clone());
+        input.push(&self.instruction);
 
         let tokenizer = model.get_tokenizer().unwrap_or(Tokenizer::P50kEdit);
         Some(tokenizer::get_token_count(tokenizer, &input))
@@ -206,9 +206,9 @@ impl RoutableModelRequest for CreateCompletionRequest {
     #[tracing::instrument(level = "debug")]
     fn get_token_count(&self, model: &api::Model) -> Option<u32> {
         let tokenizer = model.get_tokenizer().unwrap_or(Tokenizer::Cl100kBase);
-        Some(match self.prompt.clone() {
-            Prompt::String(text) => tokenizer::get_token_count(tokenizer, &[&text]),
-            Prompt::StringArray(text_array) => tokenizer::get_token_count(tokenizer, &text_array),
+        Some(match &self.prompt {
+            Prompt::String(text) => tokenizer::get_token_count(tokenizer, &[text]),
+            Prompt::StringArray(text_array) => tokenizer::get_token_count(tokenizer, text_array),
             Prompt::IntegerArray(tokens) => tokens.len() as u32,
             Prompt::ArrayOfIntegerArray(token_array) => token_array.concat().len() as u32,
         })
@@ -221,7 +221,7 @@ impl RoutableModelRequest for CreateCompletionRequest {
             .unwrap_or_else(|| model.get_context_len() as u16);
 
         let multiplier = self.best_of.unwrap_or(1).max(self.n.unwrap_or(1)) as u32;
-        let iterations = match self.prompt.clone() {
+        let iterations = match &self.prompt {
             Prompt::String(_) => multiplier,
             Prompt::StringArray(p) => p.len() as u32 * multiplier,
             Prompt::IntegerArray(_) => multiplier,
@@ -240,7 +240,7 @@ impl RoutableModelResponse for CreateCompletionResponse {
 
     #[tracing::instrument(level = "debug")]
     fn get_token_count(&self) -> Option<u32> {
-        self.usage.clone().map(|u| u.total_tokens)
+        self.usage.as_ref().map(|u| u.total_tokens)
     }
 }
 
@@ -258,10 +258,10 @@ impl RoutableModelRequest for CreateModerationRequest {
     #[tracing::instrument(level = "debug")]
     fn get_token_count(&self, model: &api::Model) -> Option<u32> {
         let tokenizer = model.get_tokenizer().unwrap_or(Tokenizer::Cl100kBase);
-        Some(match self.input.clone() {
-            ModerationInput::String(text) => tokenizer::get_token_count(tokenizer, &[&text]),
+        Some(match &self.input {
+            ModerationInput::String(text) => tokenizer::get_token_count(tokenizer, &[text]),
             ModerationInput::StringArray(text_array) => {
-                tokenizer::get_token_count(tokenizer, &text_array)
+                tokenizer::get_token_count(tokenizer, text_array)
             }
         })
     }
@@ -293,10 +293,10 @@ impl RoutableModelRequest for CreateEmbeddingRequest {
     #[tracing::instrument(level = "debug")]
     fn get_token_count(&self, model: &api::Model) -> Option<u32> {
         let tokenizer = model.get_tokenizer().unwrap_or(Tokenizer::Cl100kBase);
-        Some(match self.input.clone() {
-            EmbeddingInput::String(text) => tokenizer::get_token_count(tokenizer, &[&text]),
+        Some(match &self.input {
+            EmbeddingInput::String(text) => tokenizer::get_token_count(tokenizer, &[text]),
             EmbeddingInput::StringArray(text_array) => {
-                tokenizer::get_token_count(tokenizer, &text_array)
+                tokenizer::get_token_count(tokenizer, text_array)
             }
             EmbeddingInput::IntegerArray(tokens) => tokens.len() as u32,
             EmbeddingInput::ArrayOfIntegerArray(token_array) => token_array.concat().len() as u32,
@@ -324,10 +324,10 @@ impl RoutableModelResponse for CreateEmbeddingResponse {
 impl RoutableModelRequest for CreateImageRequest {
     #[tracing::instrument(level = "debug")]
     fn get_model(&self) -> String {
-        match self.model.clone() {
+        match &self.model {
             Some(ImageModel::DallE3) => "dall-e-3".to_string(),
             Some(ImageModel::DallE2) => "dall-e-2".to_string(),
-            Some(ImageModel::Other(m)) => m,
+            Some(ImageModel::Other(m)) => m.clone(),
             None => "dall-e-2".to_string(),
         }
     }
@@ -346,10 +346,10 @@ impl RoutableModelRequest for CreateImageRequest {
 impl RoutableModelRequest for CreateImageEditRequest {
     #[tracing::instrument(level = "debug")]
     fn get_model(&self) -> String {
-        match self.model.clone() {
+        match &self.model {
             Some(ImageModel::DallE3) => "dall-e-3".to_string(),
             Some(ImageModel::DallE2) => "dall-e-2".to_string(),
-            Some(ImageModel::Other(m)) => m,
+            Some(ImageModel::Other(m)) => m.clone(),
             None => "dall-e-2".to_string(),
         }
     }
@@ -368,10 +368,10 @@ impl RoutableModelRequest for CreateImageEditRequest {
 impl RoutableModelRequest for CreateImageVariationRequest {
     #[tracing::instrument(level = "debug")]
     fn get_model(&self) -> String {
-        match self.model.clone() {
+        match &self.model {
             Some(ImageModel::DallE3) => "dall-e-3".to_string(),
             Some(ImageModel::DallE2) => "dall-e-2".to_string(),
-            Some(ImageModel::Other(m)) => m,
+            Some(ImageModel::Other(m)) => m.clone(),
             None => "dall-e-2".to_string(),
         }
     }
@@ -536,7 +536,7 @@ impl Into<ModelErrorCode> for ApiError {
     #[tracing::instrument(level = "trace")]
     fn into(self) -> ModelErrorCode {
         match self.r#type.as_deref() {
-            Some("invalid_request_error") => match self.code.clone().unwrap_or(Value::Null) {
+            Some("invalid_request_error") => match self.code.unwrap_or(Value::Null) {
                 Value::String(code) => {
                     match code.deref() {
                         "invalid_api_key" => ModelErrorCode::AuthIncorrect,
@@ -599,43 +599,43 @@ pub(super) struct OpenAIEndpoint {
     proxy_user_ids: bool,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Debug)]
 pub(super) struct OpenAIChatModel {
     endpoint: OpenAIEndpoint,
     model_id: String,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Debug)]
 pub(super) struct OpenAIEditModel {
     endpoint: OpenAIEndpoint,
     model_id: String,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Debug)]
 pub(super) struct OpenAICompletionModel {
     endpoint: OpenAIEndpoint,
     model_id: String,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Debug)]
 pub(super) struct OpenAIModerationModel {
     endpoint: OpenAIEndpoint,
     model_id: String,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Debug)]
 pub(super) struct OpenAIEmbeddingModel {
     endpoint: OpenAIEndpoint,
     model_id: String,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Debug)]
 pub(super) struct OpenAIImageModel {
     endpoint: OpenAIEndpoint,
     model_id: String,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Debug)]
 pub(super) struct OpenAIAudioModel {
     endpoint: OpenAIEndpoint,
     model_id: String,
@@ -841,7 +841,7 @@ impl CallableModelAPI for OpenAIImageModel {
     ) -> Result<Self::ModelResponse, Self::ModelError> {
         match request {
             ImagesRequest::Image(mut request) => {
-                request.model = match &*self.model_id {
+                request.model = match self.model_id.as_ref() {
                     "dall-e-3" => Some(ImageModel::DallE3),
                     "dall-e-2" => Some(ImageModel::DallE2),
                     _ => Some(ImageModel::Other(self.model_id.clone())),
@@ -859,7 +859,7 @@ impl CallableModelAPI for OpenAIImageModel {
                     .map_err(convert_openai_error)
             }
             ImagesRequest::Edit(mut request) => {
-                request.model = match &*self.model_id {
+                request.model = match self.model_id.as_ref() {
                     "dall-e-3" => Some(ImageModel::DallE3),
                     "dall-e-2" => Some(ImageModel::DallE2),
                     _ => Some(ImageModel::Other(self.model_id.clone())),
@@ -877,7 +877,7 @@ impl CallableModelAPI for OpenAIImageModel {
                     .map_err(convert_openai_error)
             }
             ImagesRequest::Variation(mut request) => {
-                request.model = match &*self.model_id {
+                request.model = match self.model_id.as_ref() {
                     "dall-e-3" => Some(ImageModel::DallE3),
                     "dall-e-2" => Some(ImageModel::DallE2),
                     _ => Some(ImageModel::Other(self.model_id.clone())),

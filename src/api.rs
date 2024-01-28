@@ -38,7 +38,7 @@ pub struct Role {
     pub quota: Quota,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct Model {
     pub label: String,
 
@@ -50,7 +50,7 @@ pub struct Model {
     pub quota: Quota,
 }
 
-#[derive(Default, Serialize, Deserialize, Clone, Debug)]
+#[derive(Default, Serialize, Deserialize, Debug)]
 pub struct ModelMetadata {
     pub created: Option<u64>,
     pub owned_by: Option<String>,
@@ -83,9 +83,9 @@ SEE https://platform.openai.com/docs/api-reference/streaming
 
 #[derive(Clone)]
 struct AppState {
-    users: Arc<RwLock<HashMap<Uuid, User>>>,
-    roles: Arc<RwLock<HashMap<Uuid, Role>>>,
-    models: Arc<RwLock<HashMap<Uuid, Model>>>,
+    users: Arc<RwLock<HashMap<Uuid, Arc<RwLock<User>>>>>,
+    roles: Arc<RwLock<HashMap<Uuid, Arc<RwLock<Role>>>>>,
+    models: Arc<RwLock<HashMap<Uuid, Arc<Model>>>>,
 }
 
 pub fn api_router() -> Router {
