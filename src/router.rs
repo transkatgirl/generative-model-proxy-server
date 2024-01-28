@@ -31,7 +31,7 @@ pub enum ModelAPI {
     OpenAIAudio(openai::OpenAIAudioModel),
 }
 
-trait CallableModelAPI: Send + Sync + Debug + Serialize + DeserializeOwned {
+trait CallableModelAPI: Send + Sync + Debug + Serialize + DeserializeOwned + 'static {
     type Client: Send + Sync;
     type ModelRequest: RoutableModelRequest;
     type ModelResponse: RoutableModelResponse;
@@ -39,10 +39,11 @@ trait CallableModelAPI: Send + Sync + Debug + Serialize + DeserializeOwned {
 
     fn init(&self) -> Self::Client;
 
-    fn to_request(
-        &self,
-        request: impl RoutableModelRequest + 'static,
-    ) -> Option<Self::ModelRequest>;
+    fn to_request(&self, request: impl RoutableModelRequest) -> Option<Self::ModelRequest> {
+        let item_any: Box<dyn Any> = Box::new(request);
+
+        item_any.downcast::<Self::ModelRequest>().map(|d| *d).ok()
+    }
 
     fn generate(
         &self,
@@ -54,7 +55,11 @@ trait CallableModelAPI: Send + Sync + Debug + Serialize + DeserializeOwned {
 
 #[derive(Deserialize, Debug)]
 #[serde(untagged)]
-#[allow(private_interfaces, clippy::large_enum_variant, clippy::enum_variant_names)]
+#[allow(
+    private_interfaces,
+    clippy::large_enum_variant,
+    clippy::enum_variant_names
+)]
 pub enum ModelRequest {
     OpenAIChat(openai::CreateChatCompletionRequest),
     OpenAIEdit(openai::CreateEditRequest),
@@ -65,7 +70,7 @@ pub enum ModelRequest {
     OpenAIAudio(openai::AudioRequest),
 }
 
-trait RoutableModelRequest: Send + Debug + DeserializeOwned {
+trait RoutableModelRequest: Send + Debug + DeserializeOwned + 'static {
     fn get_model(&self) -> String;
 
     fn get_token_count(&self, model: &api::Model) -> Option<u32>;
@@ -113,7 +118,11 @@ impl RoutableModelRequest for ModelRequest {
 
 #[derive(Serialize, Debug)]
 #[serde(untagged)]
-#[allow(private_interfaces, clippy::large_enum_variant, clippy::enum_variant_names)]
+#[allow(
+    private_interfaces,
+    clippy::large_enum_variant,
+    clippy::enum_variant_names
+)]
 pub enum ModelResponse {
     OpenAIChat(openai::CreateChatCompletionResponse),
     OpenAIEdit(openai::CreateEditResponse),
@@ -124,7 +133,7 @@ pub enum ModelResponse {
     OpenAIAudio(openai::AudioResponse),
 }
 
-trait RoutableModelResponse: Send + Debug + Serialize {
+trait RoutableModelResponse: Send + Debug + Serialize + 'static {
     fn replace_model_id(&mut self, model_id: String);
 
     fn get_token_count(&self) -> Option<u32>;
@@ -157,7 +166,7 @@ impl RoutableModelResponse for ModelResponse {
 }
 
 impl ModelResponse {
-    fn from(item: impl RoutableModelResponse + 'static) -> Self {
+    fn from(item: impl RoutableModelResponse) -> Self {
         let item_any: Box<dyn Any> = Box::new(item);
 
         if item_any.is::<openai::CreateChatCompletionResponse>() {
@@ -271,7 +280,7 @@ impl Into<ModelErrorCode> for ModelError {
 }
 
 impl ModelError {
-    fn from(item: impl RoutableModelError + 'static) -> Self {
+    fn from(item: impl RoutableModelError) -> Self {
         let item_any: Box<dyn Any> = Box::new(item);
 
         if item_any.is::<openai::ApiError>() {
@@ -294,7 +303,7 @@ struct RoutableRequest {
 
 // TODO: Add proxy for image URLs (GPT-4 input, image model output)
 #[tracing::instrument(level = "trace")]
-fn spawn_model_handler<M: CallableModelAPI + 'static>(
+fn spawn_model_handler<M: CallableModelAPI>(
     model_metadata: api::Model,
     model_callable: M,
 ) -> mpsc::Sender<RoutableRequest> {
@@ -323,9 +332,9 @@ fn spawn_model_handler<M: CallableModelAPI + 'static>(
                 Err(_) => {
                     if request
                         .response_channel
-                        .send(Err(ModelError::from(
-                            M::ModelError::from(ModelErrorCode::RateLimitUser),
-                        )))
+                        .send(Err(ModelError::from(M::ModelError::from(
+                            ModelErrorCode::RateLimitUser,
+                        ))))
                         .is_err()
                     {
                         event!(

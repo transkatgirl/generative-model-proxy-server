@@ -669,18 +669,6 @@ impl CallableModelAPI for OpenAIChatModel {
             .map_err(convert_openai_error)
     }
 
-    fn to_request(
-        &self,
-        request: impl RoutableModelRequest + 'static,
-    ) -> Option<Self::ModelRequest> {
-        let item_any: Box<dyn Any> = Box::new(request);
-
-        match item_any.downcast::<Self::ModelRequest>() {
-            Ok(item) => Some(*item),
-            Err(_) => None,
-        }
-    }
-
     fn init(&self) -> Self::Client {
         init_openai_client(self.endpoint.clone())
     }
@@ -707,18 +695,6 @@ impl CallableModelAPI for OpenAIEditModel {
             .create(request)
             .await
             .map_err(convert_openai_error)
-    }
-
-    fn to_request(
-        &self,
-        request: impl RoutableModelRequest + 'static,
-    ) -> Option<Self::ModelRequest> {
-        let item_any: Box<dyn Any> = Box::new(request);
-
-        match item_any.downcast::<Self::ModelRequest>() {
-            Ok(item) => Some(*item),
-            Err(_) => None,
-        }
     }
 
     fn init(&self) -> Self::Client {
@@ -754,18 +730,6 @@ impl CallableModelAPI for OpenAICompletionModel {
             .map_err(convert_openai_error)
     }
 
-    fn to_request(
-        &self,
-        request: impl RoutableModelRequest + 'static,
-    ) -> Option<Self::ModelRequest> {
-        let item_any: Box<dyn Any> = Box::new(request);
-
-        match item_any.downcast::<Self::ModelRequest>() {
-            Ok(item) => Some(*item),
-            Err(_) => None,
-        }
-    }
-
     fn init(&self) -> Self::Client {
         init_openai_client(self.endpoint.clone())
     }
@@ -797,18 +761,6 @@ impl CallableModelAPI for OpenAIModerationModel {
             .map_err(convert_openai_error)
     }
 
-    fn to_request(
-        &self,
-        request: impl RoutableModelRequest + 'static,
-    ) -> Option<Self::ModelRequest> {
-        let item_any: Box<dyn Any> = Box::new(request);
-
-        match item_any.downcast::<Self::ModelRequest>() {
-            Ok(item) => Some(*item),
-            Err(_) => None,
-        }
-    }
-
     fn init(&self) -> Self::Client {
         init_openai_client(self.endpoint.clone())
     }
@@ -834,18 +786,6 @@ impl CallableModelAPI for OpenAIEmbeddingModel {
             .create(request)
             .await
             .map_err(convert_openai_error)
-    }
-
-    fn to_request(
-        &self,
-        request: impl RoutableModelRequest + 'static,
-    ) -> Option<Self::ModelRequest> {
-        let item_any: Box<dyn Any> = Box::new(request);
-
-        match item_any.downcast::<Self::ModelRequest>() {
-            Ok(item) => Some(*item),
-            Err(_) => None,
-        }
     }
 
     fn init(&self) -> Self::Client {
@@ -957,18 +897,6 @@ impl CallableModelAPI for OpenAIImageModel {
         }
     }
 
-    fn to_request(
-        &self,
-        request: impl RoutableModelRequest + 'static,
-    ) -> Option<Self::ModelRequest> {
-        let item_any: Box<dyn Any> = Box::new(request);
-
-        match item_any.downcast::<Self::ModelRequest>() {
-            Ok(item) => Some(*item),
-            Err(_) => None,
-        }
-    }
-
     fn init(&self) -> Self::Client {
         init_openai_client(self.endpoint.clone())
     }
@@ -1060,18 +988,6 @@ impl CallableModelAPI for OpenAIAudioModel {
                     .map(AudioResponse::Translation)
                     .map_err(convert_openai_error)
             }
-        }
-    }
-
-    fn to_request(
-        &self,
-        request: impl RoutableModelRequest + 'static,
-    ) -> Option<Self::ModelRequest> {
-        let item_any: Box<dyn Any> = Box::new(request);
-
-        match item_any.downcast::<Self::ModelRequest>() {
-            Ok(item) => Some(*item),
-            Err(_) => None,
         }
     }
 
