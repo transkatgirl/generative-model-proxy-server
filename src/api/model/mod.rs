@@ -55,6 +55,14 @@ pub(super) trait RoutableModelResponse:
     fn get_token_count(&self) -> Option<u32>;
 }
 
+impl RoutableModelResponse for ResponseStatus {
+    fn get_token_count(&self) -> Option<u32> {
+        None
+    }
+}
+
+// TODO: Add proxy for image URLs (GPT-4 input, image model output)?
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(tag = "type")]
 #[allow(private_interfaces, clippy::enum_variant_names)]
@@ -70,25 +78,69 @@ pub(super) enum ModelAPI {
 
 pub(super) struct PackagedRequest {
     body: ModelRequest,
-    user: String,
+    label: Arc<str>,
+    user: Arc<str>,
     response_channel: oneshot::Sender<ModelResponse>,
 }
 
-impl ModelAPI {
-    pub(super) fn spawn_model_handler(self, label: &str) -> mpsc::UnboundedSender<PackagedRequest> {
+pub(super) type ModelAPIClient = mpsc::UnboundedSender<PackagedRequest>;
+
+impl CallableModelAPI for ModelAPI {
+    type Client = mpsc::UnboundedSender<PackagedRequest>;
+    type ModelRequest = ModelRequest;
+    type ModelResponse = ModelResponse;
+    type ModelError = ResponseStatus;
+
+    fn init(&self) -> Self::Client {
         let (tx, rx) = mpsc::unbounded_channel::<PackagedRequest>();
 
-        match self {
-            ModelAPI::OpenAIChat(model) => spawn_model_handler_task(model, label.into(), rx),
-            ModelAPI::OpenAIEdit(model) => spawn_model_handler_task(model, label.into(), rx),
-            ModelAPI::OpenAICompletion(model) => spawn_model_handler_task(model, label.into(), rx),
-            ModelAPI::OpenAIModeration(model) => spawn_model_handler_task(model, label.into(), rx),
-            ModelAPI::OpenAIEmbedding(model) => spawn_model_handler_task(model, label.into(), rx),
-            ModelAPI::OpenAIImage(model) => spawn_model_handler_task(model, label.into(), rx),
-            ModelAPI::OpenAIAudio(model) => spawn_model_handler_task(model, label.into(), rx),
+        match self.clone() {
+            ModelAPI::OpenAIChat(model) => spawn_model_handler_task(model, rx),
+            ModelAPI::OpenAIEdit(model) => spawn_model_handler_task(model, rx),
+            ModelAPI::OpenAICompletion(model) => spawn_model_handler_task(model, rx),
+            ModelAPI::OpenAIModeration(model) => spawn_model_handler_task(model, rx),
+            ModelAPI::OpenAIEmbedding(model) => spawn_model_handler_task(model, rx),
+            ModelAPI::OpenAIImage(model) => spawn_model_handler_task(model, rx),
+            ModelAPI::OpenAIAudio(model) => spawn_model_handler_task(model, rx),
         };
 
         tx
+    }
+
+    fn get_context_len(&self) -> Option<u32> {
+        match self.clone() {
+            ModelAPI::OpenAIChat(m) => m.get_context_len(),
+            ModelAPI::OpenAIEdit(m) => m.get_context_len(),
+            ModelAPI::OpenAICompletion(m) => m.get_context_len(),
+            ModelAPI::OpenAIModeration(m) => m.get_context_len(),
+            ModelAPI::OpenAIEmbedding(m) => m.get_context_len(),
+            ModelAPI::OpenAIImage(m) => m.get_context_len(),
+            ModelAPI::OpenAIAudio(m) => m.get_context_len(),
+        }
+    }
+
+    #[tracing::instrument(level = "debug")]
+    async fn generate(
+        &self,
+        client: &Self::Client,
+        user: &str,
+        label: &str,
+        request: Self::ModelRequest,
+    ) -> Result<Self::ModelResponse, Self::ModelError> {
+        let (tx, rx) = oneshot::channel();
+
+        let packaged = PackagedRequest {
+            body: request,
+            user: user.into(),
+            label: label.into(),
+            response_channel: tx,
+        };
+
+        if client.send(packaged).is_err() {
+            return Err(ResponseStatus::InternalError);
+        }
+
+        rx.await.map_err(|_| ResponseStatus::InternalError)
     }
 }
 
@@ -150,6 +202,7 @@ pub(super) enum ModelResponse {
     NoAPI(ResponseStatus),
 }
 
+// TODO: Implement this with a macro
 impl ModelResponse {
     fn from(item: impl RoutableModelResponse) -> Self {
         let item_any: Box<dyn Any> = Box::new(item);
@@ -248,7 +301,6 @@ impl Into<ResponseStatus> for ModelResponse {
 #[tracing::instrument(level = "debug")]
 fn spawn_model_handler_task<M: CallableModelAPI>(
     model: Arc<M>,
-    label: Arc<str>,
     mut channel: mpsc::UnboundedReceiver<PackagedRequest>,
 ) {
     tokio::spawn(async move {
@@ -271,10 +323,9 @@ fn spawn_model_handler_task<M: CallableModelAPI>(
 
             let model = model.clone();
             let client = client.clone();
-            let label = label.clone();
             tokio::spawn(async move {
                 let result = match model
-                    .generate(&client, &request.user, &label, model_request)
+                    .generate(&client, &request.user, &request.label, model_request)
                     .await
                 {
                     Ok(r) => ModelResponse::from(r),

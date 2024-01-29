@@ -17,9 +17,11 @@ use uuid::Uuid;
 mod limiter;
 mod model;
 mod queue;
+// TODO:
+//mod stats;
 
 use limiter::Limit;
-use model::{ModelAPI, ModelRequest, ModelResponse, PackagedRequest};
+use model::{ModelAPI, ModelAPIClient, ModelRequest, ModelResponse};
 
 #[derive(Default, Serialize, Deserialize, Debug)]
 #[serde(default)]
@@ -90,7 +92,7 @@ struct AppState {
     users: Arc<RwLock<HashMap<Uuid, Arc<RwLock<User>>>>>,
     roles: Arc<RwLock<HashMap<Uuid, Arc<RwLock<Role>>>>>,
     quotas: Arc<RwLock<HashMap<Uuid, Arc<Quota>>>>,
-    models: Arc<RwLock<HashMap<Uuid, (Arc<Model>, mpsc::UnboundedSender<PackagedRequest>)>>>,
+    models: Arc<RwLock<HashMap<Uuid, (Arc<Model>, ModelAPIClient)>>>,
 }
 
 struct Authenticated {

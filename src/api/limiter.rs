@@ -11,6 +11,13 @@ use tokio::{
 
 use super::model::{CallableModelAPI, RoutableModelRequest, RoutableModelResponse};
 
+type StateInformationDirectRateLimiter<MW = StateInformationMiddleware> = RateLimiter<
+    governor::state::direct::NotKeyed,
+    governor::state::InMemoryState,
+    governor::clock::DefaultClock,
+    MW,
+>;
+
 #[derive(Serialize, Deserialize, Debug)]
 pub(super) enum LimitItem {
     Request,
@@ -23,13 +30,6 @@ pub(super) struct Limit {
     item_type: LimitItem,
     per: Duration,
 }
-
-type StateInformationDirectRateLimiter<MW = StateInformationMiddleware> = RateLimiter<
-    governor::state::direct::NotKeyed,
-    governor::state::InMemoryState,
-    governor::clock::DefaultClock,
-    MW,
->;
 
 #[derive(Debug)]
 pub(super) struct Limiter {
@@ -108,7 +108,7 @@ impl Limiter {
             let mut needs_capacity = true;
             while needs_capacity {
                 let state = limiter.until_ready().await;
-                if tokens > state.remaining_burst_capacity() {
+                if tokens > state.remaining_burst_capacity() + 1 {
                     time::sleep(
                         state.quota().replenish_interval()
                             * (tokens - state.remaining_burst_capacity()),
