@@ -1,14 +1,11 @@
-use std::ops::Deref;
-
 use async_openai::{
     config::OpenAIConfig,
     error::OpenAIError,
     types::{
-        ChatCompletionRequestMessage, ChatCompletionRequestMessageContentPart,
-        ChatCompletionRequestUserMessageContent, CreateImageEditRequest, CreateImageRequest,
-        CreateImageVariationRequest, CreateTranscriptionRequest, CreateTranscriptionResponse,
-        CreateTranslationRequest, CreateTranslationResponse, EmbeddingInput, ImageModel,
-        ModerationInput, Prompt, TextModerationModel,
+        CreateImageEditRequest, CreateImageRequest, CreateImageVariationRequest,
+        CreateTranscriptionRequest, CreateTranscriptionResponse, CreateTranslationRequest,
+        CreateTranslationResponse, EmbeddingInput, ImageModel, ModerationInput, Prompt,
+        TextModerationModel,
     },
     Client,
 };
@@ -24,228 +21,84 @@ use serde::{Deserialize, Serialize};
 use serde_json::value::Value;
 use tracing::{event, Level};
 
-use super::{
-    tokenizer::{self, Tokenizer},
-    CallableModelAPI, ModelErrorCode, RoutableModelError, RoutableModelRequest,
-    RoutableModelResponse,
-};
-use crate::api;
-
-#[tracing::instrument(level = "trace")]
-fn get_token_count_messages(model: &api::Model, messages: &[ChatCompletionRequestMessage]) -> u32 {
-    let tokens_per_message = match model.metadata.tokens_per_message {
-        Some(t) => t,
-        None => {
-            if model.label.starts_with("gpt-3.5") {
-                4
-            } else {
-                3
-            }
-        }
-    };
-    let tokens_per_name = match model.metadata.tokens_per_name {
-        Some(t) => t,
-        None => {
-            if model.label.starts_with("gpt-3.5") {
-                -1
-            } else {
-                1
-            }
-        }
-    };
-
-    let mut token_offset: i32 = 3;
-    let mut text = Vec::new();
-
-    for message in messages {
-        token_offset += tokens_per_message;
-        match message {
-            ChatCompletionRequestMessage::System(m) => {
-                text.push("system");
-                text.push(&m.content);
-
-                if let Some(name) = &m.name {
-                    text.push(name);
-                    token_offset += tokens_per_name;
-                }
-            }
-            ChatCompletionRequestMessage::User(m) => {
-                text.push("user");
-
-                match &m.content {
-                    ChatCompletionRequestUserMessageContent::Text(content) => {
-                        text.push(content);
-                    }
-                    ChatCompletionRequestUserMessageContent::Array(content_array) => {
-                        for content in content_array {
-                            if let ChatCompletionRequestMessageContentPart::Text(c) = content {
-                                text.push(&c.text)
-                            }
-                        }
-                    }
-                }
-                if let Some(name) = &m.name {
-                    text.push(name);
-                    token_offset += tokens_per_name;
-                }
-            }
-            ChatCompletionRequestMessage::Assistant(m) => {
-                text.push("assistant");
-
-                if let Some(content) = &m.content {
-                    text.push(content);
-                }
-                if let Some(name) = &m.name {
-                    text.push(name);
-                    token_offset += tokens_per_name;
-                }
-                if let Some(tool_calls) = &m.tool_calls {
-                    for tool_call in tool_calls {
-                        text.push(&tool_call.function.name);
-                        text.push(&tool_call.function.arguments);
-                    }
-                }
-
-                #[allow(deprecated)]
-                if let Some(function) = &m.function_call {
-                    text.push(&function.name);
-                    text.push(&function.arguments);
-                }
-            }
-            ChatCompletionRequestMessage::Tool(m) => {
-                text.push("tool");
-                text.push(&m.content);
-            }
-            ChatCompletionRequestMessage::Function(m) => {
-                text.push("function");
-                text.push(&m.name);
-                if let Some(content) = &m.content {
-                    text.push(content);
-                }
-            }
-        }
-    }
-
-    let tokenizer = model.get_tokenizer().unwrap_or(Tokenizer::Cl100kBase);
-    tokenizer::get_token_count(tokenizer, &text) + token_offset as u32
-}
+use super::{CallableModelAPI, ResponseStatus, RoutableModelRequest, RoutableModelResponse};
 
 impl RoutableModelRequest for CreateChatCompletionRequest {
-    #[tracing::instrument(level = "debug")]
     fn get_model(&self) -> String {
         self.model.clone()
     }
 
-    #[tracing::instrument(level = "debug")]
-    fn get_token_count(&self, model: &api::Model) -> Option<u32> {
-        Some(get_token_count_messages(model, &self.messages))
-    }
-
-    #[tracing::instrument(level = "debug")]
-    fn get_max_tokens(&self, model: &api::Model) -> Option<u32> {
-        Some(
-            self.max_tokens
-                .unwrap_or_else(|| model.get_context_len() as u16) as u32
-                * self.n.unwrap_or(1) as u32,
-        )
+    fn get_total_n(&self) -> u32 {
+        self.n.unwrap_or(1) as u32
     }
 }
 
 impl RoutableModelResponse for CreateChatCompletionResponse {
-    #[tracing::instrument(level = "debug")]
-    fn replace_model_id(&mut self, model_id: String) {
-        self.model = model_id
-    }
-
-    #[tracing::instrument(level = "debug")]
     fn get_token_count(&self) -> Option<u32> {
         self.usage.as_ref().map(|u| u.total_tokens)
     }
 }
 
+#[allow(clippy::from_over_into)]
+impl Into<ResponseStatus> for CreateChatCompletionResponse {
+    fn into(self) -> ResponseStatus {
+        ResponseStatus::Success
+    }
+}
+
 impl RoutableModelRequest for CreateEditRequest {
-    #[tracing::instrument(level = "debug")]
     fn get_model(&self) -> String {
         self.model.clone()
     }
 
-    #[tracing::instrument(level = "debug")]
-    fn get_token_count(&self, model: &api::Model) -> Option<u32> {
-        let mut input = Vec::new();
-        if let Some(i) = &self.input {
-            input.push(i);
-        }
-        input.push(&self.instruction);
-
-        let tokenizer = model.get_tokenizer().unwrap_or(Tokenizer::P50kEdit);
-        Some(tokenizer::get_token_count(tokenizer, &input))
-    }
-
-    #[tracing::instrument(level = "debug")]
-    fn get_max_tokens(&self, model: &api::Model) -> Option<u32> {
-        Some(model.get_context_len() as u32 * self.n.unwrap_or(1) as u32)
+    fn get_total_n(&self) -> u32 {
+        self.n.unwrap_or(1) as u32
     }
 }
 
 impl RoutableModelResponse for CreateEditResponse {
-    #[tracing::instrument(level = "debug")]
-    fn replace_model_id(&mut self, _model_id: String) {}
-
-    #[tracing::instrument(level = "debug")]
     fn get_token_count(&self) -> Option<u32> {
         Some(self.usage.total_tokens)
     }
 }
 
+#[allow(clippy::from_over_into)]
+impl Into<ResponseStatus> for CreateEditResponse {
+    fn into(self) -> ResponseStatus {
+        ResponseStatus::Success
+    }
+}
+
 impl RoutableModelRequest for CreateCompletionRequest {
-    #[tracing::instrument(level = "debug")]
     fn get_model(&self) -> String {
         self.model.clone()
     }
 
-    #[tracing::instrument(level = "debug")]
-    fn get_token_count(&self, model: &api::Model) -> Option<u32> {
-        let tokenizer = model.get_tokenizer().unwrap_or(Tokenizer::Cl100kBase);
-        Some(match &self.prompt {
-            Prompt::String(text) => tokenizer::get_token_count(tokenizer, &[text]),
-            Prompt::StringArray(text_array) => tokenizer::get_token_count(tokenizer, text_array),
-            Prompt::IntegerArray(tokens) => tokens.len() as u32,
-            Prompt::ArrayOfIntegerArray(token_array) => token_array.concat().len() as u32,
-        })
-    }
-
-    #[tracing::instrument(level = "debug")]
-    fn get_max_tokens(&self, model: &api::Model) -> Option<u32> {
-        let per_iteration = self
-            .max_tokens
-            .unwrap_or_else(|| model.get_context_len() as u16);
-
-        let multiplier = self.best_of.unwrap_or(1).max(self.n.unwrap_or(1)) as u32;
-        let iterations = match &self.prompt {
-            Prompt::String(_) => multiplier,
-            Prompt::StringArray(p) => p.len() as u32 * multiplier,
-            Prompt::IntegerArray(_) => multiplier,
-            Prompt::ArrayOfIntegerArray(p) => p.len() as u32 * multiplier,
-        };
-
-        Some(per_iteration as u32 * iterations)
+    fn get_total_n(&self) -> u32 {
+        self.best_of.unwrap_or(1).max(self.n.unwrap_or(1)) as u32
+            * match &self.prompt {
+                Prompt::String(_) => 1,
+                Prompt::StringArray(p) => p.len() as u32,
+                Prompt::IntegerArray(_) => 1,
+                Prompt::ArrayOfIntegerArray(p) => p.len() as u32,
+            }
     }
 }
 
 impl RoutableModelResponse for CreateCompletionResponse {
-    #[tracing::instrument(level = "debug")]
-    fn replace_model_id(&mut self, model_id: String) {
-        self.model = model_id
-    }
-
-    #[tracing::instrument(level = "debug")]
     fn get_token_count(&self) -> Option<u32> {
         self.usage.as_ref().map(|u| u.total_tokens)
     }
 }
 
+#[allow(clippy::from_over_into)]
+impl Into<ResponseStatus> for CreateCompletionResponse {
+    fn into(self) -> ResponseStatus {
+        ResponseStatus::Success
+    }
+}
+
 impl RoutableModelRequest for CreateModerationRequest {
-    #[tracing::instrument(level = "debug")]
     fn get_model(&self) -> String {
         match self.model {
             Some(TextModerationModel::Stable) => "text-moderation-stable",
@@ -255,74 +108,56 @@ impl RoutableModelRequest for CreateModerationRequest {
         .to_string()
     }
 
-    #[tracing::instrument(level = "debug")]
-    fn get_token_count(&self, model: &api::Model) -> Option<u32> {
-        let tokenizer = model.get_tokenizer().unwrap_or(Tokenizer::Cl100kBase);
-        Some(match &self.input {
-            ModerationInput::String(text) => tokenizer::get_token_count(tokenizer, &[text]),
-            ModerationInput::StringArray(text_array) => {
-                tokenizer::get_token_count(tokenizer, text_array)
-            }
-        })
-    }
-
-    #[tracing::instrument(level = "debug")]
-    fn get_max_tokens(&self, _model: &api::Model) -> Option<u32> {
-        None
+    fn get_total_n(&self) -> u32 {
+        match &self.input {
+            ModerationInput::String(_) => 1,
+            ModerationInput::StringArray(p) => p.len() as u32,
+        }
     }
 }
 
 impl RoutableModelResponse for CreateModerationResponse {
-    #[tracing::instrument(level = "debug")]
-    fn replace_model_id(&mut self, model_id: String) {
-        self.model = model_id
-    }
-
-    #[tracing::instrument(level = "debug")]
     fn get_token_count(&self) -> Option<u32> {
         None
     }
 }
 
+#[allow(clippy::from_over_into)]
+impl Into<ResponseStatus> for CreateModerationResponse {
+    fn into(self) -> ResponseStatus {
+        ResponseStatus::Success
+    }
+}
+
 impl RoutableModelRequest for CreateEmbeddingRequest {
-    #[tracing::instrument(level = "debug")]
     fn get_model(&self) -> String {
         self.model.clone()
     }
 
-    #[tracing::instrument(level = "debug")]
-    fn get_token_count(&self, model: &api::Model) -> Option<u32> {
-        let tokenizer = model.get_tokenizer().unwrap_or(Tokenizer::Cl100kBase);
-        Some(match &self.input {
-            EmbeddingInput::String(text) => tokenizer::get_token_count(tokenizer, &[text]),
-            EmbeddingInput::StringArray(text_array) => {
-                tokenizer::get_token_count(tokenizer, text_array)
-            }
-            EmbeddingInput::IntegerArray(tokens) => tokens.len() as u32,
-            EmbeddingInput::ArrayOfIntegerArray(token_array) => token_array.concat().len() as u32,
-        })
-    }
-
-    #[tracing::instrument(level = "debug")]
-    fn get_max_tokens(&self, _model: &api::Model) -> Option<u32> {
-        None
+    fn get_total_n(&self) -> u32 {
+        match &self.input {
+            EmbeddingInput::String(_) => 1,
+            EmbeddingInput::StringArray(p) => p.len() as u32,
+            EmbeddingInput::IntegerArray(_) => 1,
+            EmbeddingInput::ArrayOfIntegerArray(p) => p.len() as u32,
+        }
     }
 }
 
 impl RoutableModelResponse for CreateEmbeddingResponse {
-    #[tracing::instrument(level = "debug")]
-    fn replace_model_id(&mut self, model_id: String) {
-        self.model = model_id
-    }
-
-    #[tracing::instrument(level = "debug")]
     fn get_token_count(&self) -> Option<u32> {
         Some(self.usage.total_tokens)
     }
 }
 
+#[allow(clippy::from_over_into)]
+impl Into<ResponseStatus> for CreateEmbeddingResponse {
+    fn into(self) -> ResponseStatus {
+        ResponseStatus::Success
+    }
+}
+
 impl RoutableModelRequest for CreateImageRequest {
-    #[tracing::instrument(level = "debug")]
     fn get_model(&self) -> String {
         match &self.model {
             Some(ImageModel::DallE3) => "dall-e-3".to_string(),
@@ -332,19 +167,12 @@ impl RoutableModelRequest for CreateImageRequest {
         }
     }
 
-    #[tracing::instrument(level = "debug")]
-    fn get_token_count(&self, _model: &api::Model) -> Option<u32> {
-        Some(self.n.unwrap_or(1) as u32)
-    }
-
-    #[tracing::instrument(level = "debug")]
-    fn get_max_tokens(&self, _model: &api::Model) -> Option<u32> {
-        None
+    fn get_total_n(&self) -> u32 {
+        self.n.unwrap_or(1) as u32
     }
 }
 
 impl RoutableModelRequest for CreateImageEditRequest {
-    #[tracing::instrument(level = "debug")]
     fn get_model(&self) -> String {
         match &self.model {
             Some(ImageModel::DallE3) => "dall-e-3".to_string(),
@@ -354,19 +182,12 @@ impl RoutableModelRequest for CreateImageEditRequest {
         }
     }
 
-    #[tracing::instrument(level = "debug")]
-    fn get_token_count(&self, _model: &api::Model) -> Option<u32> {
-        Some(self.n.unwrap_or(1) as u32)
-    }
-
-    #[tracing::instrument(level = "debug")]
-    fn get_max_tokens(&self, _model: &api::Model) -> Option<u32> {
-        None
+    fn get_total_n(&self) -> u32 {
+        self.n.unwrap_or(1) as u32
     }
 }
 
 impl RoutableModelRequest for CreateImageVariationRequest {
-    #[tracing::instrument(level = "debug")]
     fn get_model(&self) -> String {
         match &self.model {
             Some(ImageModel::DallE3) => "dall-e-3".to_string(),
@@ -376,94 +197,89 @@ impl RoutableModelRequest for CreateImageVariationRequest {
         }
     }
 
-    #[tracing::instrument(level = "debug")]
-    fn get_token_count(&self, _model: &api::Model) -> Option<u32> {
-        Some(self.n.unwrap_or(1) as u32)
-    }
-
-    #[tracing::instrument(level = "debug")]
-    fn get_max_tokens(&self, _model: &api::Model) -> Option<u32> {
-        None
+    fn get_total_n(&self) -> u32 {
+        self.n.unwrap_or(1) as u32
     }
 }
 
 impl RoutableModelResponse for ImagesResponse {
-    #[tracing::instrument(level = "debug")]
-    fn replace_model_id(&mut self, _model_id: String) {}
-
-    #[tracing::instrument(level = "debug")]
     fn get_token_count(&self) -> Option<u32> {
-        Some(self.data.len() as u32)
+        None
+    }
+}
+
+#[allow(clippy::from_over_into)]
+impl Into<ResponseStatus> for ImagesResponse {
+    fn into(self) -> ResponseStatus {
+        ResponseStatus::Success
     }
 }
 
 impl RoutableModelRequest for CreateTranscriptionRequest {
-    #[tracing::instrument(level = "debug")]
     fn get_model(&self) -> String {
         self.model.clone()
     }
 
-    #[tracing::instrument(level = "debug")]
-    fn get_token_count(&self, _model: &api::Model) -> Option<u32> {
-        None
-    }
-
-    #[tracing::instrument(level = "debug")]
-    fn get_max_tokens(&self, _model: &api::Model) -> Option<u32> {
-        None
+    fn get_total_n(&self) -> u32 {
+        1
     }
 }
 
 impl RoutableModelResponse for CreateTranscriptionResponse {
-    #[tracing::instrument(level = "debug")]
-    fn replace_model_id(&mut self, _model_id: String) {}
-
-    #[tracing::instrument(level = "debug")]
     fn get_token_count(&self) -> Option<u32> {
         None
+    }
+}
+
+#[allow(clippy::from_over_into)]
+impl Into<ResponseStatus> for CreateTranscriptionResponse {
+    fn into(self) -> ResponseStatus {
+        ResponseStatus::Success
     }
 }
 
 impl RoutableModelRequest for CreateTranslationRequest {
-    #[tracing::instrument(level = "debug")]
     fn get_model(&self) -> String {
         self.model.clone()
     }
 
-    #[tracing::instrument(level = "debug")]
-    fn get_token_count(&self, _model: &api::Model) -> Option<u32> {
-        None
-    }
-
-    #[tracing::instrument(level = "debug")]
-    fn get_max_tokens(&self, _model: &api::Model) -> Option<u32> {
-        None
+    fn get_total_n(&self) -> u32 {
+        1
     }
 }
 
 impl RoutableModelResponse for CreateTranslationResponse {
-    #[tracing::instrument(level = "debug")]
-    fn replace_model_id(&mut self, _model_id: String) {}
-
-    #[tracing::instrument(level = "debug")]
     fn get_token_count(&self) -> Option<u32> {
         None
+    }
+}
+
+#[allow(clippy::from_over_into)]
+impl Into<ResponseStatus> for CreateTranslationResponse {
+    fn into(self) -> ResponseStatus {
+        ResponseStatus::Success
     }
 }
 
 impl RoutableModelResponse for ApiError {
-    #[tracing::instrument(level = "debug")]
-    fn replace_model_id(&mut self, _model_id: String) {}
-
-    #[tracing::instrument(level = "debug")]
     fn get_token_count(&self) -> Option<u32> {
         None
     }
 }
 
-impl RoutableModelError for ApiError {}
+#[allow(clippy::from_over_into)]
+impl Into<ResponseStatus> for ApiError {
+    fn into(self) -> ResponseStatus {
+        match self.r#type.as_deref() {
+            Some("invalid_request_error") => ResponseStatus::InvalidRequest,
+            Some("insufficient_quota") => ResponseStatus::ModelUnavailable,
+            Some("server_error") => ResponseStatus::BadUpstream,
+            _ => ResponseStatus::InternalError,
+        }
+    }
+}
 
-impl From<ModelErrorCode> for ApiError {
+/*impl From<ModelErrorCode> for ApiError {
     #[tracing::instrument(level = "trace")]
     fn from(value: ModelErrorCode) -> Self {
         match value {
@@ -529,38 +345,7 @@ impl From<ModelErrorCode> for ApiError {
             },
         }
     }
-}
-
-#[allow(clippy::from_over_into)]
-impl Into<ModelErrorCode> for ApiError {
-    #[tracing::instrument(level = "trace")]
-    fn into(self) -> ModelErrorCode {
-        match self.r#type.as_deref() {
-            Some("invalid_request_error") => match self.code.unwrap_or(Value::Null) {
-                Value::String(code) => {
-                    match code.deref() {
-                        "invalid_api_key" => ModelErrorCode::AuthIncorrect,
-                        "model_not_found" => ModelErrorCode::ModelNotFound,
-                        "unknown_url" => ModelErrorCode::EndpointNotFound,
-                        _ => ModelErrorCode::OtherModelError,
-                    }
-                }
-                _ => match self.message.deref() {
-                    "We could not parse the JSON body of your request. (HINT: This likely means you aren't using your HTTP library correctly. The OpenAI API expects a JSON payload, but what was sent was not valid JSON. If you have trouble figuring out how to fix this, contact the proxy's administrator.)" => ModelErrorCode::FailedParse,
-                    "Your messages exceeded the model's maximum context length. Please reduce the length of the message. If you belive you are seeing this message in error, contact the proxy's administrator." => ModelErrorCode::PromptTooLong,
-                    "You didn't provide an API key. You need to provide your API key in an Authorization header using Bearer auth (i.e. Authorization: Bearer YOUR_KEY), or as the password field (with blank username) if you're accessing the API from your browser and are prompted for a username and password. You can obtain an API key from the proxy's administrator." => ModelErrorCode::AuthMissing,
-                    _ => ModelErrorCode::OtherModelError,
-                },
-            },
-            Some("insufficient_quota") => ModelErrorCode::RateLimitUser,
-            Some("server_error") => match self.message.deref() {
-                "That model is currently overloaded with other requests. You can retry your request, or contact the proxy's administrator if the error persists." => ModelErrorCode::RateLimitModel,
-                _ => ModelErrorCode::InternalError,
-            },
-            _ => ModelErrorCode::OtherModelError,
-        }
-    }
-}
+}*/
 
 #[tracing::instrument(level = "trace")]
 fn init_openai_client(endpoint: OpenAIEndpoint) -> Client<OpenAIConfig> {
@@ -602,30 +387,35 @@ pub(super) struct OpenAIEndpoint {
 #[derive(Serialize, Deserialize, Debug)]
 pub(super) struct OpenAIChatModel {
     endpoint: OpenAIEndpoint,
+    context_len: u32,
     model_id: String,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
 pub(super) struct OpenAIEditModel {
     endpoint: OpenAIEndpoint,
+    context_len: u32,
     model_id: String,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
 pub(super) struct OpenAICompletionModel {
     endpoint: OpenAIEndpoint,
+    context_len: u32,
     model_id: String,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
 pub(super) struct OpenAIModerationModel {
     endpoint: OpenAIEndpoint,
+    context_len: u32,
     model_id: String,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
 pub(super) struct OpenAIEmbeddingModel {
     endpoint: OpenAIEndpoint,
+    context_len: u32,
     model_id: String,
 }
 
@@ -647,11 +437,20 @@ impl CallableModelAPI for OpenAIChatModel {
     type ModelResponse = CreateChatCompletionResponse;
     type ModelError = ApiError;
 
+    fn init(&self) -> Self::Client {
+        init_openai_client(self.endpoint.clone())
+    }
+
+    fn get_context_len(&self) -> Option<u32> {
+        Some(self.context_len)
+    }
+
     #[tracing::instrument(level = "debug")]
     async fn generate(
         &self,
         client: &Self::Client,
         user: &str,
+        label: &str,
         mut request: Self::ModelRequest,
     ) -> Result<Self::ModelResponse, Self::ModelError> {
         request.model = self.model_id.clone();
@@ -666,11 +465,11 @@ impl CallableModelAPI for OpenAIChatModel {
             .chat()
             .create(request)
             .await
+            .map(|mut response| {
+                response.model = label.to_string();
+                response
+            })
             .map_err(convert_openai_error)
-    }
-
-    fn init(&self) -> Self::Client {
-        init_openai_client(self.endpoint.clone())
     }
 }
 
@@ -680,11 +479,20 @@ impl CallableModelAPI for OpenAIEditModel {
     type ModelResponse = CreateEditResponse;
     type ModelError = ApiError;
 
+    fn init(&self) -> Self::Client {
+        init_openai_client(self.endpoint.clone())
+    }
+
+    fn get_context_len(&self) -> Option<u32> {
+        Some(self.context_len)
+    }
+
     #[tracing::instrument(level = "debug")]
     async fn generate(
         &self,
         client: &Self::Client,
         _user: &str,
+        _label: &str,
         mut request: Self::ModelRequest,
     ) -> Result<Self::ModelResponse, Self::ModelError> {
         request.model = self.model_id.clone();
@@ -696,10 +504,6 @@ impl CallableModelAPI for OpenAIEditModel {
             .await
             .map_err(convert_openai_error)
     }
-
-    fn init(&self) -> Self::Client {
-        init_openai_client(self.endpoint.clone())
-    }
 }
 
 impl CallableModelAPI for OpenAICompletionModel {
@@ -708,11 +512,20 @@ impl CallableModelAPI for OpenAICompletionModel {
     type ModelResponse = CreateCompletionResponse;
     type ModelError = ApiError;
 
+    fn init(&self) -> Self::Client {
+        init_openai_client(self.endpoint.clone())
+    }
+
+    fn get_context_len(&self) -> Option<u32> {
+        Some(self.context_len)
+    }
+
     #[tracing::instrument(level = "debug")]
     async fn generate(
         &self,
         client: &Self::Client,
         user: &str,
+        label: &str,
         mut request: Self::ModelRequest,
     ) -> Result<Self::ModelResponse, Self::ModelError> {
         request.model = self.model_id.clone();
@@ -727,11 +540,11 @@ impl CallableModelAPI for OpenAICompletionModel {
             .completions()
             .create(request)
             .await
+            .map(|mut response| {
+                response.model = label.to_string();
+                response
+            })
             .map_err(convert_openai_error)
-    }
-
-    fn init(&self) -> Self::Client {
-        init_openai_client(self.endpoint.clone())
     }
 }
 
@@ -741,11 +554,20 @@ impl CallableModelAPI for OpenAIModerationModel {
     type ModelResponse = CreateModerationResponse;
     type ModelError = ApiError;
 
+    fn init(&self) -> Self::Client {
+        init_openai_client(self.endpoint.clone())
+    }
+
+    fn get_context_len(&self) -> Option<u32> {
+        Some(self.context_len)
+    }
+
     #[tracing::instrument(level = "debug")]
     async fn generate(
         &self,
         client: &Self::Client,
         _user: &str,
+        label: &str,
         mut request: Self::ModelRequest,
     ) -> Result<Self::ModelResponse, Self::ModelError> {
         request.model = match &*self.model_id {
@@ -758,11 +580,11 @@ impl CallableModelAPI for OpenAIModerationModel {
             .moderations()
             .create(request)
             .await
+            .map(|mut response| {
+                response.model = label.to_string();
+                response
+            })
             .map_err(convert_openai_error)
-    }
-
-    fn init(&self) -> Self::Client {
-        init_openai_client(self.endpoint.clone())
     }
 }
 
@@ -772,11 +594,20 @@ impl CallableModelAPI for OpenAIEmbeddingModel {
     type ModelResponse = CreateEmbeddingResponse;
     type ModelError = ApiError;
 
+    fn init(&self) -> Self::Client {
+        init_openai_client(self.endpoint.clone())
+    }
+
+    fn get_context_len(&self) -> Option<u32> {
+        Some(self.context_len)
+    }
+
     #[tracing::instrument(level = "debug")]
     async fn generate(
         &self,
         client: &Self::Client,
         _user: &str,
+        label: &str,
         mut request: Self::ModelRequest,
     ) -> Result<Self::ModelResponse, Self::ModelError> {
         request.model = self.model_id.clone();
@@ -785,11 +616,11 @@ impl CallableModelAPI for OpenAIEmbeddingModel {
             .embeddings()
             .create(request)
             .await
+            .map(|mut response| {
+                response.model = label.to_string();
+                response
+            })
             .map_err(convert_openai_error)
-    }
-
-    fn init(&self) -> Self::Client {
-        init_openai_client(self.endpoint.clone())
     }
 }
 
@@ -810,19 +641,11 @@ impl RoutableModelRequest for ImagesRequest {
         }
     }
 
-    fn get_token_count(&self, model: &api::Model) -> Option<u32> {
+    fn get_total_n(&self) -> u32 {
         match self {
-            Self::Image(r) => r.get_token_count(model),
-            Self::Edit(r) => r.get_token_count(model),
-            Self::Variation(r) => r.get_token_count(model),
-        }
-    }
-
-    fn get_max_tokens(&self, model: &api::Model) -> Option<u32> {
-        match self {
-            Self::Image(r) => r.get_max_tokens(model),
-            Self::Edit(r) => r.get_max_tokens(model),
-            Self::Variation(r) => r.get_max_tokens(model),
+            Self::Image(r) => r.get_total_n(),
+            Self::Edit(r) => r.get_total_n(),
+            Self::Variation(r) => r.get_total_n(),
         }
     }
 }
@@ -833,10 +656,20 @@ impl CallableModelAPI for OpenAIImageModel {
     type ModelResponse = ImagesResponse;
     type ModelError = ApiError;
 
+    fn init(&self) -> Self::Client {
+        init_openai_client(self.endpoint.clone())
+    }
+
+    fn get_context_len(&self) -> Option<u32> {
+        None
+    }
+
+    #[tracing::instrument(level = "debug")]
     async fn generate(
         &self,
         client: &Self::Client,
         user: &str,
+        _label: &str,
         request: Self::ModelRequest,
     ) -> Result<Self::ModelResponse, Self::ModelError> {
         match request {
@@ -896,10 +729,6 @@ impl CallableModelAPI for OpenAIImageModel {
             }
         }
     }
-
-    fn init(&self) -> Self::Client {
-        init_openai_client(self.endpoint.clone())
-    }
 }
 
 #[derive(Deserialize, Debug)]
@@ -917,17 +746,10 @@ impl RoutableModelRequest for AudioRequest {
         }
     }
 
-    fn get_token_count(&self, model: &api::Model) -> Option<u32> {
+    fn get_total_n(&self) -> u32 {
         match self {
-            Self::Transcription(r) => r.get_token_count(model),
-            Self::Translation(r) => r.get_token_count(model),
-        }
-    }
-
-    fn get_max_tokens(&self, model: &api::Model) -> Option<u32> {
-        match self {
-            Self::Transcription(r) => r.get_max_tokens(model),
-            Self::Translation(r) => r.get_max_tokens(model),
+            Self::Transcription(r) => r.get_total_n(),
+            Self::Translation(r) => r.get_total_n(),
         }
     }
 }
@@ -940,17 +762,20 @@ pub(super) enum AudioResponse {
 }
 
 impl RoutableModelResponse for AudioResponse {
-    fn replace_model_id(&mut self, model_id: String) {
-        match self {
-            Self::Transcription(r) => r.replace_model_id(model_id),
-            Self::Translation(r) => r.replace_model_id(model_id),
-        }
-    }
-
     fn get_token_count(&self) -> Option<u32> {
         match self {
             Self::Transcription(r) => r.get_token_count(),
             Self::Translation(r) => r.get_token_count(),
+        }
+    }
+}
+
+#[allow(clippy::from_over_into)]
+impl Into<ResponseStatus> for AudioResponse {
+    fn into(self) -> ResponseStatus {
+        match self {
+            Self::Transcription(r) => r.into(),
+            Self::Translation(r) => r.into(),
         }
     }
 }
@@ -961,10 +786,20 @@ impl CallableModelAPI for OpenAIAudioModel {
     type ModelResponse = AudioResponse;
     type ModelError = ApiError;
 
+    fn init(&self) -> Self::Client {
+        init_openai_client(self.endpoint.clone())
+    }
+
+    fn get_context_len(&self) -> Option<u32> {
+        None
+    }
+
+    #[tracing::instrument(level = "debug")]
     async fn generate(
         &self,
         client: &Self::Client,
         _user: &str,
+        _label: &str,
         request: Self::ModelRequest,
     ) -> Result<Self::ModelResponse, Self::ModelError> {
         match request {
@@ -989,9 +824,5 @@ impl CallableModelAPI for OpenAIAudioModel {
                     .map_err(convert_openai_error)
             }
         }
-    }
-
-    fn init(&self) -> Self::Client {
-        init_openai_client(self.endpoint.clone())
     }
 }

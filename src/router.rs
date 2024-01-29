@@ -15,7 +15,6 @@ use self::limiter::Limiter;
 use crate::api;
 
 mod limiter;
-mod openai;
 mod tokenizer;
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -297,7 +296,7 @@ impl ModelError {
 
 struct RoutableRequest {
     body: ModelRequest,
-    user_id: Uuid,
+    user: String,
     response_channel: oneshot::Sender<Result<ModelResponse, ModelError>>,
 }
 
@@ -307,21 +306,15 @@ fn spawn_model_handler<M: CallableModelAPI>(
     model_metadata: Arc<api::Model>,
     model_callable: Arc<M>,
 ) -> mpsc::Sender<RoutableRequest> {
-    let (tx, mut rx) =
-        mpsc::channel::<RoutableRequest>(if model_metadata.quota.max_queue_size == 0 {
-            64
-        } else {
-            model_metadata.quota.max_queue_size
-        });
+    let (tx, mut rx) = mpsc::channel::<RoutableRequest>(
+        (model_metadata.quota.requests_per_minute as usize / 8).min(1),
+    );
 
     tokio::spawn(async move {
         let client = Arc::new(model_callable.init());
-        let limiter = Arc::new(Limiter::new(model_metadata.quota));
-        let mut encode_buffer: [u8; 45] = Uuid::encode_buffer();
+        let limiter = Arc::new(Limiter::new(model_metadata.quota.clone()));
 
         while let Some(request) = rx.recv().await {
-            let user: &mut str = request.user_id.simple().encode_lower(&mut encode_buffer);
-
             let handle = match limiter
                 .wait_model_request(&model_metadata, &request.body)
                 .await
@@ -335,24 +328,23 @@ fn spawn_model_handler<M: CallableModelAPI>(
                         ))))
                         .is_err()
                     {
-                        event!(
-                            Level::WARN,
-                            "Unable to send response to {}",
-                            request.user_id
-                        );
+                        event!(Level::WARN, "Unable to send response to {}", request.user);
                     };
                     continue;
                 }
             };
 
-            let user = user.to_string();
             let limiter = limiter.clone();
             let client = client.clone();
             let model_callable = model_callable.clone();
             let model_metadata = model_metadata.clone();
             tokio::spawn(async move {
                 let response = match model_callable.to_request(request.body) {
-                    Some(request) => model_callable.generate(&client, &user, request).await,
+                    Some(model_request) => {
+                        model_callable
+                            .generate(&client, &request.user, model_request)
+                            .await
+                    }
                     None => Err(M::ModelError::from(ModelErrorCode::ModelNotFound)),
                 }
                 .map(|mut response| {
@@ -370,17 +362,13 @@ fn spawn_model_handler<M: CallableModelAPI>(
                     event!(
                         Level::WARN,
                         "Request by {} to {:?} exceeded maximum request tokens",
-                        request.user_id,
+                        request.user,
                         model_metadata.uuid
                     );
                 }
 
                 if request.response_channel.send(response).is_err() {
-                    event!(
-                        Level::WARN,
-                        "Unable to send response to {}",
-                        request.user_id
-                    );
+                    event!(Level::WARN, "Unable to send response to {}", request.user);
                 };
             });
 
@@ -393,13 +381,15 @@ fn spawn_model_handler<M: CallableModelAPI>(
 
 #[derive(Debug)]
 pub struct ModelRequestRouter {
+    limiters: Arc<RwLock<HashMap<Uuid, Arc<Limiter>>>>,
     endpoints: Arc<RwLock<HashMap<Uuid, mpsc::Sender<RoutableRequest>>>>,
 }
 
 impl ModelRequestRouter {
     #[tracing::instrument(level = "trace")]
-    pub fn new() -> Self {
+    pub fn new(quotas: Arc<RwLock<HashMap<Uuid, Arc<api::Quota>>>>) -> Self {
         Self {
+            limiters: Arc::new(RwLock::new(HashMap::new())),
             endpoints: Arc::new(RwLock::new(HashMap::new())),
         }
     }
@@ -420,9 +410,20 @@ impl ModelRequestRouter {
         self.endpoints.write().await.insert(uuid, handler);
     }
 
+    pub async fn add_quota(&self, quota: Arc<api::Quota>) {
+        let uuid = quota.uuid;
+        let limiter = Limiter::new(quota);
+
+        self.limiters.write().await.insert(uuid, Arc::new(limiter));
+    }
+
     #[tracing::instrument(level = "debug")]
     pub async fn remove_model(&self, model_id: &Uuid) -> Option<()> {
         self.endpoints.write().await.remove(model_id).map(|_| ())
+    }
+
+    pub async fn remove_quota(&self, quota_id: &Uuid) -> Option<()> {
+        self.limiters.write().await.remove(quota_id).map(|_| ())
     }
 
     #[tracing::instrument(level = "trace")]
@@ -435,19 +436,24 @@ impl ModelRequestRouter {
         &self,
         model_id: Uuid,
         user_id: Uuid,
-        priority: usize,
+        quotas: Vec<api::QuotaMember>,
         request: ModelRequest,
     ) -> Result<ModelResponse, ModelError> {
         let (tx, rx) = oneshot::channel();
 
+        // TODO: Per-user and per-role rate limiting
+
         let routeable = RoutableRequest {
             body: request,
-            user_id,
+            user: user_id
+                .simple()
+                .encode_lower(&mut Uuid::encode_buffer())
+                .to_string(),
             response_channel: tx,
         };
 
         match self.get_endpoint(&model_id).await {
-            Some(m) => match m.send_timeout(routeable, Duration::new(5, 0)).await {
+            Some(m) => match m.send_timeout(routeable, Duration::new(2, 0)).await {
                 Ok(_) => rx
                     .await
                     .unwrap_or(Err(ModelError::NoAPI(ModelErrorCode::InternalError))),
