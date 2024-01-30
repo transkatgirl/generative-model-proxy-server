@@ -141,9 +141,7 @@ impl Limiter {
                 for (rate_limit, state_mutex) in &self.token_limiters {
                     let mut state = state_mutex.lock().await;
 
-                    if state.tat.is_some() && state.tat.unwrap() > handle.arrived_at {
-                        let _ = state.revert_at(rate_limit, handle.arrived_at, tokens);
-                    }
+                    let _ = state.revert_at(rate_limit, handle.arrived_at, tokens);
                 }
             }
             Ordering::Equal => {}

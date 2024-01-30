@@ -124,7 +124,7 @@ impl GcraState {
         // We had a previous request
         if tat < arrived_at {
             // Reset state: prev request was really old
-            self.tat = None;
+            //self.tat = None;
         } else {
             // prev request was recent
             self.tat = Some(compute_revert_tat(tat));
