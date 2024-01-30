@@ -381,14 +381,14 @@ impl CallableModelAPI for OpenAIChatModel {
     async fn generate(
         &self,
         client: &Self::Client,
-        user: &str,
-        label: &str,
+        request_label: &str,
+        model_label: &str,
         mut request: Self::ModelRequest,
     ) -> Result<Self::ModelResponse, Self::ModelError> {
         request.model = self.model_id.clone();
         request.stream = None;
         request.user = if self.endpoint.proxy_user_ids {
-            Some(user.to_string())
+            Some(request_label.to_string())
         } else {
             None
         };
@@ -398,7 +398,7 @@ impl CallableModelAPI for OpenAIChatModel {
             .create(request)
             .await
             .map(|mut response| {
-                response.model = label.to_string();
+                response.model = model_label.to_string();
                 response
             })
             .map_err(convert_openai_error)
@@ -423,8 +423,8 @@ impl CallableModelAPI for OpenAIEditModel {
     async fn generate(
         &self,
         client: &Self::Client,
-        _user: &str,
-        _label: &str,
+        _request_label: &str,
+        _model_label: &str,
         mut request: Self::ModelRequest,
     ) -> Result<Self::ModelResponse, Self::ModelError> {
         request.model = self.model_id.clone();
@@ -456,14 +456,14 @@ impl CallableModelAPI for OpenAICompletionModel {
     async fn generate(
         &self,
         client: &Self::Client,
-        user: &str,
-        label: &str,
+        request_label: &str,
+        model_label: &str,
         mut request: Self::ModelRequest,
     ) -> Result<Self::ModelResponse, Self::ModelError> {
         request.model = self.model_id.clone();
         request.stream = None;
         request.user = if self.endpoint.proxy_user_ids {
-            Some(user.to_string())
+            Some(request_label.to_string())
         } else {
             None
         };
@@ -473,7 +473,7 @@ impl CallableModelAPI for OpenAICompletionModel {
             .create(request)
             .await
             .map(|mut response| {
-                response.model = label.to_string();
+                response.model = model_label.to_string();
                 response
             })
             .map_err(convert_openai_error)
@@ -498,8 +498,8 @@ impl CallableModelAPI for OpenAIModerationModel {
     async fn generate(
         &self,
         client: &Self::Client,
-        _user: &str,
-        label: &str,
+        _request_label: &str,
+        model_label: &str,
         mut request: Self::ModelRequest,
     ) -> Result<Self::ModelResponse, Self::ModelError> {
         request.model = match &*self.model_id {
@@ -513,7 +513,7 @@ impl CallableModelAPI for OpenAIModerationModel {
             .create(request)
             .await
             .map(|mut response| {
-                response.model = label.to_string();
+                response.model = model_label.to_string();
                 response
             })
             .map_err(convert_openai_error)
@@ -538,8 +538,8 @@ impl CallableModelAPI for OpenAIEmbeddingModel {
     async fn generate(
         &self,
         client: &Self::Client,
-        _user: &str,
-        label: &str,
+        _request_label: &str,
+        model_label: &str,
         mut request: Self::ModelRequest,
     ) -> Result<Self::ModelResponse, Self::ModelError> {
         request.model = self.model_id.clone();
@@ -549,7 +549,7 @@ impl CallableModelAPI for OpenAIEmbeddingModel {
             .create(request)
             .await
             .map(|mut response| {
-                response.model = label.to_string();
+                response.model = model_label.to_string();
                 response
             })
             .map_err(convert_openai_error)
@@ -600,8 +600,8 @@ impl CallableModelAPI for OpenAIImageModel {
     async fn generate(
         &self,
         client: &Self::Client,
-        user: &str,
-        _label: &str,
+        request_label: &str,
+        _model_label: &str,
         request: Self::ModelRequest,
     ) -> Result<Self::ModelResponse, Self::ModelError> {
         match request {
@@ -612,7 +612,7 @@ impl CallableModelAPI for OpenAIImageModel {
                     _ => Some(ImageModel::Other(self.model_id.clone())),
                 };
                 request.user = if self.endpoint.proxy_user_ids {
-                    Some(user.to_string())
+                    Some(request_label.to_string())
                 } else {
                     None
                 };
@@ -630,7 +630,7 @@ impl CallableModelAPI for OpenAIImageModel {
                     _ => Some(ImageModel::Other(self.model_id.clone())),
                 };
                 request.user = if self.endpoint.proxy_user_ids {
-                    Some(user.to_string())
+                    Some(request_label.to_string())
                 } else {
                     None
                 };
@@ -648,7 +648,7 @@ impl CallableModelAPI for OpenAIImageModel {
                     _ => Some(ImageModel::Other(self.model_id.clone())),
                 };
                 request.user = if self.endpoint.proxy_user_ids {
-                    Some(user.to_string())
+                    Some(request_label.to_string())
                 } else {
                     None
                 };
@@ -730,8 +730,8 @@ impl CallableModelAPI for OpenAIAudioModel {
     async fn generate(
         &self,
         client: &Self::Client,
-        _user: &str,
-        _label: &str,
+        _request_label: &str,
+        _model_label: &str,
         request: Self::ModelRequest,
     ) -> Result<Self::ModelResponse, Self::ModelError> {
         match request {

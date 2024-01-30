@@ -20,9 +20,9 @@ pub(super) enum LimitItem {
 
 #[derive(Serialize, Deserialize, Debug)]
 pub(super) struct Limit {
-    count: u32,
-    item_type: LimitItem,
-    per: Duration,
+    pub(super) count: u32,
+    pub(super) r#type: LimitItem,
+    pub(super) per: Duration,
 }
 
 #[derive(Debug)]
@@ -37,19 +37,20 @@ pub(super) struct PendingRequestHandle {
     tokens: u32,
 }
 
+// TODO: Add prioritization
 impl Limiter {
     #[tracing::instrument(level = "debug")]
-    pub(super) fn new(quota: &super::Quota) -> Self {
+    pub(super) fn new(limits: &[Limit]) -> Self {
         let mut limiter = Limiter {
             request_limiters: Vec::new(),
             token_limiters: Vec::new(),
         };
 
-        for limit in &quota.limits {
+        for limit in limits {
             let state = Arc::new(Mutex::new(GcraState::default()));
             let rate_limit = RateLimit::new(limit.count, limit.per);
 
-            match limit.item_type {
+            match limit.r#type {
                 LimitItem::Request => {
                     limiter.request_limiters.push((rate_limit, state));
                 }
@@ -135,7 +136,7 @@ impl Limiter {
     }
 
     #[tracing::instrument(level = "debug")]
-    pub(super) async fn token_handle_finalize(&self, tokens: u32, handle: PendingRequestHandle) {
+    pub(super) async fn token_request_finalize(&self, tokens: u32, handle: PendingRequestHandle) {
         match handle.tokens.cmp(&tokens) {
             Ordering::Greater => {
                 let tokens = handle.tokens - tokens;

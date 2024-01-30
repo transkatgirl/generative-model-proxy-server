@@ -11,17 +11,11 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, RwLock};
-use tower_http::auth;
 use uuid::Uuid;
 
-mod limiter;
-mod model;
-mod queue;
 // TODO:
-//mod stats;
-
-use limiter::Limit;
-use model::{ModelAPI, ModelAPIClient, ModelRequest, ModelResponse};
+use super::limiter::{Limit, Limiter};
+use super::model::{ModelAPI, ModelAPIClient, ModelRequest, ModelResponse};
 
 #[derive(Default, Serialize, Deserialize, Debug)]
 #[serde(default)]
@@ -29,7 +23,7 @@ struct User {
     label: String,
     uuid: Uuid,
 
-    api_key: Vec<String>,
+    api_keys: Vec<String>,
     roles: Vec<Uuid>,
 
     models: Vec<Uuid>,
@@ -62,8 +56,7 @@ struct Model {
 #[serde(default)]
 struct QuotaMember {
     quota: Uuid,
-    blocking: bool,
-    priority: u32,
+    //priority: Option<u32>,
 }
 
 #[derive(Default, Serialize, Deserialize, Debug)]
@@ -84,34 +77,35 @@ SEE https://platform.openai.com/docs/api-reference/streaming
 
 */
 
-type APIKeyUserMap = Arc<RwLock<HashMap<Vec<u8>, Arc<RwLock<User>>>>>;
-type ModelUUIDMap = Arc<RwLock<HashMap<Uuid, Arc<(Model, ModelAPIClient)>>>>;
-type ModelLabelMap = Arc<RwLock<HashMap<String, Arc<(Model, ModelAPIClient)>>>>;
+type AppUser = Arc<RwLock<User>>;
+type AppRole = Arc<RwLock<Role>>;
+type AppQuota = Arc<(Quota, Limiter)>;
+type AppModel = Arc<(Model, ModelAPIClient)>;
 
 #[derive(Clone)]
 struct AppState {
-    api_keys: APIKeyUserMap,
-    users: Arc<RwLock<HashMap<Uuid, Arc<RwLock<User>>>>>,
-    roles: Arc<RwLock<HashMap<Uuid, Arc<RwLock<Role>>>>>,
-    quotas: Arc<RwLock<HashMap<Uuid, Arc<Quota>>>>,
-    models: ModelUUIDMap,
-    labels: ModelLabelMap,
+    users_by_api_key: Arc<RwLock<HashMap<Vec<u8>, AppUser>>>,
+    users_by_uuid: Arc<RwLock<HashMap<Uuid, AppUser>>>,
+    roles_by_uuid: Arc<RwLock<HashMap<Uuid, AppRole>>>,
+    quotas_by_uuid: Arc<RwLock<HashMap<Uuid, AppQuota>>>,
+    models_by_uuid: Arc<RwLock<HashMap<Uuid, AppModel>>>,
+    models_by_label: Arc<RwLock<HashMap<String, AppModel>>>,
 }
 
 struct Authenticated {
     user: Arc<User>,
-    roles: Vec<Arc<Role>>,
-    quotas: Vec<Arc<Quota>>,
+    roles: Vec<AppRole>,
+    quotas: Vec<AppQuota>,
 }
 
 pub fn api_router() -> Router {
     let state = AppState {
-        api_keys: Arc::new(RwLock::new(HashMap::new())),
-        users: Arc::new(RwLock::new(HashMap::new())),
-        roles: Arc::new(RwLock::new(HashMap::new())),
-        quotas: Arc::new(RwLock::new(HashMap::new())),
-        models: Arc::new(RwLock::new(HashMap::new())),
-        labels: Arc::new(RwLock::new(HashMap::new())),
+        users_by_api_key: Arc::new(RwLock::new(HashMap::new())),
+        users_by_uuid: Arc::new(RwLock::new(HashMap::new())),
+        roles_by_uuid: Arc::new(RwLock::new(HashMap::new())),
+        quotas_by_uuid: Arc::new(RwLock::new(HashMap::new())),
+        models_by_uuid: Arc::new(RwLock::new(HashMap::new())),
+        models_by_label: Arc::new(RwLock::new(HashMap::new())),
     };
 
     let openai_routes = Router::new()
@@ -124,14 +118,14 @@ pub fn api_router() -> Router {
     Router::new()
         .nest("/v1/", openai_routes)
         .route_layer(middleware::from_fn_with_state(
-            state.api_keys.clone(),
+            state.clone(),
             authenticate,
         ))
         .with_state(state)
 }
 
 async fn authenticate(
-    State(state): State<APIKeyUserMap>,
+    State(state): State<AppState>,
     mut request: Request,
     next: Next,
 ) -> Result<Response, StatusCode> {
@@ -142,7 +136,7 @@ async fn authenticate(
             .strip_prefix("basic".as_bytes())
             .or(authorization.strip_prefix("bearer".as_bytes()))
         {
-            Some(api_key) => match state.read().await.get(api_key).map(Arc::clone) {
+            Some(api_key) => match state.users_by_api_key.read().await.get(api_key).map(Arc::clone) {
                 Some(user) => {
                     request.extensions_mut().insert(user);
                     Ok(next.run(request).await)
@@ -155,27 +149,6 @@ async fn authenticate(
         Err(StatusCode::UNAUTHORIZED)
     }
 }
-
-/*async fn parse_model_request(
-    State(state): State<AppState>,
-    Extension(current_user): Extension<Arc<RwLock<User>>>,
-    request: Request,
-    next: Next,
-) -> Result<Response, StatusCode> {
-    /*match body::to_bytes(request.body(), usize::MAX).await {
-        Ok(body) => {
-            //if let Ok(json) = serde_json::from_slice::<router::ModelRequest>(body) {
-
-            //}
-
-
-            todo!()
-        },
-        Err(_) => Err(StatusCode::BAD_REQUEST)
-    }*/
-
-    todo!()
-}*/
 
 async fn model_request(
     State(state): State<AppState>,

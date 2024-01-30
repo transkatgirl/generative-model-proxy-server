@@ -5,7 +5,6 @@ use tokio::sync::{mpsc, oneshot};
 use tracing::{event, Level};
 
 mod openai;
-
 pub(super) trait CallableModelAPI:
     Send + Sync + Debug + Serialize + DeserializeOwned + 'static
 {
@@ -27,8 +26,8 @@ pub(super) trait CallableModelAPI:
     fn generate(
         &self,
         client: &Self::Client,
-        user: &str,
-        label: &str,
+        request_label: &str,
+        model_label: &str,
         request: Self::ModelRequest,
     ) -> impl Future<Output = Result<Self::ModelResponse, Self::ModelError>> + Send;
 }
@@ -76,10 +75,10 @@ pub(super) enum ModelAPI {
     OpenAIAudio(Arc<openai::OpenAIAudioModel>),
 }
 
-pub(super) struct PackagedRequest {
+struct PackagedRequest {
     body: ModelRequest,
-    label: Arc<str>,
-    user: Arc<str>,
+    request_label: Arc<str>,
+    model_label: Arc<str>,
     response_channel: oneshot::Sender<ModelResponse>,
 }
 
@@ -126,16 +125,16 @@ impl CallableModelAPI for ModelAPI {
     async fn generate(
         &self,
         client: &Self::Client,
-        user: &str,
-        label: &str,
+        request_label: &str,
+        model_label: &str,
         request: Self::ModelRequest,
     ) -> Result<Self::ModelResponse, Self::ModelError> {
         let (tx, rx) = oneshot::channel();
 
         let packaged = PackagedRequest {
             body: request,
-            user: user.into(),
-            label: label.into(),
+            request_label: request_label.into(),
+            model_label: model_label.into(),
             response_channel: tx,
         };
 
@@ -318,7 +317,7 @@ fn spawn_model_handler_task<M: CallableModelAPI>(
                         .send(ModelResponse::NoAPI(ResponseStatus::InternalError))
                         .is_err()
                     {
-                        event!(Level::WARN, "Unable to send response to {}", request.user);
+                        event!(Level::WARN, "Unable to send response to {}", request.request_label);
                     };
                     continue;
                 }
@@ -328,7 +327,7 @@ fn spawn_model_handler_task<M: CallableModelAPI>(
             let client = client.clone();
             tokio::spawn(async move {
                 let result = match model
-                    .generate(&client, &request.user, &request.label, model_request)
+                    .generate(&client, &request.request_label, &request.model_label, model_request)
                     .await
                 {
                     Ok(r) => ModelResponse::from(r),
@@ -336,7 +335,7 @@ fn spawn_model_handler_task<M: CallableModelAPI>(
                 };
 
                 if request.response_channel.send(result).is_err() {
-                    event!(Level::WARN, "Unable to send response to {}", request.user);
+                    event!(Level::WARN, "Unable to send response to {}", request.request_label);
                 };
             });
         }
