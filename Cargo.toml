@@ -8,6 +8,7 @@ edition = "2021"
 [dependencies]
 async-openai = { path = "vendored-deps/async-openai" }
 axum = "0.7.4"
+gcra = { path = "vendored-deps/gcra-rs" }
 hyper = { version = "1", features = [
 	"full",
 ] }
@@ -41,11 +42,6 @@ tracing-subscriber = { version = "0.3", features = [
 reqwest = { version = "0.11", features = [
 	"json",
 ] }
-
-governor = { version = "0.6", features = [
-	"std",
-	"jitter",
-], default-features = false }
 
 uuid = { version = "1.7", features = [
 	"v7",

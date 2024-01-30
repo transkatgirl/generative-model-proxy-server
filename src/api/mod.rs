@@ -29,7 +29,7 @@ struct User {
     label: String,
     uuid: Uuid,
 
-    api_key: String,
+    api_key: Vec<String>,
     roles: Vec<Uuid>,
 
     models: Vec<Uuid>,
@@ -84,15 +84,18 @@ SEE https://platform.openai.com/docs/api-reference/streaming
 
 */
 
-type APIKeyMap = Arc<RwLock<HashMap<Vec<u8>, Arc<RwLock<User>>>>>;
+type APIKeyUserMap = Arc<RwLock<HashMap<Vec<u8>, Arc<RwLock<User>>>>>;
+type ModelUUIDMap = Arc<RwLock<HashMap<Uuid, Arc<(Model, ModelAPIClient)>>>>;
+type ModelLabelMap = Arc<RwLock<HashMap<String, Arc<(Model, ModelAPIClient)>>>>;
 
 #[derive(Clone)]
 struct AppState {
-    api_keys: APIKeyMap,
+    api_keys: APIKeyUserMap,
     users: Arc<RwLock<HashMap<Uuid, Arc<RwLock<User>>>>>,
     roles: Arc<RwLock<HashMap<Uuid, Arc<RwLock<Role>>>>>,
     quotas: Arc<RwLock<HashMap<Uuid, Arc<Quota>>>>,
-    models: Arc<RwLock<HashMap<Uuid, (Arc<Model>, ModelAPIClient)>>>,
+    models: ModelUUIDMap,
+    labels: ModelLabelMap,
 }
 
 struct Authenticated {
@@ -108,6 +111,7 @@ pub fn api_router() -> Router {
         roles: Arc::new(RwLock::new(HashMap::new())),
         quotas: Arc::new(RwLock::new(HashMap::new())),
         models: Arc::new(RwLock::new(HashMap::new())),
+        labels: Arc::new(RwLock::new(HashMap::new())),
     };
 
     let openai_routes = Router::new()
@@ -127,7 +131,7 @@ pub fn api_router() -> Router {
 }
 
 async fn authenticate(
-    State(state): State<APIKeyMap>,
+    State(state): State<APIKeyUserMap>,
     mut request: Request,
     next: Next,
 ) -> Result<Response, StatusCode> {
@@ -175,9 +179,18 @@ async fn authenticate(
 
 async fn model_request(
     State(state): State<AppState>,
+    Extension(current_user): Extension<Arc<RwLock<User>>>,
     headers: HeaderMap,
     Json(payload): Json<ModelRequest>,
 ) -> Result<Response, StatusCode> {
+    let user = current_user.read();
+
+    let user_label = user
+        .await
+        .uuid
+        .simple()
+        .encode_lower(&mut Uuid::encode_buffer());
+
     todo!()
 }
 

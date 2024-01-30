@@ -1,22 +1,16 @@
-use std::{num::NonZeroU32, sync::Arc, time::Duration};
-
-use governor::{
-    middleware::StateInformationMiddleware, DefaultDirectRateLimiter, Quota, RateLimiter,
+use std::{
+    cmp::Ordering,
+    sync::Arc,
+    time::{Duration, Instant},
 };
+
+use gcra::{GcraError, GcraState, RateLimit};
 use serde::{Deserialize, Serialize};
 use tokio::{
-    sync::{OwnedSemaphorePermit, Semaphore},
+    sync::Mutex,
     time,
 };
-
-use super::model::{CallableModelAPI, RoutableModelRequest, RoutableModelResponse};
-
-type StateInformationDirectRateLimiter<MW = StateInformationMiddleware> = RateLimiter<
-    governor::state::direct::NotKeyed,
-    governor::state::InMemoryState,
-    governor::clock::DefaultClock,
-    MW,
->;
+use tracing::{event, Level};
 
 #[derive(Serialize, Deserialize, Debug)]
 pub(super) enum LimitItem {
@@ -33,121 +27,139 @@ pub(super) struct Limit {
 
 #[derive(Debug)]
 pub(super) struct Limiter {
-    request_limiters: Vec<DefaultDirectRateLimiter>,
-    token_limiters: Vec<(StateInformationDirectRateLimiter, Arc<Semaphore>)>,
+    request_limiters: Vec<(RateLimit, Arc<Mutex<GcraState>>)>,
+    token_limiters: Vec<(RateLimit, Arc<Mutex<GcraState>>)>,
 }
 
 #[derive(Debug)]
-pub(super) struct PendingTokenHandle {
-    handles: Vec<OwnedSemaphorePermit>,
-    held_tokens: u32,
+pub(super) struct PendingRequestHandle {
+    arrived_at: Instant,
+    tokens: u32,
 }
 
 impl Limiter {
     #[tracing::instrument(level = "debug")]
     pub(super) fn new(quota: &super::Quota) -> Self {
-        let mut request_limiters = Vec::new();
-        let mut token_limiters = Vec::new();
+        let mut limiter = Limiter {
+            request_limiters: Vec::new(),
+            token_limiters: Vec::new(),
+        };
 
         for limit in &quota.limits {
-            let count = NonZeroU32::new(limit.count).unwrap_or(NonZeroU32::MIN);
+            let state = Arc::new(Mutex::new(GcraState::default()));
+            let rate_limit = RateLimit::new(limit.count, limit.per);
 
             match limit.item_type {
-                LimitItem::Request =>
-                {
-                    #[allow(deprecated)]
-                    if let Some(quota) = Quota::new(count, limit.per) {
-                        request_limiters.push(RateLimiter::direct(quota));
+                LimitItem::Request => {
+                    limiter.request_limiters.push((rate_limit, state));
+                }
+                LimitItem::Token => {
+                    limiter.token_limiters.push((rate_limit, state));
+                }
+            }
+        }
+
+        limiter
+    }
+
+    #[tracing::instrument(level = "debug")]
+    pub(super) async fn plain_request(&self, arrived_at: Instant) {
+        for (rate_limit, state_mutex) in &self.request_limiters {
+            let mut state = state_mutex.lock().await;
+
+            match state.check_and_modify_at(rate_limit, arrived_at, 1) {
+                Ok(_) => {}
+                Err(GcraError::DeniedUntil { next_allowed_at }) => {
+                    time::sleep_until(time::Instant::from_std(next_allowed_at)).await;
+                    state.tat = Some(next_allowed_at + rate_limit.period);
+                }
+                Err(_) => {
+                    event!(
+                        Level::WARN,
+                        "Request rate limiter has <1 capacity!\n{:?}",
+                        rate_limit
+                    );
+                    time::sleep(rate_limit.period).await;
+                }
+            }
+        }
+    }
+
+    #[tracing::instrument(level = "trace")]
+    fn is_token_count_oversized(&self, tokens: u32) -> bool {
+        for (rate_limit, _) in &self.token_limiters {
+            if tokens > rate_limit.resource_limit {
+                return true;
+            }
+        }
+
+        false
+    }
+
+    #[tracing::instrument(level = "debug")]
+    pub(super) async fn token_request(
+        &self,
+        tokens: u32,
+        arrived_at: Instant,
+    ) -> Option<PendingRequestHandle> {
+        if self.is_token_count_oversized(tokens) {
+            return None;
+        }
+
+        self.plain_request(arrived_at).await;
+
+        for (rate_limit, state_mutex) in &self.token_limiters {
+            let mut state = state_mutex.lock().await;
+
+            match state.check_and_modify_at(rate_limit, arrived_at, 1) {
+                Ok(_) => {}
+                Err(GcraError::DeniedUntil { next_allowed_at }) => {
+                    time::sleep_until(time::Instant::from_std(next_allowed_at)).await;
+                    state.tat = Some(next_allowed_at + rate_limit.period);
+                }
+                Err(GcraError::DeniedIndefinitely {
+                    cost: _,
+                    rate_limit: _,
+                }) => {
+                    event!(
+                        Level::WARN,
+                        "Token rate limiter has incorrect capacity!\n{:?}",
+                        rate_limit
+                    );
+                    time::sleep(rate_limit.period).await;
+                }
+            }
+        }
+
+        Some(PendingRequestHandle { arrived_at, tokens })
+    }
+
+    #[tracing::instrument(level = "debug")]
+    pub(super) async fn token_handle_finalize(&self, tokens: u32, handle: PendingRequestHandle) {
+        match handle.tokens.cmp(&tokens) {
+            Ordering::Greater => {
+                let tokens = handle.tokens - tokens;
+
+                for (rate_limit, state_mutex) in &self.token_limiters {
+                    let mut state = state_mutex.lock().await;
+
+                    if state.tat.is_some() && state.tat.unwrap() > handle.arrived_at {
+                        let _ = state.revert_at(rate_limit, handle.arrived_at, tokens);
                     }
                 }
-                LimitItem::Token =>
-                {
-                    #[allow(deprecated)]
-                    if let Some(quota) = Quota::new(count, limit.per) {
-                        token_limiters.push((
-                            RateLimiter::direct(quota)
-                                .with_middleware::<StateInformationMiddleware>(),
-                            Arc::new(Semaphore::new(limit.count as usize)),
-                        ));
-                    }
-                }
             }
-        }
+            Ordering::Equal => {}
+            Ordering::Less => {
+                event!(
+                    Level::WARN,
+                    "Request had greater final token count ({}) than estimated maximum of {}!",
+                    tokens,
+                    handle.tokens
+                );
+                let tokens = tokens - handle.tokens;
 
-        Limiter {
-            request_limiters,
-            token_limiters,
-        }
-    }
-
-    #[tracing::instrument(level = "debug")]
-    pub(super) async fn plain_request(&self) {
-        for limiter in &self.request_limiters {
-            limiter.until_ready().await;
-        }
-    }
-
-    #[tracing::instrument(level = "debug")]
-    pub(super) async fn model_request(
-        &self,
-        model: impl CallableModelAPI,
-        request: impl RoutableModelRequest,
-    ) -> Option<PendingTokenHandle> {
-        self.plain_request().await;
-
-        let mut handles = Vec::new();
-        let tokens = model.get_context_len().unwrap_or(1) * request.get_total_n();
-
-        for (limiter, semaphore) in &self.token_limiters {
-            if let Ok(barrier) = semaphore.clone().acquire_many_owned(tokens).await {
-                handles.push(barrier);
-            } else {
-                return None;
-            };
-
-            let mut needs_capacity = true;
-            while needs_capacity {
-                let state = limiter.until_ready().await;
-                if tokens > state.remaining_burst_capacity() + 1 {
-                    time::sleep(
-                        state.quota().replenish_interval()
-                            * (tokens - state.remaining_burst_capacity()),
-                    )
-                    .await;
-                } else {
-                    needs_capacity = false
-                }
+                let _ = self.token_request(tokens, Instant::now()).await;
             }
-        }
-
-        Some(PendingTokenHandle {
-            handles,
-            held_tokens: tokens,
-        })
-    }
-
-    #[tracing::instrument(level = "debug")]
-    pub(super) async fn model_response(
-        &self,
-        response: impl RoutableModelResponse,
-        handle: PendingTokenHandle,
-    ) -> Option<()> {
-        let tokens = NonZeroU32::new(match response.get_token_count() {
-            Some(t) => t,
-            None => handle.held_tokens,
-        })
-        .unwrap_or(NonZeroU32::MIN);
-
-        let mut error = false;
-        for (limiter, _) in &self.token_limiters {
-            if limiter.until_n_ready(tokens).await.is_err() {
-                error = true;
-            }
-        }
-
-        match error {
-            true => None,
-            false => Some(()),
         }
     }
 }

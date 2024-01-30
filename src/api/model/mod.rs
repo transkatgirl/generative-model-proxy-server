@@ -83,10 +83,13 @@ pub(super) struct PackagedRequest {
     response_channel: oneshot::Sender<ModelResponse>,
 }
 
-pub(super) type ModelAPIClient = mpsc::UnboundedSender<PackagedRequest>;
+#[derive(Debug)]
+pub(super) struct ModelAPIClient {
+    sender: mpsc::UnboundedSender<PackagedRequest>,
+}
 
 impl CallableModelAPI for ModelAPI {
-    type Client = mpsc::UnboundedSender<PackagedRequest>;
+    type Client = ModelAPIClient;
     type ModelRequest = ModelRequest;
     type ModelResponse = ModelResponse;
     type ModelError = ResponseStatus;
@@ -104,7 +107,7 @@ impl CallableModelAPI for ModelAPI {
             ModelAPI::OpenAIAudio(model) => spawn_model_handler_task(model, rx),
         };
 
-        tx
+        ModelAPIClient { sender: tx }
     }
 
     fn get_context_len(&self) -> Option<u32> {
@@ -136,7 +139,7 @@ impl CallableModelAPI for ModelAPI {
             response_channel: tx,
         };
 
-        if client.send(packaged).is_err() {
+        if client.sender.send(packaged).is_err() {
             return Err(ResponseStatus::InternalError);
         }
 
