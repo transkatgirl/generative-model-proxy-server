@@ -317,7 +317,11 @@ fn spawn_model_handler_task<M: CallableModelAPI>(
                         .send(ModelResponse::NoAPI(ResponseStatus::InternalError))
                         .is_err()
                     {
-                        event!(Level::WARN, "Unable to send response to {}", request.request_label);
+                        event!(
+                            Level::WARN,
+                            "Unable to send response to {}",
+                            request.request_label
+                        );
                     };
                     continue;
                 }
@@ -327,7 +331,12 @@ fn spawn_model_handler_task<M: CallableModelAPI>(
             let client = client.clone();
             tokio::spawn(async move {
                 let result = match model
-                    .generate(&client, &request.request_label, &request.model_label, model_request)
+                    .generate(
+                        &client,
+                        &request.request_label,
+                        &request.model_label,
+                        model_request,
+                    )
                     .await
                 {
                     Ok(r) => ModelResponse::from(r),
@@ -335,7 +344,11 @@ fn spawn_model_handler_task<M: CallableModelAPI>(
                 };
 
                 if request.response_channel.send(result).is_err() {
-                    event!(Level::WARN, "Unable to send response to {}", request.request_label);
+                    event!(
+                        Level::WARN,
+                        "Unable to send response to {}",
+                        request.request_label
+                    );
                 };
             });
         }

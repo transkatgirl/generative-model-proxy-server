@@ -6,10 +6,7 @@ use std::{
 
 use gcra::{GcraError, GcraState, RateLimit};
 use serde::{Deserialize, Serialize};
-use tokio::{
-    sync::Mutex,
-    time,
-};
+use tokio::{sync::Mutex, time};
 use tracing::{event, Level};
 
 #[derive(Serialize, Deserialize, Debug)]
