@@ -1,4 +1,11 @@
-use std::{clone::Clone, collections::{HashMap, HashSet}, fmt::Debug, hash::Hash, ops::Deref, sync::Arc};
+use std::{
+    clone::Clone,
+    collections::{HashMap, HashSet},
+    fmt::Debug,
+    hash::Hash,
+    ops::Deref,
+    sync::Arc,
+};
 
 use axum::{
     body::{self, Body, Bytes},
@@ -14,7 +21,7 @@ use tokio::sync::{mpsc, OwnedRwLockReadGuard, RwLock};
 use uuid::Uuid;
 
 use super::limiter::{Limit, Limiter};
-use super::model::{ModelAPI, ModelAPIClient, CallableModelAPI, ModelRequest, ModelResponse};
+use super::model::{CallableModelAPI, ModelAPI, ModelAPIClient, ModelRequest, ModelResponse};
 
 #[derive(Default, Serialize, Deserialize, Debug)]
 #[serde(default)]
@@ -57,25 +64,16 @@ struct QuotaMember {
 }
 
 #[derive(Default, Serialize, Deserialize, Debug)]
-#[serde(default)]
 struct Quota {
+    label: String,
     uuid: Uuid,
     limits: Vec<Limit>,
 }
 
 type AppUser = Arc<RwLock<User>>;
 type AppRole = Arc<RwLock<Role>>;
-type AppQuota = Arc<(Quota, Limiter)>;
-type AppModel = Arc<(Model, ModelAPIClient)>;
-type AppRefList = Arc<RwLock<HashSet<AppReference>>>;
-
-#[derive(Debug, Clone, Hash, Eq, PartialEq)]
-enum AppReference {
-    User(Uuid),
-    Role(Uuid),
-    Quota(Uuid),
-    Model(Uuid),
-}
+type AppQuota = Arc<(RwLock<Quota>, Limiter)>;
+type AppModel = Arc<(RwLock<Model>, ModelAPIClient)>;
 
 #[derive(Debug, Clone)]
 struct AppState {
@@ -84,12 +82,9 @@ struct AppState {
     quotas: Arc<RwLock<HashMap<Uuid, AppQuota>>>,
     models: Arc<RwLock<HashMap<Uuid, AppModel>>>,
 
-    api_keys: Arc<RwLock<HashMap<Vec<u8>, Uuid>>>,
-    references: Arc<RwLock<HashMap<AppReference, AppRefList>>>,
-    model_labels: Arc<RwLock<HashMap<String, Uuid>>>,
+    api_keys: Arc<RwLock<HashMap<String, Uuid>>>,
 }
 
-// WIP
 impl AppState {
     fn new() -> AppState {
         AppState {
@@ -98,18 +93,11 @@ impl AppState {
             quotas: Arc::new(RwLock::new(HashMap::new())),
             models: Arc::new(RwLock::new(HashMap::new())),
             api_keys: Arc::new(RwLock::new(HashMap::new())),
-            references: Arc::new(RwLock::new(HashMap::new())),
-            model_labels: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
-    async fn authenticate(&self, api_key: &[u8]) -> Option<FlattenedAppState> {
-        let api_key_db = self.api_keys.read().await;
-        let role_db = self.roles.read().await;
-        let quota_db = self.quotas.read().await;
-        let model_db = self.models.read().await;
-
-        if let Some(uuid) = api_key_db.get(api_key) {
+    async fn authenticate(&self, api_key: &str) -> Option<FlattenedAppState> {
+        if let Some(uuid) = self.api_keys.read().await.get(api_key) {
             if let Some(user) = self.get_user(uuid).await {
                 let mut tags = Vec::new();
                 let mut models = HashMap::new();
@@ -117,31 +105,31 @@ impl AppState {
 
                 tags.push(user.uuid);
                 for uuid in &user.models {
-                    if let Some(model) = model_db.get(uuid) {
-                        models.insert(model.0.label.clone(), model.clone());
+                    if let Some(model) = self.models.read().await.get(uuid) {
+                        models.insert(model.0.read().await.label.clone(), model.clone());
                     }
                 }
                 for quota_member in &user.quotas {
-                    if let Some(quota) = quota_db.get(&quota_member.quota) {
+                    if let Some(quota) = self.quotas.read().await.get(&quota_member.quota) {
                         quotas.push(quota.clone());
-                        tags.push(quota.0.uuid);
+                        tags.push(quota.0.read().await.uuid);
                     }
                 }
 
                 for uuid in &user.roles {
-                    if let Some(role_ref) = role_db.get(uuid) {
+                    if let Some(role_ref) = self.roles.read().await.get(uuid) {
                         let role = role_ref.read().await;
 
                         tags.push(role.uuid);
                         for uuid in &role.models {
-                            if let Some(model) = model_db.get(uuid) {
-                                models.insert(model.0.label.clone(), model.clone());
+                            if let Some(model) = self.models.read().await.get(uuid) {
+                                models.insert(model.0.read().await.label.clone(), model.clone());
                             }
                         }
                         for quota_member in &role.quotas {
-                            if let Some(quota) = quota_db.get(&quota_member.quota) {
+                            if let Some(quota) = self.quotas.read().await.get(&quota_member.quota) {
                                 quotas.push(quota.clone());
-                                tags.push(quota.0.uuid);
+                                tags.push(quota.0.read().await.uuid);
                             }
                         }
                     }
@@ -170,27 +158,7 @@ impl AppState {
             self.api_keys
                 .write()
                 .await
-                .insert(api_key.clone().as_bytes().to_vec(), user.uuid);
-        }
-
-        let references = self.references.read().await;
-
-        for role in &user.roles {
-            if let Some(refs) = references.get(&AppReference::Role(*role)) {
-                refs.write().await.insert(AppReference::User(user.uuid));
-            }
-        }
-
-        for model in &user.models {
-            if let Some(refs) = references.get(&AppReference::Model(*model)) {
-                refs.write().await.insert(AppReference::User(user.uuid));
-            }
-        }
-
-        for quota_member in &user.quotas {
-            if let Some(refs) = references.get(&AppReference::Quota(quota_member.quota)) {
-                refs.write().await.insert(AppReference::User(user.uuid));
-            }
+                .insert(api_key.clone(), user.uuid);
         }
     }
 
@@ -204,7 +172,18 @@ impl AppState {
 
     async fn update_user(&self, user: User) {
         if let Some(app_user) = self.users.read().await.get(&user.uuid) {
-            // TODO
+            let mut app_user = app_user.write().await;
+            let mut api_keys = self.api_keys.write().await;
+
+            for api_key in &app_user.api_keys {
+                api_keys.remove(api_key);
+            }
+
+            for api_key in &user.api_keys {
+                api_keys.insert(api_key.clone(), user.uuid);
+            }
+
+            *app_user = user;
         } else {
             self.add_user(user).await
         }
@@ -216,30 +195,7 @@ impl AppState {
                 let user = user.read().await;
 
                 for api_key in &user.api_keys {
-                    self.api_keys
-                        .write()
-                        .await
-                        .remove(api_key.clone().as_bytes());
-                }
-
-                let references = self.references.read().await;
-
-                for role in &user.roles {
-                    if let Some(refs) = references.get(&AppReference::Role(*role)) {
-                        refs.write().await.remove(&AppReference::User(user.uuid));
-                    }
-                }
-
-                for model in &user.models {
-                    if let Some(refs) = references.get(&AppReference::Model(*model)) {
-                        refs.write().await.remove(&AppReference::User(user.uuid));
-                    }
-                }
-
-                for quota_member in &user.quotas {
-                    if let Some(refs) = references.get(&AppReference::Quota(quota_member.quota)) {
-                        refs.write().await.remove(&AppReference::User(user.uuid));
-                    }
+                    self.api_keys.write().await.remove(api_key);
                 }
             }
 
@@ -253,23 +209,7 @@ impl AppState {
         let uuid = role.uuid;
         let role = Arc::new(RwLock::new(role));
 
-        self.roles.write().await.insert(uuid, role.clone());
-        self.references.write().await.insert(AppReference::Role(uuid), Arc::new(RwLock::new(HashSet::new())));
-
-        let role = role.read().await;
-        let references = self.references.read().await;
-
-        for model in &role.models {
-            if let Some(refs) = references.get(&AppReference::Model(*model)) {
-                refs.write().await.insert(AppReference::Role(role.uuid));
-            }
-        }
-
-        for quota_member in &role.quotas {
-            if let Some(refs) = references.get(&AppReference::Quota(quota_member.quota)) {
-                refs.write().await.insert(AppReference::Role(role.uuid));
-            }
-        }
+        self.roles.write().await.insert(uuid, role);
     }
 
     async fn get_role(&self, uuid: &Uuid) -> Option<OwnedRwLockReadGuard<Role>> {
@@ -282,7 +222,8 @@ impl AppState {
 
     async fn update_role(&self, role: Role) {
         if let Some(app_role) = self.roles.read().await.get(&role.uuid) {
-            // TODO
+            let mut app_role = app_role.write().await;
+            *app_role = role;
         } else {
             self.add_role(role).await
         }
@@ -290,38 +231,6 @@ impl AppState {
 
     async fn remove_role(&self, uuid: &Uuid) -> Option<AppRole> {
         if let Some(role) = self.roles.write().await.remove(uuid) {
-            if let Some(refs) = self.references.write().await.remove(& AppReference::Role(*uuid)) {
-                for reference in refs.write().await.drain() {
-                    if let AppReference::User(user_uuid) = reference {
-                        if let Some(user) = self.users.read().await.get(&user_uuid) {
-                            let mut user = user.write().await;
-
-                            let index = user.roles.iter().position(|r| r == uuid);
-                            if let Some(index) = index {
-                                user.roles.remove(index);
-                            }
-                        }
-                    }
-                }
-            }
-
-            {
-                let role = role.read().await;
-                let references = self.references.read().await;
-
-                for model in &role.models {
-                    if let Some(refs) = references.get(&AppReference::Model(*model)) {
-                        refs.write().await.remove(&AppReference::Role(role.uuid));
-                    }
-                }
-
-                for quota_member in &role.quotas {
-                    if let Some(refs) = references.get(&AppReference::Quota(quota_member.quota)) {
-                        refs.write().await.remove(&AppReference::Role(role.uuid));
-                    }
-                }
-            }
-
             return Some(role);
         }
 
@@ -331,22 +240,28 @@ impl AppState {
     async fn add_quota(&self, quota: Quota) {
         let uuid = quota.uuid;
         let limiter = Limiter::new(&quota.limits);
-        let quota = Arc::new((quota, limiter));
+        let quota = Arc::new((RwLock::new(quota), limiter));
 
         self.quotas.write().await.insert(uuid, quota);
-        self.references.write().await.insert(AppReference::Quota(uuid), Arc::new(RwLock::new(HashSet::new())));
     }
 
     async fn get_quota(&self, uuid: &Uuid) -> Option<AppQuota> {
         self.quotas.read().await.get(uuid).cloned()
     }
 
+    async fn update_quota_label(&self, uuid: &Uuid, label: String) -> Option<()> {
+        if let Some(quota) = self.quotas.read().await.get(uuid) {
+            let mut quota = quota.0.write().await;
+            quota.label = label;
+            return Some(());
+        }
+
+        None
+    }
+
     async fn remove_quota(&self, uuid: &Uuid) -> Option<AppQuota> {
         if let Some(quota) = self.quotas.write().await.remove(uuid) {
-            if let Some(refs) = self.references.write().await.remove(& &AppReference::Quota(*uuid)) {
-                todo!()
-            }
-            todo!()
+            return Some(quota);
         }
 
         None
@@ -355,25 +270,20 @@ impl AppState {
     async fn add_model(&self, model: Model) {
         let uuid = model.uuid;
         let client = model.api.init();
-        let model = Arc::new((model, client));
+        let model = Arc::new((RwLock::new(model), client));
 
         self.models.write().await.insert(uuid, model.clone());
-        self.references.write().await.insert(AppReference::Model(uuid), Arc::new(RwLock::new(HashSet::new())));
-
-        for quota_member in &model.0.quotas {
-            if let Some(refs) = self.references.read().await.get(&AppReference::Quota(quota_member.quota)) {
-                refs.write().await.insert(AppReference::Role(uuid));
-            }
-        }
     }
 
     async fn get_model(&self, uuid: &Uuid) -> Option<AppModel> {
         self.models.read().await.get(uuid).cloned()
     }
 
-    async fn get_model_by_label(&self, label: &str) -> Option<AppModel> {
-        if let Some(uuid) = self.model_labels.read().await.get(label) {
-            return self.models.read().await.get(uuid).cloned();
+    async fn update_model_label(&self, uuid: &Uuid, label: String) -> Option<()> {
+        if let Some(model) = self.models.read().await.get(uuid) {
+            let mut model = model.0.write().await;
+            model.label = label;
+            return Some(());
         }
 
         None
@@ -381,30 +291,7 @@ impl AppState {
 
     async fn remove_model(&self, uuid: &Uuid) -> Option<AppModel> {
         if let Some(model) = self.models.write().await.remove(uuid) {
-            if let Some(refs) = self.references.write().await.remove(&AppReference::Model(*uuid)) {
-                for reference in refs.write().await.drain() {
-                    match reference {
-                        AppReference::User(user_uuid) => {
-                            if let Some(user) = self.users.read().await.get(&user_uuid) {
-                                let mut user = user.write().await;
-
-                                let index = user.models.iter().position(|r| r == uuid);
-                                if let Some(index) = index {
-                                    user.roles.remove(index);
-                                }
-                            }
-                        },
-                        AppReference::Role(uuid) => {
-                            // TODO
-                        },
-                        _ => {},
-                    }
-
-                }
-
-                todo!()
-            }
-            todo!()
+            return Some(model);
         }
 
         None
@@ -441,21 +328,26 @@ async fn authenticate(
     mut request: Request,
     next: Next,
 ) -> Result<Response, StatusCode> {
-    if let Some(authorization) = request.headers().get("authorization") {
-        let authorization = authorization.as_bytes().to_ascii_lowercase();
+    if let Some(header_value) = request.headers().get("authorization") {
+        match header_value.to_str() {
+            Ok(header_string) => {
+                let header_string = header_string.to_ascii_lowercase();
 
-        match authorization
-            .strip_prefix("basic".as_bytes())
-            .or(authorization.strip_prefix("bearer".as_bytes()))
-        {
-            Some(api_key) => match state.authenticate(api_key).await {
-                Some(flattened_state) => {
-                    request.extensions_mut().insert(flattened_state);
-                    Ok(next.run(request).await)
+                match header_string
+                    .strip_prefix("basic")
+                    .or(header_string.strip_prefix("bearer"))
+                {
+                    Some(api_key) => match state.authenticate(api_key).await {
+                        Some(flattened_state) => {
+                            request.extensions_mut().insert(flattened_state);
+                            Ok(next.run(request).await)
+                        }
+                        None => Err(StatusCode::UNAUTHORIZED),
+                    },
+                    None => Err(StatusCode::UNAUTHORIZED),
                 }
-                None => Err(StatusCode::UNAUTHORIZED),
-            },
-            None => Err(StatusCode::UNAUTHORIZED),
+            }
+            Err(_) => Err(StatusCode::UNAUTHORIZED),
         }
     } else {
         Err(StatusCode::UNAUTHORIZED)
@@ -468,8 +360,6 @@ async fn model_request(
     headers: HeaderMap,
     Json(payload): Json<ModelRequest>,
 ) -> Result<Response, StatusCode> {
-
-
     todo!()
 }
 
