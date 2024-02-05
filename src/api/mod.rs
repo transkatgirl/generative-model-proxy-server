@@ -1,9 +1,8 @@
 use std::{clone::Clone, fmt::Debug, time::Instant};
 
 use axum::{
-    body::{self, Body, Bytes},
     extract::{Extension, Path, Request, State},
-    http::{header::HeaderMap, HeaderValue, StatusCode},
+    http::StatusCode,
     middleware::{self, Next},
     response::Response,
     routing::{get, post},
@@ -14,8 +13,10 @@ use uuid::Uuid;
 
 mod state;
 
-use super::limiter::{Limit, Limiter};
-use super::model::{CallableModelAPI, ModelAPI, ModelAPIClient, ModelRequest, ModelResponse};
+use super::{
+    limiter::Limit,
+    model::{ModelAPI, ModelRequest, ModelResponse},
+};
 use state::{AppState, FlattenedAppState};
 
 #[derive(Default, Serialize, Deserialize, Debug, Clone)]
@@ -186,7 +187,7 @@ async fn model_request(
     Extension(state): Extension<FlattenedAppState>,
     Json(payload): Json<ModelRequest>,
 ) -> Result<(StatusCode, Json<ModelResponse>), StatusCode> {
-    // TODO: Add logging
+    // TODO: Add metrics
     state
         .model_request(payload)
         .await
@@ -194,7 +195,7 @@ async fn model_request(
 }
 
 async fn get_users(State(state): State<AppState>) -> Json<Vec<User>> {
-    Json(state.get_users().await)
+    Json(state.get_users_snapshot().await)
 }
 
 async fn get_user(
@@ -224,6 +225,9 @@ async fn update_user(
     Path(uuid): Path<Uuid>,
     Json(mut payload): Json<User>,
 ) -> StatusCode {
+    if payload.uuid != Uuid::default() && payload.uuid != uuid {
+        return StatusCode::BAD_REQUEST;
+    }
     payload.uuid = uuid;
 
     match state.update_user(payload).await {
@@ -240,7 +244,7 @@ async fn delete_user(State(state): State<AppState>, Path(uuid): Path<Uuid>) -> S
 }
 
 async fn get_roles(State(state): State<AppState>) -> Json<Vec<Role>> {
-    Json(state.get_roles().await)
+    Json(state.get_roles_snapshot().await)
 }
 
 async fn get_role(
@@ -254,24 +258,42 @@ async fn get_role(
         .ok_or(StatusCode::NOT_FOUND)
 }
 
-async fn add_role(State(state): State<AppState>, Json(payload): Json<Role>) -> StatusCode {
-    todo!()
+async fn add_role(State(state): State<AppState>, Json(mut payload): Json<Role>) -> StatusCode {
+    if payload.uuid == Uuid::default() {
+        payload.uuid = Uuid::new_v4()
+    }
+
+    match state.add_or_update_role(payload).await {
+        true => StatusCode::CREATED,
+        false => StatusCode::OK,
+    }
 }
 
 async fn update_role(
     State(state): State<AppState>,
     Path(uuid): Path<Uuid>,
-    Json(payload): Json<Role>,
+    Json(mut payload): Json<Role>,
 ) -> StatusCode {
-    todo!()
+    if payload.uuid != Uuid::default() && payload.uuid != uuid {
+        return StatusCode::BAD_REQUEST;
+    }
+    payload.uuid = uuid;
+
+    match state.update_role(payload).await {
+        true => StatusCode::CREATED,
+        false => StatusCode::OK,
+    }
 }
 
 async fn delete_role(State(state): State<AppState>, Path(uuid): Path<Uuid>) -> StatusCode {
-    todo!()
+    match state.remove_role(&uuid).await {
+        Some(_) => StatusCode::OK,
+        None => StatusCode::NOT_FOUND,
+    }
 }
 
 async fn get_models(State(state): State<AppState>) -> Json<Vec<Model>> {
-    Json(state.get_models().await)
+    Json(state.get_models_snapshot().await)
 }
 
 async fn get_model(
@@ -284,8 +306,15 @@ async fn get_model(
     }
 }
 
-async fn add_model(State(state): State<AppState>, Json(payload): Json<Model>) -> StatusCode {
-    todo!()
+async fn add_model(State(state): State<AppState>, Json(mut payload): Json<Model>) -> StatusCode {
+    if payload.uuid == Uuid::default() {
+        payload.uuid = Uuid::new_v4()
+    }
+
+    match state.add_or_replace_model(payload).await {
+        true => StatusCode::CREATED,
+        false => StatusCode::OK,
+    }
 }
 
 async fn rename_model(
@@ -293,15 +322,25 @@ async fn rename_model(
     Path(uuid): Path<Uuid>,
     Json(payload): Json<LabelUpdateRequest>,
 ) -> StatusCode {
-    todo!()
+    if payload.uuid != Uuid::default() && payload.uuid != uuid {
+        return StatusCode::BAD_REQUEST;
+    }
+
+    match state.update_model_label(&uuid, payload.label).await {
+        Some(_) => StatusCode::OK,
+        None => StatusCode::NOT_FOUND,
+    }
 }
 
 async fn delete_model(State(state): State<AppState>, Path(uuid): Path<Uuid>) -> StatusCode {
-    todo!()
+    match state.remove_model(&uuid).await {
+        Some(_) => StatusCode::OK,
+        None => StatusCode::NOT_FOUND,
+    }
 }
 
 async fn get_quotas(State(state): State<AppState>) -> Json<Vec<Quota>> {
-    Json(state.get_quotas().await)
+    Json(state.get_quotas_snapshot().await)
 }
 
 async fn get_quota(
@@ -314,8 +353,15 @@ async fn get_quota(
     }
 }
 
-async fn add_quota(State(state): State<AppState>, Json(payload): Json<Quota>) -> StatusCode {
-    todo!()
+async fn add_quota(State(state): State<AppState>, Json(mut payload): Json<Quota>) -> StatusCode {
+    if payload.uuid == Uuid::default() {
+        payload.uuid = Uuid::new_v4()
+    }
+
+    match state.add_or_replace_quota(payload).await {
+        true => StatusCode::CREATED,
+        false => StatusCode::OK,
+    }
 }
 
 async fn rename_quota(
@@ -323,9 +369,19 @@ async fn rename_quota(
     Path(uuid): Path<Uuid>,
     Json(payload): Json<LabelUpdateRequest>,
 ) -> StatusCode {
-    todo!()
+    if payload.uuid != Uuid::default() && payload.uuid != uuid {
+        return StatusCode::BAD_REQUEST;
+    }
+
+    match state.update_quota_label(&uuid, payload.label).await {
+        Some(_) => StatusCode::OK,
+        None => StatusCode::NOT_FOUND,
+    }
 }
 
 async fn delete_quota(State(state): State<AppState>, Path(uuid): Path<Uuid>) -> StatusCode {
-    todo!()
+    match state.remove_quota(&uuid).await {
+        Some(_) => StatusCode::OK,
+        None => StatusCode::NOT_FOUND,
+    }
 }

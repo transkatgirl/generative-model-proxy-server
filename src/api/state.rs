@@ -12,15 +12,14 @@ use ring::digest;
 use tokio::sync::{OwnedRwLockReadGuard, RwLock};
 use uuid::Uuid;
 
-use super::super::model::{
-    CallableModelAPI, ModelAPIClient, ModelRequest, ModelResponse, ResponseStatus,
-    RoutableModelRequest, RoutableModelResponse,
-};
 use super::{
     super::limiter::{Limiter, PendingRequestHandle},
-    Permissions,
+    super::model::{
+        CallableModelAPI, ModelAPIClient, ModelRequest, ModelResponse, ResponseStatus,
+        RoutableModelRequest, RoutableModelResponse,
+    },
+    Model, Permissions, Quota, Role, User,
 };
-use super::{Model, Quota, Role, User};
 
 type AppUser = Arc<RwLock<User>>;
 type AppRole = Arc<RwLock<Role>>;
@@ -37,6 +36,8 @@ pub(super) struct AppState {
     api_keys: Arc<RwLock<HashMap<String, Uuid>>>,
 }
 
+// TODO: Add functions to save/load state from disk
+// TODO: Figure out logging/metrics
 impl AppState {
     #[tracing::instrument(level = "debug")]
     pub(super) fn new() -> AppState {
@@ -150,7 +151,7 @@ impl AppState {
     }
 
     #[tracing::instrument(level = "debug")]
-    pub(super) async fn get_users(&self) -> Vec<User> {
+    pub(super) async fn get_users_snapshot(&self) -> Vec<User> {
         let mut users = Vec::new();
 
         for (_, user) in self.users.read().await.iter() {
@@ -209,7 +210,7 @@ impl AppState {
     }
 
     #[tracing::instrument(level = "debug")]
-    pub(super) async fn get_roles(&self) -> Vec<Role> {
+    pub(super) async fn get_roles_snapshot(&self) -> Vec<Role> {
         let mut roles = Vec::new();
 
         for (_, role) in self.roles.read().await.iter() {
@@ -258,16 +259,16 @@ impl AppState {
     }
 
     #[tracing::instrument(level = "debug")]
-    pub(super) async fn add_or_replace_quota(&self, quota: Quota) {
+    pub(super) async fn add_or_replace_quota(&self, quota: Quota) -> bool {
         let uuid = quota.uuid;
         let limiter = Limiter::new(&quota.limits);
         let quota = Arc::new((RwLock::new(quota), limiter));
 
-        self.quotas.write().await.insert(uuid, quota);
+        self.quotas.write().await.insert(uuid, quota).is_none()
     }
 
     #[tracing::instrument(level = "debug")]
-    pub(super) async fn get_quotas(&self) -> Vec<Quota> {
+    pub(super) async fn get_quotas_snapshot(&self) -> Vec<Quota> {
         let mut quotas = Vec::new();
 
         for (_, quota) in self.quotas.read().await.iter() {
@@ -303,16 +304,20 @@ impl AppState {
     }
 
     #[tracing::instrument(level = "debug")]
-    pub(super) async fn add_or_replace_model(&self, model: Model) {
+    pub(super) async fn add_or_replace_model(&self, model: Model) -> bool {
         let uuid = model.uuid;
         let client = model.api.init();
         let model = Arc::new((RwLock::new(model), client));
 
-        self.models.write().await.insert(uuid, model.clone());
+        self.models
+            .write()
+            .await
+            .insert(uuid, model.clone())
+            .is_none()
     }
 
     #[tracing::instrument(level = "debug")]
-    pub(super) async fn get_models(&self) -> Vec<Model> {
+    pub(super) async fn get_models_snapshot(&self) -> Vec<Model> {
         let mut models = Vec::new();
 
         for (_, model) in self.models.read().await.iter() {
