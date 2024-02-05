@@ -10,7 +10,6 @@ use axum::{
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
-use tokio::sync::{mpsc, OwnedRwLockReadGuard, RwLock};
 use uuid::Uuid;
 
 mod state;
@@ -187,6 +186,7 @@ async fn model_request(
     Extension(state): Extension<FlattenedAppState>,
     Json(payload): Json<ModelRequest>,
 ) -> Result<(StatusCode, Json<ModelResponse>), StatusCode> {
+    // TODO: Add logging
     state
         .model_request(payload)
         .await
@@ -194,41 +194,64 @@ async fn model_request(
 }
 
 async fn get_users(State(state): State<AppState>) -> Json<Vec<User>> {
-    todo!()
+    Json(state.get_users().await)
 }
 
 async fn get_user(
     State(state): State<AppState>,
     Path(uuid): Path<Uuid>,
 ) -> Result<Json<User>, StatusCode> {
-    todo!()
+    state
+        .get_user(&uuid)
+        .await
+        .map(|u| Json(u.clone()))
+        .ok_or(StatusCode::NOT_FOUND)
 }
 
-async fn add_user(State(state): State<AppState>, Json(payload): Json<User>) -> StatusCode {
-    todo!()
+async fn add_user(State(state): State<AppState>, Json(mut payload): Json<User>) -> StatusCode {
+    if payload.uuid == Uuid::default() {
+        payload.uuid = Uuid::new_v4()
+    }
+
+    match state.add_or_update_user(payload).await {
+        true => StatusCode::CREATED,
+        false => StatusCode::OK,
+    }
 }
 
 async fn update_user(
     State(state): State<AppState>,
     Path(uuid): Path<Uuid>,
-    Json(payload): Json<User>,
+    Json(mut payload): Json<User>,
 ) -> StatusCode {
-    todo!()
+    payload.uuid = uuid;
+
+    match state.update_user(payload).await {
+        true => StatusCode::CREATED,
+        false => StatusCode::OK,
+    }
 }
 
 async fn delete_user(State(state): State<AppState>, Path(uuid): Path<Uuid>) -> StatusCode {
-    todo!()
+    match state.remove_user(&uuid).await {
+        Some(_) => StatusCode::OK,
+        None => StatusCode::NOT_FOUND,
+    }
 }
 
 async fn get_roles(State(state): State<AppState>) -> Json<Vec<Role>> {
-    todo!()
+    Json(state.get_roles().await)
 }
 
 async fn get_role(
     State(state): State<AppState>,
     Path(uuid): Path<Uuid>,
 ) -> Result<Json<Role>, StatusCode> {
-    todo!()
+    state
+        .get_role(&uuid)
+        .await
+        .map(|r| Json(r.clone()))
+        .ok_or(StatusCode::NOT_FOUND)
 }
 
 async fn add_role(State(state): State<AppState>, Json(payload): Json<Role>) -> StatusCode {
@@ -248,14 +271,17 @@ async fn delete_role(State(state): State<AppState>, Path(uuid): Path<Uuid>) -> S
 }
 
 async fn get_models(State(state): State<AppState>) -> Json<Vec<Model>> {
-    todo!()
+    Json(state.get_models().await)
 }
 
 async fn get_model(
     State(state): State<AppState>,
     Path(uuid): Path<Uuid>,
 ) -> Result<Json<Model>, StatusCode> {
-    todo!()
+    match state.get_model(&uuid).await {
+        Some(model) => Ok(Json(model.0.read().await.clone())),
+        None => Err(StatusCode::NOT_FOUND),
+    }
 }
 
 async fn add_model(State(state): State<AppState>, Json(payload): Json<Model>) -> StatusCode {
@@ -275,14 +301,17 @@ async fn delete_model(State(state): State<AppState>, Path(uuid): Path<Uuid>) -> 
 }
 
 async fn get_quotas(State(state): State<AppState>) -> Json<Vec<Quota>> {
-    todo!()
+    Json(state.get_quotas().await)
 }
 
 async fn get_quota(
     State(state): State<AppState>,
     Path(uuid): Path<Uuid>,
 ) -> Result<Json<Quota>, StatusCode> {
-    todo!()
+    match state.get_quota(&uuid).await {
+        Some(quota) => Ok(Json(quota.0.read().await.clone())),
+        None => Err(StatusCode::NOT_FOUND),
+    }
 }
 
 async fn add_quota(State(state): State<AppState>, Json(payload): Json<Quota>) -> StatusCode {

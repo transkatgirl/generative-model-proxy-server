@@ -1,4 +1,10 @@
-use std::{clone::Clone, collections::HashMap, fmt::Debug, sync::Arc, time::Instant};
+use std::{
+    clone::Clone,
+    collections::{hash_map::Entry, HashMap},
+    fmt::Debug,
+    sync::Arc,
+    time::Instant,
+};
 
 use axum::http::StatusCode;
 use fast32::base32::CROCKFORD;
@@ -6,10 +12,13 @@ use ring::digest;
 use tokio::sync::{OwnedRwLockReadGuard, RwLock};
 use uuid::Uuid;
 
-use super::{super::limiter::{Limiter, PendingRequestHandle}, Permissions};
 use super::super::model::{
     CallableModelAPI, ModelAPIClient, ModelRequest, ModelResponse, ResponseStatus,
     RoutableModelRequest, RoutableModelResponse,
+};
+use super::{
+    super::limiter::{Limiter, PendingRequestHandle},
+    Permissions,
 };
 use super::{Model, Quota, Role, User};
 
@@ -41,7 +50,11 @@ impl AppState {
     }
 
     #[tracing::instrument(level = "debug")]
-    pub(super) async fn authenticate(&self, api_key: &str, arrived_at: Instant) -> Option<FlattenedAppState> {
+    pub(super) async fn authenticate(
+        &self,
+        api_key: &str,
+        arrived_at: Instant,
+    ) -> Option<FlattenedAppState> {
         if let Some(uuid) = self.api_keys.read().await.get(api_key) {
             if let Some(user) = self.get_user(uuid).await {
                 let mut tags = Vec::new();
@@ -102,19 +115,37 @@ impl AppState {
     }
 
     #[tracing::instrument(level = "debug")]
-    pub(super) async fn add_user(&self, user: User) {
+    pub(super) async fn add_or_update_user(&self, user: User) -> bool {
         let uuid = user.uuid;
-        let user = Arc::new(RwLock::new(user));
 
-        self.users.write().await.insert(uuid, user.clone());
+        match self.users.write().await.entry(uuid) {
+            Entry::Occupied(entry) => {
+                let mut app_user = entry.get().write().await;
+                let mut api_keys = self.api_keys.write().await;
 
-        let user = user.read().await;
+                for api_key in &app_user.api_keys {
+                    api_keys.remove(api_key);
+                }
 
-        for api_key in &user.api_keys {
-            self.api_keys
-                .write()
-                .await
-                .insert(api_key.clone(), user.uuid);
+                for api_key in &user.api_keys {
+                    api_keys.insert(api_key.clone(), user.uuid);
+                }
+
+                *app_user = user;
+
+                false
+            }
+            Entry::Vacant(entry) => {
+                let user = Arc::new(RwLock::new(user));
+
+                entry.insert(user.clone());
+
+                for api_key in &user.read().await.api_keys {
+                    self.api_keys.write().await.insert(api_key.clone(), uuid);
+                }
+
+                true
+            }
         }
     }
 
@@ -139,7 +170,7 @@ impl AppState {
     }
 
     #[tracing::instrument(level = "debug")]
-    pub(super) async fn update_user(&self, user: User) {
+    pub(super) async fn update_user(&self, user: User) -> bool {
         if let Some(app_user) = self.users.read().await.get(&user.uuid) {
             let mut app_user = app_user.write().await;
             let mut api_keys = self.api_keys.write().await;
@@ -153,8 +184,10 @@ impl AppState {
             }
 
             *app_user = user;
+
+            false
         } else {
-            self.add_user(user).await
+            self.add_or_update_user(user).await
         }
     }
 
@@ -187,11 +220,11 @@ impl AppState {
     }
 
     #[tracing::instrument(level = "debug")]
-    pub(super) async fn add_role(&self, role: Role) {
+    pub(super) async fn add_or_update_role(&self, role: Role) -> bool {
         let uuid = role.uuid;
         let role = Arc::new(RwLock::new(role));
 
-        self.roles.write().await.insert(uuid, role);
+        self.roles.write().await.insert(uuid, role).is_none()
     }
 
     #[tracing::instrument(level = "trace")]
@@ -204,12 +237,14 @@ impl AppState {
     }
 
     #[tracing::instrument(level = "debug")]
-    pub(super) async fn update_role(&self, role: Role) {
+    pub(super) async fn update_role(&self, role: Role) -> bool {
         if let Some(app_role) = self.roles.read().await.get(&role.uuid) {
             let mut app_role = app_role.write().await;
             *app_role = role;
+
+            false
         } else {
-            self.add_role(role).await
+            self.add_or_update_role(role).await
         }
     }
 
@@ -223,7 +258,7 @@ impl AppState {
     }
 
     #[tracing::instrument(level = "debug")]
-    pub(super) async fn add_quota(&self, quota: Quota) {
+    pub(super) async fn add_or_replace_quota(&self, quota: Quota) {
         let uuid = quota.uuid;
         let limiter = Limiter::new(&quota.limits);
         let quota = Arc::new((RwLock::new(quota), limiter));
@@ -268,7 +303,7 @@ impl AppState {
     }
 
     #[tracing::instrument(level = "debug")]
-    pub(super) async fn add_model(&self, model: Model) {
+    pub(super) async fn add_or_replace_model(&self, model: Model) {
         let uuid = model.uuid;
         let client = model.api.init();
         let model = Arc::new((RwLock::new(model), client));
@@ -386,7 +421,8 @@ impl FlattenedAppState {
 
             let request_label = match self.perms.sensitive {
                 true => "".to_string(),
-                false => CROCKFORD.encode(digest::digest(&digest::SHA256, self.tags[0].as_bytes()).as_ref()),
+                false => CROCKFORD
+                    .encode(digest::digest(&digest::SHA256, self.tags[0].as_bytes()).as_ref()),
             };
 
             return match model
