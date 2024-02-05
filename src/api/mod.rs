@@ -1,4 +1,4 @@
-use std::{clone::Clone, fmt::Debug};
+use std::{clone::Clone, fmt::Debug, time::Instant};
 
 use axum::{
     body::{self, Body, Bytes},
@@ -133,6 +133,8 @@ async fn authenticate(
     mut request: Request,
     next: Next,
 ) -> Result<Response, StatusCode> {
+    let arrived_at = Instant::now();
+
     if let Some(header_value) = request.headers().get("authorization") {
         match header_value.to_str() {
             Ok(header_string) => {
@@ -142,7 +144,7 @@ async fn authenticate(
                     .strip_prefix("basic")
                     .or(header_string.strip_prefix("bearer"))
                 {
-                    Some(api_key) => match state.authenticate(api_key).await {
+                    Some(api_key) => match state.authenticate(api_key, arrived_at).await {
                         Some(flattened_state) => {
                             request.extensions_mut().insert(flattened_state);
                             Ok(next.run(request).await)

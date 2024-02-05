@@ -41,7 +41,7 @@ impl AppState {
     }
 
     #[tracing::instrument(level = "debug")]
-    pub(super) async fn authenticate(&self, api_key: &str) -> Option<FlattenedAppState> {
+    pub(super) async fn authenticate(&self, api_key: &str, arrived_at: Instant) -> Option<FlattenedAppState> {
         if let Some(uuid) = self.api_keys.read().await.get(api_key) {
             if let Some(user) = self.get_user(uuid).await {
                 let mut tags = Vec::new();
@@ -93,7 +93,7 @@ impl AppState {
                     tags: Arc::new(tags),
                     models: Arc::new(models),
                     quotas: Arc::new(quotas),
-                    arrived_at: Instant::now(),
+                    arrived_at,
                 });
             }
         }
