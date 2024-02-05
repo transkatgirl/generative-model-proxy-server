@@ -88,6 +88,7 @@ struct LabelUpdateRequest {
     uuid: Uuid,
 }
 
+// TODO: Add API documentation
 pub fn api_router() -> Router {
     let state = AppState::new();
 
@@ -99,22 +100,28 @@ pub fn api_router() -> Router {
         .route("/embeddings", post(model_request));
 
     let admin_routes = Router::new()
-        .route("/users", get(get_users).post(add_user))
+        .route(
+            "/users",
+            get(get_users).post(add_user_post).put(add_user_put),
+        )
         .route(
             "/users/:uuid",
             get(get_user).put(update_user).delete(delete_user),
         )
-        .route("/roles", get(get_roles).post(add_role))
+        .route(
+            "/roles",
+            get(get_roles).post(add_role_post).put(add_role_put),
+        )
         .route(
             "/roles/:uuid",
             get(get_role).put(update_role).delete(delete_role),
         )
-        .route("/models", get(get_models).post(add_model))
+        .route("/models", get(get_models).post(add_model_post).put(add_model_put))
         .route(
             "/models/:uuid",
             get(get_model).patch(rename_model).delete(delete_model),
         )
-        .route("/quotas", get(get_quotas).post(add_quota))
+        .route("/quotas", get(get_quotas).post(add_quota_post).put(add_quota_put))
         .route(
             "/quotas/:uuid",
             get(get_quota).patch(rename_quota).delete(delete_quota),
@@ -209,9 +216,21 @@ async fn get_user(
         .ok_or(StatusCode::NOT_FOUND)
 }
 
-async fn add_user(State(state): State<AppState>, Json(mut payload): Json<User>) -> StatusCode {
+async fn add_user_post(State(state): State<AppState>, Json(mut payload): Json<User>) -> StatusCode {
+    if payload.uuid != Uuid::default() {
+        return StatusCode::BAD_REQUEST;
+    }
+    payload.uuid = Uuid::new_v4();
+
+    match state.add_or_update_user(payload).await {
+        true => StatusCode::CREATED,
+        false => StatusCode::OK,
+    }
+}
+
+async fn add_user_put(State(state): State<AppState>, Json(payload): Json<User>) -> StatusCode {
     if payload.uuid == Uuid::default() {
-        payload.uuid = Uuid::new_v4()
+        return StatusCode::BAD_REQUEST;
     }
 
     match state.add_or_update_user(payload).await {
@@ -258,9 +277,21 @@ async fn get_role(
         .ok_or(StatusCode::NOT_FOUND)
 }
 
-async fn add_role(State(state): State<AppState>, Json(mut payload): Json<Role>) -> StatusCode {
+async fn add_role_post(State(state): State<AppState>, Json(mut payload): Json<Role>) -> StatusCode {
+    if payload.uuid != Uuid::default() {
+        return StatusCode::BAD_REQUEST;
+    }
+    payload.uuid = Uuid::new_v4();
+
+    match state.add_or_update_role(payload).await {
+        true => StatusCode::CREATED,
+        false => StatusCode::OK,
+    }
+}
+
+async fn add_role_put(State(state): State<AppState>, Json(payload): Json<Role>) -> StatusCode {
     if payload.uuid == Uuid::default() {
-        payload.uuid = Uuid::new_v4()
+        return StatusCode::BAD_REQUEST;
     }
 
     match state.add_or_update_role(payload).await {
@@ -306,9 +337,21 @@ async fn get_model(
     }
 }
 
-async fn add_model(State(state): State<AppState>, Json(mut payload): Json<Model>) -> StatusCode {
+async fn add_model_post(State(state): State<AppState>, Json(mut payload): Json<Model>) -> StatusCode {
+    if payload.uuid != Uuid::default() {
+        return StatusCode::BAD_REQUEST;
+    }
+    payload.uuid = Uuid::new_v4();
+
+    match state.add_or_replace_model(payload).await {
+        true => StatusCode::CREATED,
+        false => StatusCode::OK,
+    }
+}
+
+async fn add_model_put(State(state): State<AppState>, Json(payload): Json<Model>) -> StatusCode {
     if payload.uuid == Uuid::default() {
-        payload.uuid = Uuid::new_v4()
+        return StatusCode::BAD_REQUEST;
     }
 
     match state.add_or_replace_model(payload).await {
@@ -353,9 +396,21 @@ async fn get_quota(
     }
 }
 
-async fn add_quota(State(state): State<AppState>, Json(mut payload): Json<Quota>) -> StatusCode {
+async fn add_quota_post(State(state): State<AppState>, Json(mut payload): Json<Quota>) -> StatusCode {
+    if payload.uuid != Uuid::default() {
+        return StatusCode::BAD_REQUEST;
+    }
+    payload.uuid = Uuid::new_v4();
+
+    match state.add_or_replace_quota(payload).await {
+        true => StatusCode::CREATED,
+        false => StatusCode::OK,
+    }
+}
+
+async fn add_quota_put(State(state): State<AppState>, Json(payload): Json<Quota>) -> StatusCode {
     if payload.uuid == Uuid::default() {
-        payload.uuid = Uuid::new_v4()
+        return StatusCode::BAD_REQUEST;
     }
 
     match state.add_or_replace_quota(payload).await {
