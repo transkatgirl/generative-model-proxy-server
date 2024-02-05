@@ -42,7 +42,6 @@ pub(super) trait RoutableModelRequest: Send + Debug + DeserializeOwned + 'static
 pub(super) enum ResponseStatus {
     Success,
     InvalidRequest,
-    ModelNotFound,
     InternalError,
     BadUpstream,
     ModelUnavailable,
@@ -283,19 +282,18 @@ impl RoutableModelResponse for ModelResponse {
     }
 }
 
-#[allow(clippy::from_over_into)]
-impl Into<ResponseStatus> for ModelResponse {
-    fn into(self) -> ResponseStatus {
-        match self {
-            Self::OpenAIChat(r) => r.into(),
-            Self::OpenAIEdit(r) => r.into(),
-            Self::OpenAICompletion(r) => r.into(),
-            Self::OpenAIModeration(r) => r.into(),
-            Self::OpenAIEmbedding(r) => r.into(),
-            Self::OpenAIImage(r) => r.into(),
-            Self::OpenAIAudio(r) => r.into(),
-            Self::OpenAIError(r) => r.into(),
-            Self::NoAPI(status) => status,
+impl From<ModelResponse> for ResponseStatus {
+    fn from(item: ModelResponse) -> ResponseStatus {
+        match item {
+            ModelResponse::OpenAIChat(r) => r.into(),
+            ModelResponse::OpenAIEdit(r) => r.into(),
+            ModelResponse::OpenAICompletion(r) => r.into(),
+            ModelResponse::OpenAIModeration(r) => r.into(),
+            ModelResponse::OpenAIEmbedding(r) => r.into(),
+            ModelResponse::OpenAIImage(r) => r.into(),
+            ModelResponse::OpenAIAudio(r) => r.into(),
+            ModelResponse::OpenAIError(r) => r.into(),
+            ModelResponse::NoAPI(status) => status,
         }
     }
 }

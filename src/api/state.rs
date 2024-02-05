@@ -255,7 +255,18 @@ impl AppState {
 
 #[derive(Debug, Clone)]
 pub(super) struct FlattenedAppState {
-    tags: Arc<Vec<Uuid>>,
+    pub(super) tags: Arc<Vec<Uuid>>,
     models: Arc<HashMap<String, AppModel>>,
-    quotas: Arc<Vec<AppQuota>>,
+    pub(super) quotas: Arc<Vec<AppQuota>>,
+}
+
+impl FlattenedAppState {
+	#[tracing::instrument(level = "debug")]
+	pub(super) fn get_model(&self, label: &str) -> Option<AppModel> {
+		self.models.get(label).cloned()
+	}
+
+	pub(super) fn get_request_label(&self) -> String {
+		self.tags[0].as_simple().encode_lower(&mut Uuid::encode_buffer()).to_string()
+	}
 }

@@ -1,4 +1,4 @@
-use std::{clone::Clone, fmt::Debug};
+use std::{clone::Clone, fmt::Debug, time::Instant};
 
 use axum::{
     body::{self, Body, Bytes},
@@ -14,6 +14,8 @@ use tokio::sync::{mpsc, OwnedRwLockReadGuard, RwLock};
 use uuid::Uuid;
 
 mod state;
+
+use crate::model::{RoutableModelRequest, ResponseStatus, RoutableModelResponse};
 
 use super::limiter::{Limit, Limiter};
 use super::model::{CallableModelAPI, ModelAPI, ModelAPIClient, ModelRequest, ModelResponse};
@@ -81,7 +83,6 @@ pub fn api_router() -> Router {
     Router::new()
         .nest("/v1/", openai_routes)
         .route_layer(middleware::from_fn_with_state(state.clone(), authenticate))
-        .with_state(state)
 }
 
 async fn authenticate(
@@ -116,12 +117,53 @@ async fn authenticate(
 }
 
 async fn model_request(
-    //State(state): State<AppState>,
-    Extension(authenticated): Extension<FlattenedAppState>,
+    Extension(state): Extension<FlattenedAppState>,
     headers: HeaderMap,
     Json(payload): Json<ModelRequest>,
 ) -> Result<Response, StatusCode> {
-    todo!()
+    let model_label = payload.get_model();
+
+    if let Some(model) = state.get_model(&model_label) {
+        let mut request_handles = Vec::new();
+        let model_api = &model.0.read().await.api;
+        match model_api.get_context_len() {
+            Some(context_len) => {
+                for quota in state.quotas.iter() {
+                    request_handles.push((quota.clone(), quota.1.token_request(context_len, Instant::now()).await));
+                }
+            },
+            None => {
+                for quota in state.quotas.iter() {
+                    quota.1.plain_request(Instant::now()).await;
+                }
+            },
+        }
+
+        return match model_api.generate(&model.1, &state.get_request_label(), &model_label, payload).await {
+            Ok(response) => {
+                if let Some(tokens) = response.get_token_count() {
+                    for (quota, handle) in request_handles {
+                        if let Some(handle) = handle {
+                            quota.1.token_request_finalize(tokens, handle).await;
+                        }
+                    }
+                }
+
+                /*match ResponseStatus::from(response) {
+                    Success =>
+                }*/
+
+                todo!()
+            },
+            Err(ResponseStatus::Success) => Err(StatusCode::OK),
+            Err(ResponseStatus::InvalidRequest) => Err(StatusCode::BAD_REQUEST),
+            Err(ResponseStatus::InternalError) => Err(StatusCode::INTERNAL_SERVER_ERROR),
+            Err(ResponseStatus::BadUpstream) => Err(StatusCode::BAD_GATEWAY),
+            Err(ResponseStatus::ModelUnavailable) => Err(StatusCode::SERVICE_UNAVAILABLE),
+        }
+    }
+
+    Err(StatusCode::NOT_FOUND)
 }
 
 /* TODO: Add /admin/ API for configuration changes
