@@ -1,10 +1,11 @@
-use std::{clone::Clone, collections::HashMap, fmt::Debug, sync::Arc};
+use std::{clone::Clone, collections::HashMap, fmt::Debug, sync::Arc, time::Instant};
 
+use axum::http::StatusCode;
 use tokio::sync::{OwnedRwLockReadGuard, RwLock};
 use uuid::Uuid;
 
-use super::super::limiter::Limiter;
-use super::super::model::{CallableModelAPI, ModelAPIClient};
+use super::super::limiter::{Limiter, PendingRequestHandle};
+use super::super::model::{CallableModelAPI, ModelAPIClient, ModelRequest, ModelResponse, ResponseStatus, RoutableModelRequest, RoutableModelResponse};
 use super::{Model, Quota, Role, User};
 
 type AppUser = Arc<RwLock<User>>;
@@ -41,32 +42,34 @@ impl AppState {
                 let mut tags = Vec::new();
                 let mut models = HashMap::new();
                 let mut quotas = Vec::new();
+				let mut admin = user.admin;
 
                 tags.push(user.uuid);
-                for uuid in &user.models {
-                    if let Some(model) = self.models.read().await.get(uuid) {
-                        models.insert(model.0.read().await.label.clone(), model.clone());
-                    }
-                }
+				for uuid in &user.models {
+					if let Some(model) = self.get_model_with_quotas(&uuid).await {
+						models.insert(model.0.0.read().await.label.clone(), model.clone());
+					}
+				}
                 for quota_member in &user.quotas {
-                    if let Some(quota) = self.quotas.read().await.get(&quota_member.quota) {
+                    if let Some(quota) = self.get_quota(&quota_member.quota).await {
                         quotas.push(quota.clone());
                         tags.push(quota.0.read().await.uuid);
                     }
                 }
 
                 for uuid in &user.roles {
-                    if let Some(role_ref) = self.roles.read().await.get(uuid) {
-                        let role = role_ref.read().await;
-
+                    if let Some(role) = self.get_role(uuid).await {
                         tags.push(role.uuid);
+						if role.admin {
+							admin = true
+						}
                         for uuid in &role.models {
-                            if let Some(model) = self.models.read().await.get(uuid) {
-                                models.insert(model.0.read().await.label.clone(), model.clone());
-                            }
+							if let Some(model) = self.get_model_with_quotas(&uuid).await {
+								models.insert(model.0.0.read().await.label.clone(), model.clone());
+							}
                         }
                         for quota_member in &role.quotas {
-                            if let Some(quota) = self.quotas.read().await.get(&quota_member.quota) {
+                            if let Some(quota) = self.get_quota(&quota_member.quota).await {
                                 quotas.push(quota.clone());
                                 tags.push(quota.0.read().await.uuid);
                             }
@@ -75,9 +78,11 @@ impl AppState {
                 }
 
                 return Some(FlattenedAppState {
+					admin,
                     tags: Arc::new(tags),
                     models: Arc::new(models),
                     quotas: Arc::new(quotas),
+					arrived_at: Instant::now(),
                 });
             }
         }
@@ -102,7 +107,7 @@ impl AppState {
         }
     }
 
-	#[tracing::instrument(level = "debug")]
+	#[tracing::instrument(level = "trace")]
     pub(super) async fn get_user(&self, uuid: &Uuid) -> Option<OwnedRwLockReadGuard<User>> {
         if let Some(user) = self.users.read().await.get(uuid) {
             user.clone().read_owned().await;
@@ -156,7 +161,7 @@ impl AppState {
         self.roles.write().await.insert(uuid, role);
     }
 
-	#[tracing::instrument(level = "debug")]
+	#[tracing::instrument(level = "trace")]
     pub(super) async fn get_role(&self, uuid: &Uuid) -> Option<OwnedRwLockReadGuard<Role>> {
         if let Some(role) = self.roles.read().await.get(uuid) {
             role.clone().read_owned().await;
@@ -193,7 +198,7 @@ impl AppState {
         self.quotas.write().await.insert(uuid, quota);
     }
 
-	#[tracing::instrument(level = "debug")]
+	#[tracing::instrument(level = "trace")]
     pub(super) async fn get_quota(&self, uuid: &Uuid) -> Option<AppQuota> {
         self.quotas.read().await.get(uuid).cloned()
     }
@@ -227,10 +232,27 @@ impl AppState {
         self.models.write().await.insert(uuid, model.clone());
     }
 
-	#[tracing::instrument(level = "debug")]
+	#[tracing::instrument(level = "trace")]
     pub(super) async fn get_model(&self, uuid: &Uuid) -> Option<AppModel> {
         self.models.read().await.get(uuid).cloned()
     }
+
+	#[tracing::instrument(level = "trace")]
+	async fn get_model_with_quotas(&self, uuid: &Uuid) -> Option<(AppModel, Vec<AppQuota>)> {
+		if let Some(model) = self.get_model(&uuid).await {
+			let mut quotas = Vec::new();
+
+			for quota_member in &model.0.read().await.quotas {
+				if let Some(quota) = self.get_quota(&quota_member.quota).await {
+					quotas.push(quota)
+				}
+			}
+
+			return Some((model, quotas))
+		}
+
+		None
+	}
 
 	#[tracing::instrument(level = "debug")]
     pub(super) async fn update_model_label(&self, uuid: &Uuid, label: String) -> Option<()> {
@@ -255,18 +277,89 @@ impl AppState {
 
 #[derive(Debug, Clone)]
 pub(super) struct FlattenedAppState {
+	admin: bool,
     pub(super) tags: Arc<Vec<Uuid>>,
-    models: Arc<HashMap<String, AppModel>>,
-    pub(super) quotas: Arc<Vec<AppQuota>>,
+    models: Arc<HashMap<String, (AppModel, Vec<AppQuota>)>>,
+    quotas: Arc<Vec<AppQuota>>,
+	arrived_at: Instant,
 }
 
 impl FlattenedAppState {
-	#[tracing::instrument(level = "debug")]
-	pub(super) fn get_model(&self, label: &str) -> Option<AppModel> {
-		self.models.get(label).cloned()
+	pub(super) fn is_admin(&self) -> bool {
+		return self.admin
 	}
 
-	pub(super) fn get_request_label(&self) -> String {
-		self.tags[0].as_simple().encode_lower(&mut Uuid::encode_buffer()).to_string()
+	#[tracing::instrument(level = "debug")]
+	pub(super) async fn model_request(&self, request: ModelRequest) -> Result<(ModelResponse, StatusCode), StatusCode> {
+		let model_label = request.get_model();
+
+		if let Some(model) = self.models.get(&model_label) {
+			let (model, model_client, model_quotas) = (&model.0.0.read().await, &model.0.1, &model.1);
+
+			let mut request_handles = Vec::new();
+
+			match model.api.get_context_len() {
+				Some(context_len) => {
+					for quota in self.quotas.iter() {
+						match quota.1.token_request(context_len, self.arrived_at).await {
+							Some(handle) => {
+								request_handles.push((quota.clone(), Some(handle)));
+							}
+							None => return Err(StatusCode::TOO_MANY_REQUESTS),
+						}
+					}
+					for quota in model_quotas {
+						match quota.1.token_request(context_len, self.arrived_at).await {
+							Some(handle) => {
+								request_handles.push((quota.clone(), Some(handle)));
+							}
+							None => return Err(StatusCode::TOO_MANY_REQUESTS),
+						}
+					}
+				},
+				None => {
+					for quota in self.quotas.iter() {
+						quota.1.plain_request(self.arrived_at).await;
+						request_handles.push((quota.clone(), None))
+					}
+					for quota in model_quotas {
+						quota.1.plain_request(self.arrived_at).await;
+						request_handles.push((quota.clone(), None))
+					}
+				},
+			}
+
+			let mut buffer = Uuid::encode_buffer();
+			let request_label = self.tags[0].as_simple().encode_lower(&mut buffer);
+
+			return match model.api.generate(model_client, request_label, &model_label, request).await {
+				Ok(response) => {
+					if let Some(tokens) = response.get_token_count() {
+						for (quota, handle) in request_handles {
+							let handle = handle.unwrap_or(PendingRequestHandle::new(self.arrived_at, 0));
+
+							quota.1.token_request_finalize(tokens, handle).await;
+						}
+					}
+
+					let status = match response.get_status() {
+						ResponseStatus::Success => StatusCode::OK,
+						ResponseStatus::InvalidRequest => StatusCode::BAD_REQUEST,
+						ResponseStatus::InternalError => StatusCode::INTERNAL_SERVER_ERROR,
+						ResponseStatus::BadUpstream => StatusCode::BAD_GATEWAY,
+						ResponseStatus::ModelUnavailable => StatusCode::SERVICE_UNAVAILABLE,
+					};
+
+					return Ok((response, status))
+				},
+				Err(ResponseStatus::Success) => Err(StatusCode::OK),
+				Err(ResponseStatus::InvalidRequest) => Err(StatusCode::BAD_REQUEST),
+				Err(ResponseStatus::InternalError) => Err(StatusCode::INTERNAL_SERVER_ERROR),
+				Err(ResponseStatus::BadUpstream) => Err(StatusCode::BAD_GATEWAY),
+				Err(ResponseStatus::ModelUnavailable) => Err(StatusCode::SERVICE_UNAVAILABLE),
+			}
+		}
+
+		Err(StatusCode::NOT_FOUND)
 	}
 }

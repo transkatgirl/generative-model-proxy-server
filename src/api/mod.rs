@@ -1,4 +1,4 @@
-use std::{clone::Clone, fmt::Debug, time::Instant};
+use std::{clone::Clone, fmt::Debug};
 
 use axum::{
     body::{self, Body, Bytes},
@@ -15,8 +15,6 @@ use uuid::Uuid;
 
 mod state;
 
-use crate::model::{RoutableModelRequest, ResponseStatus, RoutableModelResponse};
-
 use super::limiter::{Limit, Limiter};
 use super::model::{CallableModelAPI, ModelAPI, ModelAPIClient, ModelRequest, ModelResponse};
 use state::{AppState, FlattenedAppState};
@@ -30,6 +28,8 @@ struct User {
     api_keys: Vec<String>,
     roles: Vec<Uuid>,
 
+    admin: bool,
+
     models: Vec<Uuid>,
     quotas: Vec<QuotaMember>,
 }
@@ -40,13 +40,18 @@ struct Role {
     label: String,
     uuid: Uuid,
 
+    admin: bool,
+
     models: Vec<Uuid>,
     quotas: Vec<QuotaMember>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
 struct Model {
+    #[serde(default)]
     label: String,
+
+    #[serde(default)]
     uuid: Uuid,
 
     api: ModelAPI,
@@ -54,18 +59,27 @@ struct Model {
     quotas: Vec<QuotaMember>,
 }
 
-#[derive(Default, Serialize, Deserialize, Debug)]
-#[serde(default)]
+#[derive(Serialize, Deserialize, Debug)]
 struct QuotaMember {
     quota: Uuid,
     //priority: Option<u32>,
 }
 
-#[derive(Default, Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug)]
 struct Quota {
+    #[serde(default)]
+    label: String,
+
+    #[serde(default)]
+    uuid: Uuid,
+
+    limits: Vec<Limit>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct LabelUpdateRequest {
     label: String,
     uuid: Uuid,
-    limits: Vec<Limit>,
 }
 
 pub fn api_router() -> Router {
@@ -78,10 +92,21 @@ pub fn api_router() -> Router {
         .route("/moderations", post(model_request))
         .route("/embeddings", post(model_request));
 
-    //let admin_routes = Router::new().with_state(state);
+    let admin_routes = Router::new()
+        .route("/users", get(get_users).post(add_user))
+        .route("/users/:uuid", get(get_user).put(update_user).delete(delete_user))
+        .route("/roles", get(get_roles).post(add_role))
+        .route("/roles/:uuid", get(get_role).put(update_role).delete(delete_role))
+        .route("/models", get(get_models).post(add_model))
+        .route("/models/:uuid", get(get_model).patch(rename_model).delete(delete_model))
+        .route("/quotas", get(get_quotas).post(add_quota))
+        .route("/quotas/:uuid", get(get_quota).patch(rename_quota).delete(delete_quota))
+        .with_state(state.clone())
+        .route_layer(middleware::from_fn(authenticate_admin));
 
     Router::new()
         .nest("/v1/", openai_routes)
+        .nest("/admin", admin_routes)
         .route_layer(middleware::from_fn_with_state(state.clone(), authenticate))
 }
 
@@ -116,95 +141,101 @@ async fn authenticate(
     }
 }
 
+async fn authenticate_admin(
+    Extension(state): Extension<FlattenedAppState>,
+    request: Request,
+    next: Next,
+) -> Result<Response, StatusCode> {
+    match state.is_admin() {
+        true => Ok(next.run(request).await),
+        false => Err(StatusCode::UNAUTHORIZED),
+    }
+}
+
 async fn model_request(
     Extension(state): Extension<FlattenedAppState>,
     headers: HeaderMap,
     Json(payload): Json<ModelRequest>,
 ) -> Result<Response, StatusCode> {
-    let model_label = payload.get_model();
-
-    if let Some(model) = state.get_model(&model_label) {
-        let mut request_handles = Vec::new();
-        let model_api = &model.0.read().await.api;
-        match model_api.get_context_len() {
-            Some(context_len) => {
-                for quota in state.quotas.iter() {
-                    request_handles.push((quota.clone(), quota.1.token_request(context_len, Instant::now()).await));
-                }
-            },
-            None => {
-                for quota in state.quotas.iter() {
-                    quota.1.plain_request(Instant::now()).await;
-                }
-            },
-        }
-
-        return match model_api.generate(&model.1, &state.get_request_label(), &model_label, payload).await {
-            Ok(response) => {
-                if let Some(tokens) = response.get_token_count() {
-                    for (quota, handle) in request_handles {
-                        if let Some(handle) = handle {
-                            quota.1.token_request_finalize(tokens, handle).await;
-                        }
-                    }
-                }
-
-                /*match ResponseStatus::from(response) {
-                    Success =>
-                }*/
-
-                todo!()
-            },
-            Err(ResponseStatus::Success) => Err(StatusCode::OK),
-            Err(ResponseStatus::InvalidRequest) => Err(StatusCode::BAD_REQUEST),
-            Err(ResponseStatus::InternalError) => Err(StatusCode::INTERNAL_SERVER_ERROR),
-            Err(ResponseStatus::BadUpstream) => Err(StatusCode::BAD_GATEWAY),
-            Err(ResponseStatus::ModelUnavailable) => Err(StatusCode::SERVICE_UNAVAILABLE),
-        }
-    }
-
-    Err(StatusCode::NOT_FOUND)
+    todo!()
 }
 
-/* TODO: Add /admin/ API for configuration changes
+async fn get_users(State(state): State<AppState>) -> Json<Vec<User>> {
+    todo!()
+}
 
-async fn get_users() {}
+async fn get_user(State(state): State<AppState>, Path(uuid): Path<Uuid>) -> Result<Json<User>, StatusCode> {
+    todo!()
+}
 
-async fn get_user() {}
+async fn add_user(State(state): State<AppState>, Json(payload): Json<User>) -> StatusCode {
+    todo!()
+}
 
-async fn create_user() {}
+async fn update_user(State(state): State<AppState>, Path(uuid): Path<Uuid>, Json(payload): Json<User>) -> StatusCode {
+    todo!()
+}
 
-async fn update_user_put() {}
+async fn delete_user(State(state): State<AppState>, Path(uuid): Path<Uuid>) -> StatusCode {
+    todo!()
+}
 
-async fn update_user_patch() {}
+async fn get_roles(State(state): State<AppState>) -> Json<Vec<Role>> {
+    todo!()
+}
 
-async fn delete_user() {}
+async fn get_role(State(state): State<AppState>, Path(uuid): Path<Uuid>) -> Result<Json<Role>, StatusCode> {
+    todo!()
+}
 
-async fn get_roles() {}
+async fn add_role(State(state): State<AppState>, Json(payload): Json<Role>) -> StatusCode {
+    todo!()
+}
 
-async fn get_role() {}
+async fn update_role(State(state): State<AppState>, Path(uuid): Path<Uuid>, Json(payload): Json<Role>) -> StatusCode {
+    todo!()
+}
 
-async fn create_role() {}
+async fn delete_role(State(state): State<AppState>, Path(uuid): Path<Uuid>) -> StatusCode {
+    todo!()
+}
 
-async fn update_role_put() {}
+async fn get_models(State(state): State<AppState>) -> Json<Vec<Model>> {
+    todo!()
+}
 
-async fn update_role_patch() {}
+async fn get_model(State(state): State<AppState>, Path(uuid): Path<Uuid>) -> Result<Json<Model>, StatusCode> {
+    todo!()
+}
 
-async fn delete_role() {}
+async fn add_model(State(state): State<AppState>, Json(payload): Json<Model>) -> StatusCode {
+    todo!()
+}
 
-async fn get_models() {}
+async fn rename_model(State(state): State<AppState>, Path(uuid): Path<Uuid>, Json(payload): Json<LabelUpdateRequest>) -> StatusCode {
+    todo!()
+}
 
-async fn get_model() {}
+async fn delete_model(State(state): State<AppState>, Path(uuid): Path<Uuid>) -> StatusCode {
+    todo!()
+}
 
-async fn create_model() {}
+async fn get_quotas(State(state): State<AppState>) -> Json<Vec<Quota>> {
+    todo!()
+}
 
-async fn delete_model() {}
+async fn get_quota(State(state): State<AppState>, Path(uuid): Path<Uuid>) -> Result<Json<Quota>, StatusCode> {
+    todo!()
+}
 
-async fn get_quotas() {}
+async fn add_quota(State(state): State<AppState>, Json(payload): Json<Quota>) -> StatusCode {
+    todo!()
+}
 
-async fn get_quota() {}
+async fn rename_quota(State(state): State<AppState>, Path(uuid): Path<Uuid>, Json(payload): Json<LabelUpdateRequest>) -> StatusCode {
+    todo!()
+}
 
-async fn create_quota() {}
-
-async fn delete_quota() {}
-*/
+async fn delete_quota(State(state): State<AppState>, Path(uuid): Path<Uuid>) -> StatusCode {
+    todo!()
+}
