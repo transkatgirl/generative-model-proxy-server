@@ -63,17 +63,6 @@ struct Quota {
     limits: Vec<Limit>,
 }
 
-/*
-
-Authorization: Bearer OPENAI_API_KEY
-[optional] OpenAI-Organization: org-Kew3wyVexePADOHIgJSK7Hsl
-
-SEE https://platform.openai.com/docs/api-reference/streaming
-
-
-
-*/
-
 type AppUser = Arc<RwLock<User>>;
 type AppRole = Arc<RwLock<Role>>;
 type AppQuota = Arc<(Quota, Limiter)>;
@@ -100,6 +89,7 @@ struct AppState {
     model_labels: Arc<RwLock<HashMap<String, Uuid>>>,
 }
 
+// WIP
 impl AppState {
     fn new() -> AppState {
         AppState {
@@ -302,11 +292,11 @@ impl AppState {
         if let Some(role) = self.roles.write().await.remove(uuid) {
             if let Some(refs) = self.references.write().await.remove(& AppReference::Role(*uuid)) {
                 for reference in refs.write().await.drain() {
-                    if let AppReference::User(uuid) = reference {
-                        if let Some(user) = self.users.read().await.get(&uuid) {
+                    if let AppReference::User(user_uuid) = reference {
+                        if let Some(user) = self.users.read().await.get(&user_uuid) {
                             let mut user = user.write().await;
 
-                            let index = user.roles.iter().position(|r| *r == uuid);
+                            let index = user.roles.iter().position(|r| r == uuid);
                             if let Some(index) = index {
                                 user.roles.remove(index);
                             }
@@ -353,6 +343,9 @@ impl AppState {
 
     async fn remove_quota(&self, uuid: &Uuid) -> Option<AppQuota> {
         if let Some(quota) = self.quotas.write().await.remove(uuid) {
+            if let Some(refs) = self.references.write().await.remove(& &AppReference::Quota(*uuid)) {
+                todo!()
+            }
             todo!()
         }
 
@@ -388,6 +381,29 @@ impl AppState {
 
     async fn remove_model(&self, uuid: &Uuid) -> Option<AppModel> {
         if let Some(model) = self.models.write().await.remove(uuid) {
+            if let Some(refs) = self.references.write().await.remove(&AppReference::Model(*uuid)) {
+                for reference in refs.write().await.drain() {
+                    match reference {
+                        AppReference::User(user_uuid) => {
+                            if let Some(user) = self.users.read().await.get(&user_uuid) {
+                                let mut user = user.write().await;
+
+                                let index = user.models.iter().position(|r| r == uuid);
+                                if let Some(index) = index {
+                                    user.roles.remove(index);
+                                }
+                            }
+                        },
+                        AppReference::Role(uuid) => {
+                            // TODO
+                        },
+                        _ => {},
+                    }
+
+                }
+
+                todo!()
+            }
             todo!()
         }
 
@@ -456,7 +472,9 @@ async fn model_request(
 
     todo!()
 }
-/*
+
+/* TODO: Add /admin/ API for configuration changes
+
 async fn get_users() {}
 
 async fn get_user() {}
@@ -487,9 +505,13 @@ async fn get_model() {}
 
 async fn create_model() {}
 
-async fn update_model_put() {}
-
-async fn update_model_patch() {}
-
 async fn delete_model() {}
- */
+
+async fn get_quotas() {}
+
+async fn get_quota() {}
+
+async fn create_quota() {}
+
+async fn delete_quota() {}
+*/
