@@ -38,7 +38,7 @@ pub(super) trait RoutableModelRequest: Send + Debug + DeserializeOwned + 'static
     fn get_total_n(&self) -> u32;
 }
 
-#[derive(Serialize, Debug)]
+#[derive(Serialize, Debug, Clone, Copy)]
 pub(super) enum ResponseStatus {
     Success,
     InvalidRequest,
@@ -48,12 +48,18 @@ pub(super) enum ResponseStatus {
 }
 
 pub(super) trait RoutableModelResponse:
-    Send + Debug + Serialize + Into<ResponseStatus> + 'static
+    Send + Debug + Serialize + 'static
 {
+    fn get_status(&self) -> ResponseStatus;
+
     fn get_token_count(&self) -> Option<u32>;
 }
 
 impl RoutableModelResponse for ResponseStatus {
+    fn get_status(&self) -> ResponseStatus {
+        *self
+    }
+
     fn get_token_count(&self) -> Option<u32> {
         None
     }
@@ -267,6 +273,20 @@ impl ModelResponse {
 }
 
 impl RoutableModelResponse for ModelResponse {
+    fn get_status(&self) -> ResponseStatus {
+        match self {
+            Self::OpenAIChat(r) => r.get_status(),
+            Self::OpenAIEdit(r) => r.get_status(),
+            Self::OpenAICompletion(r) => r.get_status(),
+            Self::OpenAIModeration(r) => r.get_status(),
+            Self::OpenAIEmbedding(r) => r.get_status(),
+            Self::OpenAIImage(r) => r.get_status(),
+            Self::OpenAIAudio(r) => r.get_status(),
+            Self::OpenAIError(r) => r.get_status(),
+            Self::NoAPI(status) => *status,
+        }
+    }
+
     fn get_token_count(&self) -> Option<u32> {
         match self {
             Self::OpenAIChat(r) => r.get_token_count(),
@@ -278,22 +298,6 @@ impl RoutableModelResponse for ModelResponse {
             Self::OpenAIAudio(r) => r.get_token_count(),
             Self::OpenAIError(r) => r.get_token_count(),
             Self::NoAPI(_) => None,
-        }
-    }
-}
-
-impl From<ModelResponse> for ResponseStatus {
-    fn from(item: ModelResponse) -> ResponseStatus {
-        match item {
-            ModelResponse::OpenAIChat(r) => r.into(),
-            ModelResponse::OpenAIEdit(r) => r.into(),
-            ModelResponse::OpenAICompletion(r) => r.into(),
-            ModelResponse::OpenAIModeration(r) => r.into(),
-            ModelResponse::OpenAIEmbedding(r) => r.into(),
-            ModelResponse::OpenAIImage(r) => r.into(),
-            ModelResponse::OpenAIAudio(r) => r.into(),
-            ModelResponse::OpenAIError(r) => r.into(),
-            ModelResponse::NoAPI(status) => status,
         }
     }
 }

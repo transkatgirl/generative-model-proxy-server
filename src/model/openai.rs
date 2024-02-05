@@ -34,15 +34,12 @@ impl RoutableModelRequest for CreateChatCompletionRequest {
 }
 
 impl RoutableModelResponse for CreateChatCompletionResponse {
+    fn get_status(&self) -> ResponseStatus {
+        ResponseStatus::Success
+    }
+
     fn get_token_count(&self) -> Option<u32> {
         self.usage.as_ref().map(|u| u.total_tokens)
-    }
-}
-
-#[allow(clippy::from_over_into)]
-impl Into<ResponseStatus> for CreateChatCompletionResponse {
-    fn into(self) -> ResponseStatus {
-        ResponseStatus::Success
     }
 }
 
@@ -57,15 +54,12 @@ impl RoutableModelRequest for CreateEditRequest {
 }
 
 impl RoutableModelResponse for CreateEditResponse {
+    fn get_status(&self) -> ResponseStatus {
+        ResponseStatus::Success
+    }
+
     fn get_token_count(&self) -> Option<u32> {
         Some(self.usage.total_tokens)
-    }
-}
-
-#[allow(clippy::from_over_into)]
-impl Into<ResponseStatus> for CreateEditResponse {
-    fn into(self) -> ResponseStatus {
-        ResponseStatus::Success
     }
 }
 
@@ -86,15 +80,12 @@ impl RoutableModelRequest for CreateCompletionRequest {
 }
 
 impl RoutableModelResponse for CreateCompletionResponse {
+    fn get_status(&self) -> ResponseStatus {
+        ResponseStatus::Success
+    }
+
     fn get_token_count(&self) -> Option<u32> {
         self.usage.as_ref().map(|u| u.total_tokens)
-    }
-}
-
-#[allow(clippy::from_over_into)]
-impl Into<ResponseStatus> for CreateCompletionResponse {
-    fn into(self) -> ResponseStatus {
-        ResponseStatus::Success
     }
 }
 
@@ -117,15 +108,12 @@ impl RoutableModelRequest for CreateModerationRequest {
 }
 
 impl RoutableModelResponse for CreateModerationResponse {
+    fn get_status(&self) -> ResponseStatus {
+        ResponseStatus::Success
+    }
+
     fn get_token_count(&self) -> Option<u32> {
         None
-    }
-}
-
-#[allow(clippy::from_over_into)]
-impl Into<ResponseStatus> for CreateModerationResponse {
-    fn into(self) -> ResponseStatus {
-        ResponseStatus::Success
     }
 }
 
@@ -145,15 +133,12 @@ impl RoutableModelRequest for CreateEmbeddingRequest {
 }
 
 impl RoutableModelResponse for CreateEmbeddingResponse {
+    fn get_status(&self) -> ResponseStatus {
+        ResponseStatus::Success
+    }
+
     fn get_token_count(&self) -> Option<u32> {
         Some(self.usage.total_tokens)
-    }
-}
-
-#[allow(clippy::from_over_into)]
-impl Into<ResponseStatus> for CreateEmbeddingResponse {
-    fn into(self) -> ResponseStatus {
-        ResponseStatus::Success
     }
 }
 
@@ -203,15 +188,12 @@ impl RoutableModelRequest for CreateImageVariationRequest {
 }
 
 impl RoutableModelResponse for ImagesResponse {
+    fn get_status(&self) -> ResponseStatus {
+        ResponseStatus::Success
+    }
+
     fn get_token_count(&self) -> Option<u32> {
         None
-    }
-}
-
-#[allow(clippy::from_over_into)]
-impl Into<ResponseStatus> for ImagesResponse {
-    fn into(self) -> ResponseStatus {
-        ResponseStatus::Success
     }
 }
 
@@ -226,15 +208,12 @@ impl RoutableModelRequest for CreateTranscriptionRequest {
 }
 
 impl RoutableModelResponse for CreateTranscriptionResponse {
+    fn get_status(&self) -> ResponseStatus {
+        ResponseStatus::Success
+    }
+
     fn get_token_count(&self) -> Option<u32> {
         None
-    }
-}
-
-#[allow(clippy::from_over_into)]
-impl Into<ResponseStatus> for CreateTranscriptionResponse {
-    fn into(self) -> ResponseStatus {
-        ResponseStatus::Success
     }
 }
 
@@ -249,33 +228,27 @@ impl RoutableModelRequest for CreateTranslationRequest {
 }
 
 impl RoutableModelResponse for CreateTranslationResponse {
+    fn get_status(&self) -> ResponseStatus {
+        ResponseStatus::Success
+    }
+
     fn get_token_count(&self) -> Option<u32> {
         None
-    }
-}
-
-#[allow(clippy::from_over_into)]
-impl Into<ResponseStatus> for CreateTranslationResponse {
-    fn into(self) -> ResponseStatus {
-        ResponseStatus::Success
     }
 }
 
 impl RoutableModelResponse for ApiError {
-    fn get_token_count(&self) -> Option<u32> {
-        None
-    }
-}
-
-#[allow(clippy::from_over_into)]
-impl Into<ResponseStatus> for ApiError {
-    fn into(self) -> ResponseStatus {
+    fn get_status(&self) -> ResponseStatus {
         match self.r#type.as_deref() {
             Some("invalid_request_error") => ResponseStatus::InvalidRequest,
             Some("insufficient_quota") => ResponseStatus::ModelUnavailable,
             Some("server_error") => ResponseStatus::BadUpstream,
             _ => ResponseStatus::InternalError,
         }
+    }
+
+    fn get_token_count(&self) -> Option<u32> {
+        None
     }
 }
 
@@ -694,20 +667,17 @@ pub(super) enum AudioResponse {
 }
 
 impl RoutableModelResponse for AudioResponse {
+    fn get_status(&self) -> ResponseStatus {
+        match self {
+            Self::Transcription(r) => r.get_status(),
+            Self::Translation(r) => r.get_status(),
+        }
+    }
+
     fn get_token_count(&self) -> Option<u32> {
         match self {
             Self::Transcription(r) => r.get_token_count(),
             Self::Translation(r) => r.get_token_count(),
-        }
-    }
-}
-
-#[allow(clippy::from_over_into)]
-impl Into<ResponseStatus> for AudioResponse {
-    fn into(self) -> ResponseStatus {
-        match self {
-            Self::Transcription(r) => r.into(),
-            Self::Translation(r) => r.into(),
         }
     }
 }
