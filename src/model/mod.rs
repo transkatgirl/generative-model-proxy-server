@@ -47,9 +47,7 @@ pub(super) enum ResponseStatus {
     ModelUnavailable,
 }
 
-pub(super) trait RoutableModelResponse:
-    Send + Debug + Serialize + 'static
-{
+pub(super) trait RoutableModelResponse: Send + Debug + Serialize + 'static {
     fn get_status(&self) -> ResponseStatus;
 
     fn get_token_count(&self) -> Option<u32>;

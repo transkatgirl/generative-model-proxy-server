@@ -94,13 +94,25 @@ pub fn api_router() -> Router {
 
     let admin_routes = Router::new()
         .route("/users", get(get_users).post(add_user))
-        .route("/users/:uuid", get(get_user).put(update_user).delete(delete_user))
+        .route(
+            "/users/:uuid",
+            get(get_user).put(update_user).delete(delete_user),
+        )
         .route("/roles", get(get_roles).post(add_role))
-        .route("/roles/:uuid", get(get_role).put(update_role).delete(delete_role))
+        .route(
+            "/roles/:uuid",
+            get(get_role).put(update_role).delete(delete_role),
+        )
         .route("/models", get(get_models).post(add_model))
-        .route("/models/:uuid", get(get_model).patch(rename_model).delete(delete_model))
+        .route(
+            "/models/:uuid",
+            get(get_model).patch(rename_model).delete(delete_model),
+        )
         .route("/quotas", get(get_quotas).post(add_quota))
-        .route("/quotas/:uuid", get(get_quota).patch(rename_quota).delete(delete_quota))
+        .route(
+            "/quotas/:uuid",
+            get(get_quota).patch(rename_quota).delete(delete_quota),
+        )
         .with_state(state.clone())
         .route_layer(middleware::from_fn(authenticate_admin));
 
@@ -154,17 +166,22 @@ async fn authenticate_admin(
 
 async fn model_request(
     Extension(state): Extension<FlattenedAppState>,
-    headers: HeaderMap,
     Json(payload): Json<ModelRequest>,
-) -> Result<Response, StatusCode> {
-    todo!()
+) -> Result<(StatusCode, Json<ModelResponse>), StatusCode> {
+    state
+        .model_request(payload)
+        .await
+        .map(|(status, response)| (status, Json(response)))
 }
 
 async fn get_users(State(state): State<AppState>) -> Json<Vec<User>> {
     todo!()
 }
 
-async fn get_user(State(state): State<AppState>, Path(uuid): Path<Uuid>) -> Result<Json<User>, StatusCode> {
+async fn get_user(
+    State(state): State<AppState>,
+    Path(uuid): Path<Uuid>,
+) -> Result<Json<User>, StatusCode> {
     todo!()
 }
 
@@ -172,7 +189,11 @@ async fn add_user(State(state): State<AppState>, Json(payload): Json<User>) -> S
     todo!()
 }
 
-async fn update_user(State(state): State<AppState>, Path(uuid): Path<Uuid>, Json(payload): Json<User>) -> StatusCode {
+async fn update_user(
+    State(state): State<AppState>,
+    Path(uuid): Path<Uuid>,
+    Json(payload): Json<User>,
+) -> StatusCode {
     todo!()
 }
 
@@ -184,7 +205,10 @@ async fn get_roles(State(state): State<AppState>) -> Json<Vec<Role>> {
     todo!()
 }
 
-async fn get_role(State(state): State<AppState>, Path(uuid): Path<Uuid>) -> Result<Json<Role>, StatusCode> {
+async fn get_role(
+    State(state): State<AppState>,
+    Path(uuid): Path<Uuid>,
+) -> Result<Json<Role>, StatusCode> {
     todo!()
 }
 
@@ -192,7 +216,11 @@ async fn add_role(State(state): State<AppState>, Json(payload): Json<Role>) -> S
     todo!()
 }
 
-async fn update_role(State(state): State<AppState>, Path(uuid): Path<Uuid>, Json(payload): Json<Role>) -> StatusCode {
+async fn update_role(
+    State(state): State<AppState>,
+    Path(uuid): Path<Uuid>,
+    Json(payload): Json<Role>,
+) -> StatusCode {
     todo!()
 }
 
@@ -204,7 +232,10 @@ async fn get_models(State(state): State<AppState>) -> Json<Vec<Model>> {
     todo!()
 }
 
-async fn get_model(State(state): State<AppState>, Path(uuid): Path<Uuid>) -> Result<Json<Model>, StatusCode> {
+async fn get_model(
+    State(state): State<AppState>,
+    Path(uuid): Path<Uuid>,
+) -> Result<Json<Model>, StatusCode> {
     todo!()
 }
 
@@ -212,7 +243,11 @@ async fn add_model(State(state): State<AppState>, Json(payload): Json<Model>) ->
     todo!()
 }
 
-async fn rename_model(State(state): State<AppState>, Path(uuid): Path<Uuid>, Json(payload): Json<LabelUpdateRequest>) -> StatusCode {
+async fn rename_model(
+    State(state): State<AppState>,
+    Path(uuid): Path<Uuid>,
+    Json(payload): Json<LabelUpdateRequest>,
+) -> StatusCode {
     todo!()
 }
 
@@ -224,7 +259,10 @@ async fn get_quotas(State(state): State<AppState>) -> Json<Vec<Quota>> {
     todo!()
 }
 
-async fn get_quota(State(state): State<AppState>, Path(uuid): Path<Uuid>) -> Result<Json<Quota>, StatusCode> {
+async fn get_quota(
+    State(state): State<AppState>,
+    Path(uuid): Path<Uuid>,
+) -> Result<Json<Quota>, StatusCode> {
     todo!()
 }
 
@@ -232,7 +270,11 @@ async fn add_quota(State(state): State<AppState>, Json(payload): Json<Quota>) ->
     todo!()
 }
 
-async fn rename_quota(State(state): State<AppState>, Path(uuid): Path<Uuid>, Json(payload): Json<LabelUpdateRequest>) -> StatusCode {
+async fn rename_quota(
+    State(state): State<AppState>,
+    Path(uuid): Path<Uuid>,
+    Json(payload): Json<LabelUpdateRequest>,
+) -> StatusCode {
     todo!()
 }
 

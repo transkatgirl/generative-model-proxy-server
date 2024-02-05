@@ -5,7 +5,10 @@ use tokio::sync::{OwnedRwLockReadGuard, RwLock};
 use uuid::Uuid;
 
 use super::super::limiter::{Limiter, PendingRequestHandle};
-use super::super::model::{CallableModelAPI, ModelAPIClient, ModelRequest, ModelResponse, ResponseStatus, RoutableModelRequest, RoutableModelResponse};
+use super::super::model::{
+    CallableModelAPI, ModelAPIClient, ModelRequest, ModelResponse, ResponseStatus,
+    RoutableModelRequest, RoutableModelResponse,
+};
 use super::{Model, Quota, Role, User};
 
 type AppUser = Arc<RwLock<User>>;
@@ -24,7 +27,7 @@ pub(super) struct AppState {
 }
 
 impl AppState {
-	#[tracing::instrument(level = "debug")]
+    #[tracing::instrument(level = "debug")]
     pub(super) fn new() -> AppState {
         AppState {
             users: Arc::new(RwLock::new(HashMap::new())),
@@ -35,21 +38,21 @@ impl AppState {
         }
     }
 
-	#[tracing::instrument(level = "debug")]
+    #[tracing::instrument(level = "debug")]
     pub(super) async fn authenticate(&self, api_key: &str) -> Option<FlattenedAppState> {
         if let Some(uuid) = self.api_keys.read().await.get(api_key) {
             if let Some(user) = self.get_user(uuid).await {
                 let mut tags = Vec::new();
                 let mut models = HashMap::new();
                 let mut quotas = Vec::new();
-				let mut admin = user.admin;
+                let mut admin = user.admin;
 
                 tags.push(user.uuid);
-				for uuid in &user.models {
-					if let Some(model) = self.get_model_with_quotas(&uuid).await {
-						models.insert(model.0.0.read().await.label.clone(), model.clone());
-					}
-				}
+                for uuid in &user.models {
+                    if let Some(model) = self.get_model_with_quotas(&uuid).await {
+                        models.insert(model.0 .0.read().await.label.clone(), model.clone());
+                    }
+                }
                 for quota_member in &user.quotas {
                     if let Some(quota) = self.get_quota(&quota_member.quota).await {
                         quotas.push(quota.clone());
@@ -60,13 +63,13 @@ impl AppState {
                 for uuid in &user.roles {
                     if let Some(role) = self.get_role(uuid).await {
                         tags.push(role.uuid);
-						if role.admin {
-							admin = true
-						}
+                        if role.admin {
+                            admin = true
+                        }
                         for uuid in &role.models {
-							if let Some(model) = self.get_model_with_quotas(&uuid).await {
-								models.insert(model.0.0.read().await.label.clone(), model.clone());
-							}
+                            if let Some(model) = self.get_model_with_quotas(&uuid).await {
+                                models.insert(model.0 .0.read().await.label.clone(), model.clone());
+                            }
                         }
                         for quota_member in &role.quotas {
                             if let Some(quota) = self.get_quota(&quota_member.quota).await {
@@ -78,11 +81,11 @@ impl AppState {
                 }
 
                 return Some(FlattenedAppState {
-					admin,
+                    admin,
                     tags: Arc::new(tags),
                     models: Arc::new(models),
                     quotas: Arc::new(quotas),
-					arrived_at: Instant::now(),
+                    arrived_at: Instant::now(),
                 });
             }
         }
@@ -91,7 +94,7 @@ impl AppState {
     }
 
     #[tracing::instrument(level = "debug")]
-	pub(super) async fn add_user(&self, user: User) {
+    pub(super) async fn add_user(&self, user: User) {
         let uuid = user.uuid;
         let user = Arc::new(RwLock::new(user));
 
@@ -107,7 +110,7 @@ impl AppState {
         }
     }
 
-	#[tracing::instrument(level = "trace")]
+    #[tracing::instrument(level = "trace")]
     pub(super) async fn get_user(&self, uuid: &Uuid) -> Option<OwnedRwLockReadGuard<User>> {
         if let Some(user) = self.users.read().await.get(uuid) {
             user.clone().read_owned().await;
@@ -116,7 +119,7 @@ impl AppState {
         None
     }
 
-	#[tracing::instrument(level = "debug")]
+    #[tracing::instrument(level = "debug")]
     pub(super) async fn update_user(&self, user: User) {
         if let Some(app_user) = self.users.read().await.get(&user.uuid) {
             let mut app_user = app_user.write().await;
@@ -136,7 +139,7 @@ impl AppState {
         }
     }
 
-	#[tracing::instrument(level = "debug")]
+    #[tracing::instrument(level = "debug")]
     pub(super) async fn remove_user(&self, uuid: &Uuid) -> Option<AppUser> {
         if let Some(user) = self.users.write().await.remove(uuid) {
             {
@@ -153,7 +156,7 @@ impl AppState {
         None
     }
 
-	#[tracing::instrument(level = "debug")]
+    #[tracing::instrument(level = "debug")]
     pub(super) async fn add_role(&self, role: Role) {
         let uuid = role.uuid;
         let role = Arc::new(RwLock::new(role));
@@ -161,7 +164,7 @@ impl AppState {
         self.roles.write().await.insert(uuid, role);
     }
 
-	#[tracing::instrument(level = "trace")]
+    #[tracing::instrument(level = "trace")]
     pub(super) async fn get_role(&self, uuid: &Uuid) -> Option<OwnedRwLockReadGuard<Role>> {
         if let Some(role) = self.roles.read().await.get(uuid) {
             role.clone().read_owned().await;
@@ -170,7 +173,7 @@ impl AppState {
         None
     }
 
-	#[tracing::instrument(level = "debug")]
+    #[tracing::instrument(level = "debug")]
     pub(super) async fn update_role(&self, role: Role) {
         if let Some(app_role) = self.roles.read().await.get(&role.uuid) {
             let mut app_role = app_role.write().await;
@@ -180,7 +183,7 @@ impl AppState {
         }
     }
 
-	#[tracing::instrument(level = "debug")]
+    #[tracing::instrument(level = "debug")]
     pub(super) async fn remove_role(&self, uuid: &Uuid) -> Option<AppRole> {
         if let Some(role) = self.roles.write().await.remove(uuid) {
             return Some(role);
@@ -189,7 +192,7 @@ impl AppState {
         None
     }
 
-	#[tracing::instrument(level = "debug")]
+    #[tracing::instrument(level = "debug")]
     pub(super) async fn add_quota(&self, quota: Quota) {
         let uuid = quota.uuid;
         let limiter = Limiter::new(&quota.limits);
@@ -198,12 +201,12 @@ impl AppState {
         self.quotas.write().await.insert(uuid, quota);
     }
 
-	#[tracing::instrument(level = "trace")]
+    #[tracing::instrument(level = "trace")]
     pub(super) async fn get_quota(&self, uuid: &Uuid) -> Option<AppQuota> {
         self.quotas.read().await.get(uuid).cloned()
     }
 
-	#[tracing::instrument(level = "debug")]
+    #[tracing::instrument(level = "debug")]
     pub(super) async fn update_quota_label(&self, uuid: &Uuid, label: String) -> Option<()> {
         if let Some(quota) = self.quotas.read().await.get(uuid) {
             let mut quota = quota.0.write().await;
@@ -214,7 +217,7 @@ impl AppState {
         None
     }
 
-	#[tracing::instrument(level = "debug")]
+    #[tracing::instrument(level = "debug")]
     pub(super) async fn remove_quota(&self, uuid: &Uuid) -> Option<AppQuota> {
         if let Some(quota) = self.quotas.write().await.remove(uuid) {
             return Some(quota);
@@ -223,7 +226,7 @@ impl AppState {
         None
     }
 
-	#[tracing::instrument(level = "debug")]
+    #[tracing::instrument(level = "debug")]
     pub(super) async fn add_model(&self, model: Model) {
         let uuid = model.uuid;
         let client = model.api.init();
@@ -232,29 +235,29 @@ impl AppState {
         self.models.write().await.insert(uuid, model.clone());
     }
 
-	#[tracing::instrument(level = "trace")]
+    #[tracing::instrument(level = "trace")]
     pub(super) async fn get_model(&self, uuid: &Uuid) -> Option<AppModel> {
         self.models.read().await.get(uuid).cloned()
     }
 
-	#[tracing::instrument(level = "trace")]
-	async fn get_model_with_quotas(&self, uuid: &Uuid) -> Option<(AppModel, Vec<AppQuota>)> {
-		if let Some(model) = self.get_model(&uuid).await {
-			let mut quotas = Vec::new();
+    #[tracing::instrument(level = "trace")]
+    async fn get_model_with_quotas(&self, uuid: &Uuid) -> Option<(AppModel, Vec<AppQuota>)> {
+        if let Some(model) = self.get_model(&uuid).await {
+            let mut quotas = Vec::new();
 
-			for quota_member in &model.0.read().await.quotas {
-				if let Some(quota) = self.get_quota(&quota_member.quota).await {
-					quotas.push(quota)
-				}
-			}
+            for quota_member in &model.0.read().await.quotas {
+                if let Some(quota) = self.get_quota(&quota_member.quota).await {
+                    quotas.push(quota)
+                }
+            }
 
-			return Some((model, quotas))
-		}
+            return Some((model, quotas));
+        }
 
-		None
-	}
+        None
+    }
 
-	#[tracing::instrument(level = "debug")]
+    #[tracing::instrument(level = "debug")]
     pub(super) async fn update_model_label(&self, uuid: &Uuid, label: String) -> Option<()> {
         if let Some(model) = self.models.read().await.get(uuid) {
             let mut model = model.0.write().await;
@@ -265,7 +268,7 @@ impl AppState {
         None
     }
 
-	#[tracing::instrument(level = "debug")]
+    #[tracing::instrument(level = "debug")]
     pub(super) async fn remove_model(&self, uuid: &Uuid) -> Option<AppModel> {
         if let Some(model) = self.models.write().await.remove(uuid) {
             return Some(model);
@@ -277,89 +280,98 @@ impl AppState {
 
 #[derive(Debug, Clone)]
 pub(super) struct FlattenedAppState {
-	admin: bool,
+    admin: bool,
     pub(super) tags: Arc<Vec<Uuid>>,
     models: Arc<HashMap<String, (AppModel, Vec<AppQuota>)>>,
     quotas: Arc<Vec<AppQuota>>,
-	arrived_at: Instant,
+    arrived_at: Instant,
 }
 
 impl FlattenedAppState {
-	pub(super) fn is_admin(&self) -> bool {
-		return self.admin
-	}
+    pub(super) fn is_admin(&self) -> bool {
+        return self.admin;
+    }
 
-	#[tracing::instrument(level = "debug")]
-	pub(super) async fn model_request(&self, request: ModelRequest) -> Result<(ModelResponse, StatusCode), StatusCode> {
-		let model_label = request.get_model();
+    #[tracing::instrument(level = "debug")]
+    pub(super) async fn model_request(
+        &self,
+        request: ModelRequest,
+    ) -> Result<(StatusCode, ModelResponse), StatusCode> {
+        let model_label = request.get_model();
 
-		if let Some(model) = self.models.get(&model_label) {
-			let (model, model_client, model_quotas) = (&model.0.0.read().await, &model.0.1, &model.1);
+        if let Some(model) = self.models.get(&model_label) {
+            let (model, model_client, model_quotas) =
+                (&model.0 .0.read().await, &model.0 .1, &model.1);
 
-			let mut request_handles = Vec::new();
+            let mut request_handles = Vec::new();
 
-			match model.api.get_context_len() {
-				Some(context_len) => {
-					for quota in self.quotas.iter() {
-						match quota.1.token_request(context_len, self.arrived_at).await {
-							Some(handle) => {
-								request_handles.push((quota.clone(), Some(handle)));
-							}
-							None => return Err(StatusCode::TOO_MANY_REQUESTS),
-						}
-					}
-					for quota in model_quotas {
-						match quota.1.token_request(context_len, self.arrived_at).await {
-							Some(handle) => {
-								request_handles.push((quota.clone(), Some(handle)));
-							}
-							None => return Err(StatusCode::TOO_MANY_REQUESTS),
-						}
-					}
-				},
-				None => {
-					for quota in self.quotas.iter() {
-						quota.1.plain_request(self.arrived_at).await;
-						request_handles.push((quota.clone(), None))
-					}
-					for quota in model_quotas {
-						quota.1.plain_request(self.arrived_at).await;
-						request_handles.push((quota.clone(), None))
-					}
-				},
-			}
+            match model.api.get_context_len() {
+                Some(context_len) => {
+                    for quota in self.quotas.iter() {
+                        match quota.1.token_request(context_len, self.arrived_at).await {
+                            Some(handle) => {
+                                request_handles.push((quota.clone(), Some(handle)));
+                            }
+                            None => return Err(StatusCode::TOO_MANY_REQUESTS),
+                        }
+                    }
+                    for quota in model_quotas {
+                        match quota.1.token_request(context_len, self.arrived_at).await {
+                            Some(handle) => {
+                                request_handles.push((quota.clone(), Some(handle)));
+                            }
+                            None => return Err(StatusCode::TOO_MANY_REQUESTS),
+                        }
+                    }
+                }
+                None => {
+                    for quota in self.quotas.iter() {
+                        quota.1.plain_request(self.arrived_at).await;
+                        request_handles.push((quota.clone(), None))
+                    }
+                    for quota in model_quotas {
+                        quota.1.plain_request(self.arrived_at).await;
+                        request_handles.push((quota.clone(), None))
+                    }
+                }
+            }
 
-			let mut buffer = Uuid::encode_buffer();
-			let request_label = self.tags[0].as_simple().encode_lower(&mut buffer);
+            let mut buffer = Uuid::encode_buffer();
+            let request_label = self.tags[0].as_simple().encode_lower(&mut buffer);
 
-			return match model.api.generate(model_client, request_label, &model_label, request).await {
-				Ok(response) => {
-					if let Some(tokens) = response.get_token_count() {
-						for (quota, handle) in request_handles {
-							let handle = handle.unwrap_or(PendingRequestHandle::new(self.arrived_at, 0));
+            return match model
+                .api
+                .generate(model_client, request_label, &model_label, request)
+                .await
+            {
+                Ok(response) => {
+                    if let Some(tokens) = response.get_token_count() {
+                        for (quota, handle) in request_handles {
+                            let handle =
+                                handle.unwrap_or(PendingRequestHandle::new(self.arrived_at, 0));
 
-							quota.1.token_request_finalize(tokens, handle).await;
-						}
-					}
+                            quota.1.token_request_finalize(tokens, handle).await;
+                        }
+                    }
 
-					let status = match response.get_status() {
-						ResponseStatus::Success => StatusCode::OK,
-						ResponseStatus::InvalidRequest => StatusCode::BAD_REQUEST,
-						ResponseStatus::InternalError => StatusCode::INTERNAL_SERVER_ERROR,
-						ResponseStatus::BadUpstream => StatusCode::BAD_GATEWAY,
-						ResponseStatus::ModelUnavailable => StatusCode::SERVICE_UNAVAILABLE,
-					};
+                    let status = match response.get_status() {
+                        ResponseStatus::Success => StatusCode::OK,
+                        ResponseStatus::InvalidRequest => StatusCode::BAD_REQUEST,
+                        ResponseStatus::InternalError => StatusCode::INTERNAL_SERVER_ERROR,
+                        ResponseStatus::BadUpstream => StatusCode::BAD_GATEWAY,
+                        ResponseStatus::ModelUnavailable => StatusCode::SERVICE_UNAVAILABLE,
+                    };
 
-					return Ok((response, status))
-				},
-				Err(ResponseStatus::Success) => Err(StatusCode::OK),
-				Err(ResponseStatus::InvalidRequest) => Err(StatusCode::BAD_REQUEST),
-				Err(ResponseStatus::InternalError) => Err(StatusCode::INTERNAL_SERVER_ERROR),
-				Err(ResponseStatus::BadUpstream) => Err(StatusCode::BAD_GATEWAY),
-				Err(ResponseStatus::ModelUnavailable) => Err(StatusCode::SERVICE_UNAVAILABLE),
-			}
-		}
+                    return Ok((status, response));
+                }
+                Err(ResponseStatus::Success) => Err(StatusCode::OK),
+                Err(ResponseStatus::InvalidRequest) => Err(StatusCode::BAD_REQUEST),
+                Err(ResponseStatus::InternalError) => Err(StatusCode::INTERNAL_SERVER_ERROR),
+                Err(ResponseStatus::BadUpstream) => Err(StatusCode::BAD_GATEWAY),
+                Err(ResponseStatus::ModelUnavailable) => Err(StatusCode::SERVICE_UNAVAILABLE),
+            };
+        }
 
-		Err(StatusCode::NOT_FOUND)
-	}
+        Err(StatusCode::NOT_FOUND)
+    }
 }
