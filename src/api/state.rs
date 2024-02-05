@@ -118,6 +118,17 @@ impl AppState {
         }
     }
 
+    #[tracing::instrument(level = "debug")]
+    pub(super) async fn get_users(&self) -> Vec<User> {
+        let mut users = Vec::new();
+
+        for (_, user) in self.users.read().await.iter() {
+            users.push(user.read().await.to_owned());
+        }
+
+        users
+    }
+
     #[tracing::instrument(level = "trace")]
     pub(super) async fn get_user(&self, uuid: &Uuid) -> Option<OwnedRwLockReadGuard<User>> {
         if let Some(user) = self.users.read().await.get(uuid) {
@@ -165,6 +176,17 @@ impl AppState {
     }
 
     #[tracing::instrument(level = "debug")]
+    pub(super) async fn get_roles(&self) -> Vec<Role> {
+        let mut roles = Vec::new();
+
+        for (_, role) in self.roles.read().await.iter() {
+            roles.push(role.read().await.to_owned());
+        }
+
+        roles
+    }
+
+    #[tracing::instrument(level = "debug")]
     pub(super) async fn add_role(&self, role: Role) {
         let uuid = role.uuid;
         let role = Arc::new(RwLock::new(role));
@@ -209,6 +231,17 @@ impl AppState {
         self.quotas.write().await.insert(uuid, quota);
     }
 
+    #[tracing::instrument(level = "debug")]
+    pub(super) async fn get_quotas(&self) -> Vec<Quota> {
+        let mut quotas = Vec::new();
+
+        for (_, quota) in self.quotas.read().await.iter() {
+            quotas.push(quota.0.read().await.to_owned());
+        }
+
+        quotas
+    }
+
     #[tracing::instrument(level = "trace")]
     pub(super) async fn get_quota(&self, uuid: &Uuid) -> Option<AppQuota> {
         self.quotas.read().await.get(uuid).cloned()
@@ -241,6 +274,17 @@ impl AppState {
         let model = Arc::new((RwLock::new(model), client));
 
         self.models.write().await.insert(uuid, model.clone());
+    }
+
+    #[tracing::instrument(level = "debug")]
+    pub(super) async fn get_models(&self) -> Vec<Model> {
+        let mut models = Vec::new();
+
+        for (_, model) in self.models.read().await.iter() {
+            models.push(model.0.read().await.to_owned());
+        }
+
+        models
     }
 
     #[tracing::instrument(level = "trace")]

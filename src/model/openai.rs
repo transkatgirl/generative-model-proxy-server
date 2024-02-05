@@ -281,7 +281,7 @@ fn convert_openai_error(error: OpenAIError) -> ApiError {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub(super) struct OpenAIEndpoint {
     openai_api_base: String,
     openai_api_key: String,
@@ -529,7 +529,7 @@ impl CallableModelAPI for OpenAIEmbeddingModel {
     }
 }
 
-#[derive(Deserialize, Debug, Clone)]
+#[derive(Deserialize, Debug)]
 #[serde(untagged)]
 pub(super) enum ImagesRequest {
     Image(CreateImageRequest),
@@ -636,7 +636,7 @@ impl CallableModelAPI for OpenAIImageModel {
     }
 }
 
-#[derive(Deserialize, Debug, Clone)]
+#[derive(Deserialize, Debug)]
 #[serde(untagged)]
 pub(super) enum AudioRequest {
     Transcription(CreateTranscriptionRequest),
@@ -659,7 +659,7 @@ impl RoutableModelRequest for AudioRequest {
     }
 }
 
-#[derive(Serialize, Debug, Clone)]
+#[derive(Serialize, Debug)]
 #[serde(untagged)]
 pub(super) enum AudioResponse {
     Transcription(CreateTranscriptionResponse),

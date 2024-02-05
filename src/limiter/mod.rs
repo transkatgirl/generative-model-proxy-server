@@ -9,13 +9,13 @@ use serde::{Deserialize, Serialize};
 use tokio::{sync::Mutex, time};
 use tracing::{event, Level};
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy)]
 pub(super) enum LimitItem {
     Request,
     Token,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub(super) struct Limit {
     pub(super) count: u32,
     pub(super) r#type: LimitItem,

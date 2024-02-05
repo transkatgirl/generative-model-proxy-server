@@ -19,7 +19,7 @@ use super::limiter::{Limit, Limiter};
 use super::model::{CallableModelAPI, ModelAPI, ModelAPIClient, ModelRequest, ModelResponse};
 use state::{AppState, FlattenedAppState};
 
-#[derive(Default, Serialize, Deserialize, Debug)]
+#[derive(Default, Serialize, Deserialize, Debug, Clone)]
 #[serde(default)]
 struct User {
     label: String,
@@ -33,7 +33,7 @@ struct User {
     quotas: Vec<QuotaMember>,
 }
 
-#[derive(Default, Serialize, Deserialize, Debug)]
+#[derive(Default, Serialize, Deserialize, Debug, Clone)]
 #[serde(default)]
 struct Role {
     label: String,
@@ -52,7 +52,7 @@ struct Permissions {
     sensitive: bool,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 struct Model {
     #[serde(default)]
     label: String,
@@ -65,13 +65,13 @@ struct Model {
     quotas: Vec<QuotaMember>,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 struct QuotaMember {
     quota: Uuid,
     //priority: Option<u32>,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 struct Quota {
     #[serde(default)]
     label: String,
