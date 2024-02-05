@@ -32,7 +32,7 @@ pub(super) trait CallableModelAPI:
     ) -> impl Future<Output = Result<Self::ModelResponse, Self::ModelError>> + Send;
 }
 
-pub(super) trait RoutableModelRequest: Send + Debug + DeserializeOwned + 'static {
+pub(super) trait RoutableModelRequest: Send + Debug + Clone + DeserializeOwned + 'static {
     fn get_model(&self) -> String;
 
     fn get_total_n(&self) -> u32;
@@ -47,7 +47,7 @@ pub(super) enum ResponseStatus {
     ModelUnavailable,
 }
 
-pub(super) trait RoutableModelResponse: Send + Debug + Serialize + 'static {
+pub(super) trait RoutableModelResponse: Send + Debug + Clone + Serialize + 'static {
     fn get_status(&self) -> ResponseStatus;
 
     fn get_token_count(&self) -> Option<u32>;
@@ -149,7 +149,7 @@ impl CallableModelAPI for ModelAPI {
     }
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 #[serde(untagged)]
 #[allow(
     private_interfaces,
@@ -192,7 +192,7 @@ impl RoutableModelRequest for ModelRequest {
     }
 }
 
-#[derive(Serialize, Debug)]
+#[derive(Serialize, Debug, Clone)]
 #[serde(untagged)]
 #[allow(private_interfaces, clippy::large_enum_variant)]
 pub(super) enum ModelResponse {

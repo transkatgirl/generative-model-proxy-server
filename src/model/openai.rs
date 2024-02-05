@@ -529,7 +529,7 @@ impl CallableModelAPI for OpenAIEmbeddingModel {
     }
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 #[serde(untagged)]
 pub(super) enum ImagesRequest {
     Image(CreateImageRequest),
@@ -636,7 +636,7 @@ impl CallableModelAPI for OpenAIImageModel {
     }
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 #[serde(untagged)]
 pub(super) enum AudioRequest {
     Transcription(CreateTranscriptionRequest),
@@ -659,7 +659,7 @@ impl RoutableModelRequest for AudioRequest {
     }
 }
 
-#[derive(Serialize, Debug)]
+#[derive(Serialize, Debug, Clone)]
 #[serde(untagged)]
 pub(super) enum AudioResponse {
     Transcription(CreateTranscriptionResponse),

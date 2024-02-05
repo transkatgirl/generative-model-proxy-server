@@ -28,8 +28,7 @@ struct User {
     api_keys: Vec<String>,
     roles: Vec<Uuid>,
 
-    admin: bool,
-
+    perms: Permissions,
     models: Vec<Uuid>,
     quotas: Vec<QuotaMember>,
 }
@@ -40,10 +39,17 @@ struct Role {
     label: String,
     uuid: Uuid,
 
-    admin: bool,
-
+    perms: Permissions,
     models: Vec<Uuid>,
     quotas: Vec<QuotaMember>,
+}
+
+#[derive(Default, Serialize, Deserialize, Debug, Clone, Copy)]
+#[serde(default)]
+struct Permissions {
+    server_admin: bool,
+    view_metrics: bool,
+    sensitive: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -158,7 +164,18 @@ async fn authenticate_admin(
     request: Request,
     next: Next,
 ) -> Result<Response, StatusCode> {
-    match state.is_admin() {
+    match state.perms.server_admin {
+        true => Ok(next.run(request).await),
+        false => Err(StatusCode::UNAUTHORIZED),
+    }
+}
+
+async fn authenticate_metrics(
+    Extension(state): Extension<FlattenedAppState>,
+    request: Request,
+    next: Next,
+) -> Result<Response, StatusCode> {
+    match state.perms.view_metrics {
         true => Ok(next.run(request).await),
         false => Err(StatusCode::UNAUTHORIZED),
     }

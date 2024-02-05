@@ -1,10 +1,12 @@
 use std::{clone::Clone, collections::HashMap, fmt::Debug, sync::Arc, time::Instant};
 
 use axum::http::StatusCode;
+use fast32::base32::CROCKFORD;
+use ring::digest;
 use tokio::sync::{OwnedRwLockReadGuard, RwLock};
 use uuid::Uuid;
 
-use super::super::limiter::{Limiter, PendingRequestHandle};
+use super::{super::limiter::{Limiter, PendingRequestHandle}, Permissions};
 use super::super::model::{
     CallableModelAPI, ModelAPIClient, ModelRequest, ModelResponse, ResponseStatus,
     RoutableModelRequest, RoutableModelResponse,
@@ -45,11 +47,11 @@ impl AppState {
                 let mut tags = Vec::new();
                 let mut models = HashMap::new();
                 let mut quotas = Vec::new();
-                let mut admin = user.admin;
+                let mut perms = user.perms;
 
                 tags.push(user.uuid);
                 for uuid in &user.models {
-                    if let Some(model) = self.get_model_with_quotas(&uuid).await {
+                    if let Some(model) = self.get_model_with_quotas(uuid).await {
                         models.insert(model.0 .0.read().await.label.clone(), model.clone());
                     }
                 }
@@ -63,11 +65,17 @@ impl AppState {
                 for uuid in &user.roles {
                     if let Some(role) = self.get_role(uuid).await {
                         tags.push(role.uuid);
-                        if role.admin {
-                            admin = true
+                        if role.perms.server_admin {
+                            perms.server_admin = true
+                        }
+                        if role.perms.view_metrics {
+                            perms.view_metrics = true
+                        }
+                        if role.perms.sensitive {
+                            perms.sensitive = true
                         }
                         for uuid in &role.models {
-                            if let Some(model) = self.get_model_with_quotas(&uuid).await {
+                            if let Some(model) = self.get_model_with_quotas(uuid).await {
                                 models.insert(model.0 .0.read().await.label.clone(), model.clone());
                             }
                         }
@@ -81,7 +89,7 @@ impl AppState {
                 }
 
                 return Some(FlattenedAppState {
-                    admin,
+                    perms,
                     tags: Arc::new(tags),
                     models: Arc::new(models),
                     quotas: Arc::new(quotas),
@@ -242,7 +250,7 @@ impl AppState {
 
     #[tracing::instrument(level = "trace")]
     async fn get_model_with_quotas(&self, uuid: &Uuid) -> Option<(AppModel, Vec<AppQuota>)> {
-        if let Some(model) = self.get_model(&uuid).await {
+        if let Some(model) = self.get_model(uuid).await {
             let mut quotas = Vec::new();
 
             for quota_member in &model.0.read().await.quotas {
@@ -280,7 +288,7 @@ impl AppState {
 
 #[derive(Debug, Clone)]
 pub(super) struct FlattenedAppState {
-    admin: bool,
+    pub(super) perms: Permissions,
     pub(super) tags: Arc<Vec<Uuid>>,
     models: Arc<HashMap<String, (AppModel, Vec<AppQuota>)>>,
     quotas: Arc<Vec<AppQuota>>,
@@ -288,10 +296,6 @@ pub(super) struct FlattenedAppState {
 }
 
 impl FlattenedAppState {
-    pub(super) fn is_admin(&self) -> bool {
-        return self.admin;
-    }
-
     #[tracing::instrument(level = "debug")]
     pub(super) async fn model_request(
         &self,
@@ -336,12 +340,14 @@ impl FlattenedAppState {
                 }
             }
 
-            let mut buffer = Uuid::encode_buffer();
-            let request_label = self.tags[0].as_simple().encode_lower(&mut buffer);
+            let request_label = match self.perms.sensitive {
+                true => "".to_string(),
+                false => CROCKFORD.encode(digest::digest(&digest::SHA256, self.tags[0].as_bytes()).as_ref()),
+            };
 
             return match model
                 .api
-                .generate(model_client, request_label, &model_label, request)
+                .generate(model_client, &request_label, &model_label, request)
                 .await
             {
                 Ok(response) => {
