@@ -254,9 +254,7 @@ impl ModelResponse {
 
         if value.is::<openai::CreateEmbeddingResponse>() {
             return ModelResponse::OpenAIEmbedding(
-                *value
-                    .downcast::<openai::CreateEmbeddingResponse>()
-                    .unwrap(),
+                *value.downcast::<openai::CreateEmbeddingResponse>().unwrap(),
             );
         }
 
@@ -267,9 +265,7 @@ impl ModelResponse {
         }
 
         if value.is::<openai::AudioResponse>() {
-            return ModelResponse::OpenAIAudio(
-                *value.downcast::<openai::AudioResponse>().unwrap(),
-            );
+            return ModelResponse::OpenAIAudio(*value.downcast::<openai::AudioResponse>().unwrap());
         }
 
         if value.is::<openai::ApiError>() {
@@ -319,13 +315,8 @@ fn spawn_model_handler_task<M: CallableModelAPI>(
         let client = Arc::new(model.init());
 
         while let Some(request) = channel.recv().await {
-            let model_request = match request
-                .body
-                .into_any()
-                .downcast::<M::ModelRequest>()
-                .map(|d| *d)
-            {
-                Ok(model_request) => model_request,
+            let model_request = match request.body.into_any().downcast::<M::ModelRequest>() {
+                Ok(model_request) => *model_request,
                 Err(_) => {
                     tracing::warn!("Unable to convert ModelRequest!");
                     if request

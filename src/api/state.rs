@@ -393,34 +393,25 @@ impl FlattenedAppState {
 
             let mut request_handles = Vec::new();
 
-            match model.api.get_context_len() {
-                Some(context_len) => {
-                    for quota in self.quotas.iter() {
-                        match quota.1.token_request(context_len, self.arrived_at).await {
-                            Some(handle) => {
-                                request_handles.push((quota.clone(), Some(handle)));
-                            }
-                            None => return Err(StatusCode::TOO_MANY_REQUESTS),
-                        }
+            let tokens = match model.api.get_context_len() {
+                Some(context_len) => context_len * request.get_total_n(),
+                None => request.get_total_n(),
+            };
+
+            for quota in self.quotas.iter() {
+                match quota.1.token_request(tokens, self.arrived_at).await {
+                    Some(handle) => {
+                        request_handles.push((quota.clone(), handle));
                     }
-                    for quota in model_quotas {
-                        match quota.1.token_request(context_len, self.arrived_at).await {
-                            Some(handle) => {
-                                request_handles.push((quota.clone(), Some(handle)));
-                            }
-                            None => return Err(StatusCode::TOO_MANY_REQUESTS),
-                        }
-                    }
+                    None => return Err(StatusCode::TOO_MANY_REQUESTS),
                 }
-                None => {
-                    for quota in self.quotas.iter() {
-                        quota.1.plain_request(self.arrived_at).await;
-                        request_handles.push((quota.clone(), None))
+            }
+            for quota in model_quotas {
+                match quota.1.token_request(tokens, self.arrived_at).await {
+                    Some(handle) => {
+                        request_handles.push((quota.clone(), handle));
                     }
-                    for quota in model_quotas {
-                        quota.1.plain_request(self.arrived_at).await;
-                        request_handles.push((quota.clone(), None))
-                    }
+                    None => return Err(StatusCode::TOO_MANY_REQUESTS),
                 }
             }
 
@@ -438,9 +429,6 @@ impl FlattenedAppState {
                 Ok(response) => {
                     if let Some(tokens) = response.get_token_count() {
                         for (quota, handle) in request_handles {
-                            let handle =
-                                handle.unwrap_or(PendingRequestHandle::new(self.arrived_at, 0));
-
                             quota.1.token_request_finalize(tokens, handle).await;
                         }
                     }

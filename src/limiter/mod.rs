@@ -159,9 +159,3 @@ impl Limiter {
         }
     }
 }
-
-impl PendingRequestHandle {
-    pub(super) fn new(arrived_at: Instant, tokens: u32) -> PendingRequestHandle {
-        PendingRequestHandle { arrived_at, tokens }
-    }
-}
