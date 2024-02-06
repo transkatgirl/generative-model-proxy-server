@@ -1,10 +1,8 @@
+use anyhow::{Context, Result};
 use clap::Parser;
 use opentelemetry::KeyValue;
 use opentelemetry_otlp::WithExportConfig;
-use opentelemetry_sdk::{
-    trace,
-    Resource,
-};
+use opentelemetry_sdk::{trace, Resource};
 use tokio::net::TcpListener;
 use tracing::Level;
 use tracing_subscriber::{filter, layer::SubscriberExt, util::SubscriberInitExt};
@@ -24,7 +22,7 @@ struct Args {
 }
 
 #[tokio::main]
-async fn main() {
+async fn main() -> Result<()> {
     let args = Args::parse();
 
     let registry = tracing_subscriber::registry()
@@ -55,7 +53,7 @@ async fn main() {
                     KeyValue::new("service.name", "language-model-proxy-server"),
                 ])))
                 .install_batch(opentelemetry_sdk::runtime::Tokio)
-                .unwrap();
+                .context("Failed to start OpenTelemetry")?;
             let telemetry = tracing_opentelemetry::layer().with_tracer(tracer);
 
             registry.with(telemetry).init()
@@ -63,8 +61,14 @@ async fn main() {
         None => registry.init(),
     }
 
-    let listener = TcpListener::bind(args.bind_to).await.unwrap();
+    let listener = TcpListener::bind(&args.bind_to)
+        .await
+        .with_context(|| format!("Failed to bind HTTP server to {}", &args.bind_to))?;
     axum::serve(listener, api::api_router().await)
         .await
-        .unwrap();
+        .context("Failed to start HTTP server")?;
+
+    // TODO: Graceful shutdown
+
+    Ok(())
 }

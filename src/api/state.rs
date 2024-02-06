@@ -18,7 +18,7 @@ use super::{
         CallableModelAPI, ModelAPIClient, ModelRequest, ModelResponse, ResponseStatus,
         RoutableModelRequest, RoutableModelResponse,
     },
-    Model, Permissions, Quota, Role, User,
+    Model, Quota, Role, User,
 };
 
 type AppUser = Arc<RwLock<User>>;
@@ -61,7 +61,7 @@ impl AppState {
                 let mut tags = Vec::new();
                 let mut models = HashMap::new();
                 let mut quotas = Vec::new();
-                let mut perms = user.perms;
+                let mut admin = user.admin;
 
                 tags.push(user.uuid);
                 for uuid in &user.models {
@@ -79,11 +79,8 @@ impl AppState {
                 for uuid in &user.roles {
                     if let Some(role) = self.get_role(uuid).await {
                         tags.push(role.uuid);
-                        if role.perms.server_admin {
-                            perms.server_admin = true
-                        }
-                        if role.perms.view_metrics {
-                            perms.view_metrics = true
+                        if role.admin {
+                            admin = true
                         }
                         for uuid in &role.models {
                             if let Some(model) = self.get_model_with_quotas(uuid).await {
@@ -100,7 +97,7 @@ impl AppState {
                 }
 
                 return Some(FlattenedAppState {
-                    perms,
+                    admin,
                     tags: Arc::new(tags),
                     models: Arc::new(models),
                     quotas: Arc::new(quotas),
@@ -369,7 +366,7 @@ impl AppState {
 
 #[derive(Debug, Clone)]
 pub(super) struct FlattenedAppState {
-    pub(super) perms: Permissions,
+    pub(super) admin: bool,
     pub(super) tags: Arc<Vec<Uuid>>,
     models: Arc<HashMap<String, (AppModel, Vec<AppQuota>)>>,
     quotas: Arc<Vec<AppQuota>>,

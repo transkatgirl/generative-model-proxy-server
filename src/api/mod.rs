@@ -26,6 +26,12 @@ use state::{AppState, FlattenedAppState};
 - Return a UUID when creating users/roles/quotas/models
 - Rework model/quota API to be the same as users/roles
 - Improve error messages
+- Add documentation
+
+# App todos:
+- Clean up logging
+- Add state save/restore
+- Improve error handling
 */
 
 #[derive(Default, Serialize, Deserialize, Debug, Clone)]
@@ -37,7 +43,8 @@ struct User {
     api_keys: Vec<String>,
     roles: Vec<Uuid>,
 
-    perms: Permissions,
+    admin: bool,
+
     models: Vec<Uuid>,
     quotas: Vec<QuotaMember>,
 }
@@ -48,16 +55,10 @@ struct Role {
     label: String,
     uuid: Uuid,
 
-    perms: Permissions,
+    admin: bool,
+
     models: Vec<Uuid>,
     quotas: Vec<QuotaMember>,
-}
-
-#[derive(Default, Serialize, Deserialize, Debug, Clone, Copy)]
-#[serde(default)]
-struct Permissions {
-    server_admin: bool,
-    view_metrics: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -97,6 +98,7 @@ struct LabelUpdateRequest {
 }
 
 // TODO: Add API documentation
+#[tracing::instrument(level = "debug")]
 pub async fn api_router() -> Router {
     let state = AppState::new();
 
@@ -107,10 +109,7 @@ pub async fn api_router() -> Router {
             uuid: Uuid::new_v4(),
             api_keys: vec!["admin-key".to_string()],
             roles: Vec::new(),
-            perms: Permissions {
-                server_admin: true,
-                view_metrics: true,
-            },
+            admin: true,
             models: Vec::new(),
             quotas: Vec::new(),
         })
@@ -204,18 +203,7 @@ async fn authenticate_admin(
     request: Request,
     next: Next,
 ) -> Result<Response, StatusCode> {
-    match state.perms.server_admin {
-        true => Ok(next.run(request).await),
-        false => Err(StatusCode::UNAUTHORIZED),
-    }
-}
-
-async fn authenticate_metrics(
-    Extension(state): Extension<FlattenedAppState>,
-    request: Request,
-    next: Next,
-) -> Result<Response, StatusCode> {
-    match state.perms.view_metrics {
+    match state.admin {
         true => Ok(next.run(request).await),
         false => Err(StatusCode::UNAUTHORIZED),
     }
@@ -225,7 +213,6 @@ async fn model_request(
     Extension(state): Extension<FlattenedAppState>,
     Json(payload): Json<ModelRequest>,
 ) -> Result<(StatusCode, Json<ModelResponse>), StatusCode> {
-    // TODO: Add metrics
     state
         .model_request(payload)
         .await
