@@ -2,26 +2,19 @@ use std::{any::Any, fmt::Debug, future::Future, sync::Arc};
 
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot};
-use tracing::{event, Level};
 
 mod openai;
 pub(super) trait CallableModelAPI:
     Send + Sync + Debug + Serialize + DeserializeOwned + 'static
 {
     type Client: Send + Sync;
-    type ModelRequest: RoutableModelRequest;
-    type ModelResponse: RoutableModelResponse;
-    type ModelError: RoutableModelResponse;
+    type ModelRequest: RoutableModelRequest + DeserializeOwned;
+    type ModelResponse: RoutableModelResponse + Serialize;
+    type ModelError: RoutableModelResponse + Serialize;
 
     fn init(&self) -> Self::Client;
 
     fn get_context_len(&self) -> Option<u32>;
-
-    fn to_request(&self, request: impl RoutableModelRequest) -> Option<Self::ModelRequest> {
-        let item_any: Box<dyn Any> = Box::new(request);
-
-        item_any.downcast::<Self::ModelRequest>().map(|d| *d).ok()
-    }
 
     fn generate(
         &self,
@@ -32,7 +25,7 @@ pub(super) trait CallableModelAPI:
     ) -> impl Future<Output = Result<Self::ModelResponse, Self::ModelError>> + Send;
 }
 
-pub(super) trait RoutableModelRequest: Send + Debug + DeserializeOwned + 'static {
+pub(super) trait RoutableModelRequest: Send + Debug + 'static {
     fn get_model(&self) -> String;
 
     fn get_total_n(&self) -> u32;
@@ -47,7 +40,7 @@ pub(super) enum ResponseStatus {
     ModelUnavailable,
 }
 
-pub(super) trait RoutableModelResponse: Send + Debug + Serialize + 'static {
+pub(super) trait RoutableModelResponse: Send + Debug + 'static {
     fn get_status(&self) -> ResponseStatus;
 
     fn get_token_count(&self) -> Option<u32>;
@@ -78,6 +71,7 @@ pub(super) enum ModelAPI {
     OpenAIAudio(Arc<openai::OpenAIAudioModel>),
 }
 
+#[derive(Debug)]
 struct PackagedRequest {
     body: ModelRequest,
     request_label: Arc<str>,
@@ -142,10 +136,14 @@ impl CallableModelAPI for ModelAPI {
         };
 
         if client.sender.send(packaged).is_err() {
+            tracing::warn!("Unable to send response to {}", model_label);
             return Err(ResponseStatus::InternalError);
         }
 
-        rx.await.map_err(|_| ResponseStatus::InternalError)
+        rx.await.map_err(|_| {
+            tracing::warn!("Unable to receive response from {}", model_label);
+            ResponseStatus::InternalError
+        })
     }
 }
 
@@ -192,6 +190,20 @@ impl RoutableModelRequest for ModelRequest {
     }
 }
 
+impl ModelRequest {
+    fn into_any(self) -> Box<dyn Any> {
+        match self {
+            Self::OpenAIChat(r) => Box::new(r),
+            Self::OpenAIEdit(r) => Box::new(r),
+            Self::OpenAICompletion(r) => Box::new(r),
+            Self::OpenAIModeration(r) => Box::new(r),
+            Self::OpenAIEmbedding(r) => Box::new(r),
+            Self::OpenAIImage(r) => Box::new(r),
+            Self::OpenAIAudio(r) => Box::new(r),
+        }
+    }
+}
+
 #[derive(Serialize, Debug)]
 #[serde(untagged)]
 #[allow(private_interfaces, clippy::large_enum_variant)]
@@ -207,63 +219,61 @@ pub(super) enum ModelResponse {
     NoAPI(ResponseStatus),
 }
 
-// TODO: Implement this with a macro
 impl ModelResponse {
-    fn from(item: impl RoutableModelResponse) -> Self {
-        let item_any: Box<dyn Any> = Box::new(item);
-
-        if item_any.is::<openai::CreateChatCompletionResponse>() {
+    // TODO: Implement this with a macro
+    fn from_any(value: Box<dyn Any>) -> Self {
+        if value.is::<openai::CreateChatCompletionResponse>() {
             return ModelResponse::OpenAIChat(
-                *item_any
+                *value
                     .downcast::<openai::CreateChatCompletionResponse>()
                     .unwrap(),
             );
         }
 
-        if item_any.is::<openai::CreateEditResponse>() {
+        if value.is::<openai::CreateEditResponse>() {
             return ModelResponse::OpenAIEdit(
-                *item_any.downcast::<openai::CreateEditResponse>().unwrap(),
+                *value.downcast::<openai::CreateEditResponse>().unwrap(),
             );
         }
 
-        if item_any.is::<openai::CreateCompletionResponse>() {
+        if value.is::<openai::CreateCompletionResponse>() {
             return ModelResponse::OpenAICompletion(
-                *item_any
+                *value
                     .downcast::<openai::CreateCompletionResponse>()
                     .unwrap(),
             );
         }
 
-        if item_any.is::<openai::CreateModerationResponse>() {
+        if value.is::<openai::CreateModerationResponse>() {
             return ModelResponse::OpenAIModeration(
-                *item_any
+                *value
                     .downcast::<openai::CreateModerationResponse>()
                     .unwrap(),
             );
         }
 
-        if item_any.is::<openai::CreateEmbeddingResponse>() {
+        if value.is::<openai::CreateEmbeddingResponse>() {
             return ModelResponse::OpenAIEmbedding(
-                *item_any
+                *value
                     .downcast::<openai::CreateEmbeddingResponse>()
                     .unwrap(),
             );
         }
 
-        if item_any.is::<openai::ImagesResponse>() {
+        if value.is::<openai::ImagesResponse>() {
             return ModelResponse::OpenAIImage(
-                *item_any.downcast::<openai::ImagesResponse>().unwrap(),
+                *value.downcast::<openai::ImagesResponse>().unwrap(),
             );
         }
 
-        if item_any.is::<openai::AudioResponse>() {
+        if value.is::<openai::AudioResponse>() {
             return ModelResponse::OpenAIAudio(
-                *item_any.downcast::<openai::AudioResponse>().unwrap(),
+                *value.downcast::<openai::AudioResponse>().unwrap(),
             );
         }
 
-        if item_any.is::<openai::ApiError>() {
-            return ModelResponse::OpenAIError(*item_any.downcast::<openai::ApiError>().unwrap());
+        if value.is::<openai::ApiError>() {
+            return ModelResponse::OpenAIError(*value.downcast::<openai::ApiError>().unwrap());
         }
 
         panic!()
@@ -309,19 +319,21 @@ fn spawn_model_handler_task<M: CallableModelAPI>(
         let client = Arc::new(model.init());
 
         while let Some(request) = channel.recv().await {
-            let model_request = match model.to_request(request.body) {
-                Some(model_request) => model_request,
-                None => {
+            let model_request = match request
+                .body
+                .into_any()
+                .downcast::<M::ModelRequest>()
+                .map(|d| *d)
+            {
+                Ok(model_request) => model_request,
+                Err(_) => {
+                    tracing::warn!("Unable to convert ModelRequest!");
                     if request
                         .response_channel
                         .send(ModelResponse::NoAPI(ResponseStatus::InternalError))
                         .is_err()
                     {
-                        event!(
-                            Level::WARN,
-                            "Unable to send response to {}",
-                            request.request_label
-                        );
+                        tracing::warn!("Unable to send response to {}", request.request_label);
                     };
                     continue;
                 }
@@ -330,7 +342,7 @@ fn spawn_model_handler_task<M: CallableModelAPI>(
             let model = model.clone();
             let client = client.clone();
             tokio::spawn(async move {
-                let result = match model
+                let result: Box<dyn Any> = match model
                     .generate(
                         &client,
                         &request.request_label,
@@ -339,16 +351,16 @@ fn spawn_model_handler_task<M: CallableModelAPI>(
                     )
                     .await
                 {
-                    Ok(r) => ModelResponse::from(r),
-                    Err(r) => ModelResponse::from(r),
+                    Ok(r) => Box::new(r),
+                    Err(r) => Box::new(r),
                 };
 
-                if request.response_channel.send(result).is_err() {
-                    event!(
-                        Level::WARN,
-                        "Unable to send response to {}",
-                        request.request_label
-                    );
+                if request
+                    .response_channel
+                    .send(ModelResponse::from_any(result))
+                    .is_err()
+                {
+                    tracing::warn!("Unable to send response to {}", request.request_label);
                 };
             });
         }

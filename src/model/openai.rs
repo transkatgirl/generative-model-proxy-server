@@ -19,7 +19,6 @@ pub(super) use async_openai::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::value::Value;
-use tracing::{event, Level};
 
 use super::{CallableModelAPI, ResponseStatus, RoutableModelRequest, RoutableModelResponse};
 
@@ -270,7 +269,7 @@ fn convert_openai_error(error: OpenAIError) -> ApiError {
     match error {
         OpenAIError::ApiError(err) => err,
         _ => {
-            event!(Level::WARN, "OpenAIError {:?}", error);
+            tracing::warn!("Unexpected OpenAIError: {:?}", error);
             ApiError {
                 message: "The proxy server had an error processing your request. Sorry about that! You can retry your request, or contact the proxy's administrator if the error persists.".to_string(),
                 r#type: Some("server_error".to_string()),

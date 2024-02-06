@@ -20,6 +20,14 @@ use super::{
 };
 use state::{AppState, FlattenedAppState};
 
+/*
+# API todos:
+- Allow limiting models to specific endpoints
+- Return a UUID when creating users/roles/quotas/models
+- Rework model/quota API to be the same as users/roles
+- Improve error messages
+*/
+
 #[derive(Default, Serialize, Deserialize, Debug, Clone)]
 #[serde(default)]
 struct User {
@@ -98,7 +106,7 @@ pub async fn api_router() -> Router {
         .add_or_update_user(User {
             label: "admin".to_string(),
             uuid: Uuid::new_v4(),
-            api_keys: vec!["test".to_string()],
+            api_keys: vec!["admin-key".to_string()],
             roles: Vec::new(),
             perms: Permissions {
                 server_admin: true,
