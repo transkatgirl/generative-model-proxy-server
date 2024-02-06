@@ -9,6 +9,7 @@ use axum::{
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
+use tower_http::trace::TraceLayer;
 use uuid::Uuid;
 
 mod state;
@@ -89,8 +90,25 @@ struct LabelUpdateRequest {
 }
 
 // TODO: Add API documentation
-pub fn api_router() -> Router {
+pub async fn api_router() -> Router {
     let state = AppState::new();
+
+    // ! For texting purposes only, remove this!
+    state
+        .add_or_update_user(User {
+            label: "admin".to_string(),
+            uuid: Uuid::new_v4(),
+            api_keys: vec!["test".to_string()],
+            roles: Vec::new(),
+            perms: Permissions {
+                server_admin: true,
+                view_metrics: true,
+                sensitive: true,
+            },
+            models: Vec::new(),
+            quotas: Vec::new(),
+        })
+        .await;
 
     let openai_routes = Router::new()
         .route("/chat/completions", post(model_request))
@@ -116,12 +134,18 @@ pub fn api_router() -> Router {
             "/roles/:uuid",
             get(get_role).put(update_role).delete(delete_role),
         )
-        .route("/models", get(get_models).post(add_model_post).put(add_model_put))
+        .route(
+            "/models",
+            get(get_models).post(add_model_post).put(add_model_put),
+        )
         .route(
             "/models/:uuid",
             get(get_model).patch(rename_model).delete(delete_model),
         )
-        .route("/quotas", get(get_quotas).post(add_quota_post).put(add_quota_put))
+        .route(
+            "/quotas",
+            get(get_quotas).post(add_quota_post).put(add_quota_put),
+        )
         .route(
             "/quotas/:uuid",
             get(get_quota).patch(rename_quota).delete(delete_quota),
@@ -133,6 +157,7 @@ pub fn api_router() -> Router {
         .nest("/v1/", openai_routes)
         .nest("/admin", admin_routes)
         .route_layer(middleware::from_fn_with_state(state.clone(), authenticate))
+        .layer(TraceLayer::new_for_http())
 }
 
 async fn authenticate(
@@ -148,8 +173,8 @@ async fn authenticate(
                 let header_string = header_string.to_ascii_lowercase();
 
                 match header_string
-                    .strip_prefix("basic")
-                    .or(header_string.strip_prefix("bearer"))
+                    .strip_prefix("basic ")
+                    .or(header_string.strip_prefix("bearer "))
                 {
                     Some(api_key) => match state.authenticate(api_key, arrived_at).await {
                         Some(flattened_state) => {
@@ -337,7 +362,10 @@ async fn get_model(
     }
 }
 
-async fn add_model_post(State(state): State<AppState>, Json(mut payload): Json<Model>) -> StatusCode {
+async fn add_model_post(
+    State(state): State<AppState>,
+    Json(mut payload): Json<Model>,
+) -> StatusCode {
     if payload.uuid != Uuid::default() {
         return StatusCode::BAD_REQUEST;
     }
@@ -396,7 +424,10 @@ async fn get_quota(
     }
 }
 
-async fn add_quota_post(State(state): State<AppState>, Json(mut payload): Json<Quota>) -> StatusCode {
+async fn add_quota_post(
+    State(state): State<AppState>,
+    Json(mut payload): Json<Quota>,
+) -> StatusCode {
     if payload.uuid != Uuid::default() {
         return StatusCode::BAD_REQUEST;
     }

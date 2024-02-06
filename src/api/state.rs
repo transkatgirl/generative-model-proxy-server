@@ -164,7 +164,7 @@ impl AppState {
     #[tracing::instrument(level = "trace")]
     pub(super) async fn get_user(&self, uuid: &Uuid) -> Option<OwnedRwLockReadGuard<User>> {
         if let Some(user) = self.users.read().await.get(uuid) {
-            user.clone().read_owned().await;
+            return Some(user.clone().read_owned().await);
         }
 
         None
@@ -231,7 +231,7 @@ impl AppState {
     #[tracing::instrument(level = "trace")]
     pub(super) async fn get_role(&self, uuid: &Uuid) -> Option<OwnedRwLockReadGuard<Role>> {
         if let Some(role) = self.roles.read().await.get(uuid) {
-            role.clone().read_owned().await;
+            return Some(role.clone().read_owned().await);
         }
 
         None
