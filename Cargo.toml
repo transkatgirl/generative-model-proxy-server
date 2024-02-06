@@ -10,6 +10,11 @@ async-openai = { path = "vendored-deps/async-openai" }
 axum = { version = "0.7.4", features = [
 	"http2",
 ] }
+clap = { version = "4.4", features = [
+	"derive",
+	"env",
+	"wrap_help",
+] }
 fast32 = "1.0"
 gcra = { path = "vendored-deps/gcra-rs" }
 ring = "0.17"
@@ -17,6 +22,11 @@ tokio = { version = "1", features = [
 	"full",
 	"tracing",
 ] }
+opentelemetry = "0.21"
+opentelemetry_sdk = { version = "0.21", features = [
+	"rt-tokio",
+] }
+opentelemetry-otlp = "0.14.0"
 serde = { version = "1.0", features = [
 	"derive",
 ] }
@@ -29,8 +39,9 @@ tower-http = { version = "0.5", features = [
 	"full",
 ] }
 tracing = { version = "0.1", features = [
-	"release_max_level_info",
+	"release_max_level_debug",
 ] }
+tracing-opentelemetry = "0.22"
 tracing-subscriber = { version = "0.3", features = [
 	"env-filter",
 ] }

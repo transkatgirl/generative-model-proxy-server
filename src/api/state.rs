@@ -50,7 +50,7 @@ impl AppState {
         }
     }
 
-    #[tracing::instrument(level = "debug")]
+    #[tracing::instrument(skip(self), level = "debug")]
     pub(super) async fn authenticate(
         &self,
         api_key: &str,
@@ -85,9 +85,6 @@ impl AppState {
                         if role.perms.view_metrics {
                             perms.view_metrics = true
                         }
-                        if role.perms.sensitive {
-                            perms.sensitive = true
-                        }
                         for uuid in &role.models {
                             if let Some(model) = self.get_model_with_quotas(uuid).await {
                                 models.insert(model.0 .0.read().await.label.clone(), model.clone());
@@ -115,7 +112,7 @@ impl AppState {
         None
     }
 
-    #[tracing::instrument(level = "debug")]
+    #[tracing::instrument(skip(self), level = "debug")]
     pub(super) async fn add_or_update_user(&self, user: User) -> bool {
         let uuid = user.uuid;
 
@@ -150,7 +147,7 @@ impl AppState {
         }
     }
 
-    #[tracing::instrument(level = "debug")]
+    #[tracing::instrument(skip(self), level = "debug")]
     pub(super) async fn get_users_snapshot(&self) -> Vec<User> {
         let mut users = Vec::new();
 
@@ -161,7 +158,7 @@ impl AppState {
         users
     }
 
-    #[tracing::instrument(level = "trace")]
+    #[tracing::instrument(skip(self), level = "trace")]
     pub(super) async fn get_user(&self, uuid: &Uuid) -> Option<OwnedRwLockReadGuard<User>> {
         if let Some(user) = self.users.read().await.get(uuid) {
             return Some(user.clone().read_owned().await);
@@ -170,7 +167,7 @@ impl AppState {
         None
     }
 
-    #[tracing::instrument(level = "debug")]
+    #[tracing::instrument(skip(self), level = "debug")]
     pub(super) async fn update_user(&self, user: User) -> bool {
         if let Some(app_user) = self.users.read().await.get(&user.uuid) {
             let mut app_user = app_user.write().await;
@@ -192,7 +189,7 @@ impl AppState {
         }
     }
 
-    #[tracing::instrument(level = "debug")]
+    #[tracing::instrument(skip(self), level = "debug")]
     pub(super) async fn remove_user(&self, uuid: &Uuid) -> Option<AppUser> {
         if let Some(user) = self.users.write().await.remove(uuid) {
             {
@@ -209,7 +206,7 @@ impl AppState {
         None
     }
 
-    #[tracing::instrument(level = "debug")]
+    #[tracing::instrument(skip(self), level = "debug")]
     pub(super) async fn get_roles_snapshot(&self) -> Vec<Role> {
         let mut roles = Vec::new();
 
@@ -220,7 +217,7 @@ impl AppState {
         roles
     }
 
-    #[tracing::instrument(level = "debug")]
+    #[tracing::instrument(skip(self), level = "debug")]
     pub(super) async fn add_or_update_role(&self, role: Role) -> bool {
         let uuid = role.uuid;
         let role = Arc::new(RwLock::new(role));
@@ -228,7 +225,7 @@ impl AppState {
         self.roles.write().await.insert(uuid, role).is_none()
     }
 
-    #[tracing::instrument(level = "trace")]
+    #[tracing::instrument(skip(self), level = "trace")]
     pub(super) async fn get_role(&self, uuid: &Uuid) -> Option<OwnedRwLockReadGuard<Role>> {
         if let Some(role) = self.roles.read().await.get(uuid) {
             return Some(role.clone().read_owned().await);
@@ -237,7 +234,7 @@ impl AppState {
         None
     }
 
-    #[tracing::instrument(level = "debug")]
+    #[tracing::instrument(skip(self), level = "debug")]
     pub(super) async fn update_role(&self, role: Role) -> bool {
         if let Some(app_role) = self.roles.read().await.get(&role.uuid) {
             let mut app_role = app_role.write().await;
@@ -249,7 +246,7 @@ impl AppState {
         }
     }
 
-    #[tracing::instrument(level = "debug")]
+    #[tracing::instrument(skip(self), level = "debug")]
     pub(super) async fn remove_role(&self, uuid: &Uuid) -> Option<AppRole> {
         if let Some(role) = self.roles.write().await.remove(uuid) {
             return Some(role);
@@ -258,7 +255,7 @@ impl AppState {
         None
     }
 
-    #[tracing::instrument(level = "debug")]
+    #[tracing::instrument(skip(self), level = "debug")]
     pub(super) async fn add_or_replace_quota(&self, quota: Quota) -> bool {
         let uuid = quota.uuid;
         let limiter = Limiter::new(&quota.limits);
@@ -267,7 +264,7 @@ impl AppState {
         self.quotas.write().await.insert(uuid, quota).is_none()
     }
 
-    #[tracing::instrument(level = "debug")]
+    #[tracing::instrument(skip(self), level = "debug")]
     pub(super) async fn get_quotas_snapshot(&self) -> Vec<Quota> {
         let mut quotas = Vec::new();
 
@@ -278,12 +275,12 @@ impl AppState {
         quotas
     }
 
-    #[tracing::instrument(level = "trace")]
+    #[tracing::instrument(skip(self), level = "trace")]
     pub(super) async fn get_quota(&self, uuid: &Uuid) -> Option<AppQuota> {
         self.quotas.read().await.get(uuid).cloned()
     }
 
-    #[tracing::instrument(level = "debug")]
+    #[tracing::instrument(skip(self), level = "debug")]
     pub(super) async fn update_quota_label(&self, uuid: &Uuid, label: String) -> Option<()> {
         if let Some(quota) = self.quotas.read().await.get(uuid) {
             let mut quota = quota.0.write().await;
@@ -294,7 +291,7 @@ impl AppState {
         None
     }
 
-    #[tracing::instrument(level = "debug")]
+    #[tracing::instrument(skip(self), level = "debug")]
     pub(super) async fn remove_quota(&self, uuid: &Uuid) -> Option<AppQuota> {
         if let Some(quota) = self.quotas.write().await.remove(uuid) {
             return Some(quota);
@@ -303,7 +300,7 @@ impl AppState {
         None
     }
 
-    #[tracing::instrument(level = "debug")]
+    #[tracing::instrument(skip(self), level = "debug")]
     pub(super) async fn add_or_replace_model(&self, model: Model) -> bool {
         let uuid = model.uuid;
         let client = model.api.init();
@@ -316,7 +313,7 @@ impl AppState {
             .is_none()
     }
 
-    #[tracing::instrument(level = "debug")]
+    #[tracing::instrument(skip(self), level = "debug")]
     pub(super) async fn get_models_snapshot(&self) -> Vec<Model> {
         let mut models = Vec::new();
 
@@ -327,12 +324,12 @@ impl AppState {
         models
     }
 
-    #[tracing::instrument(level = "trace")]
+    #[tracing::instrument(skip(self), level = "trace")]
     pub(super) async fn get_model(&self, uuid: &Uuid) -> Option<AppModel> {
         self.models.read().await.get(uuid).cloned()
     }
 
-    #[tracing::instrument(level = "trace")]
+    #[tracing::instrument(skip(self), level = "trace")]
     async fn get_model_with_quotas(&self, uuid: &Uuid) -> Option<(AppModel, Vec<AppQuota>)> {
         if let Some(model) = self.get_model(uuid).await {
             let mut quotas = Vec::new();
@@ -415,11 +412,8 @@ impl FlattenedAppState {
                 }
             }
 
-            let request_label = match self.perms.sensitive {
-                true => "".to_string(),
-                false => CROCKFORD
-                    .encode(digest::digest(&digest::SHA256, self.tags[0].as_bytes()).as_ref()),
-            };
+            let request_label =
+                CROCKFORD.encode(digest::digest(&digest::SHA256, self.tags[0].as_bytes()).as_ref());
 
             return match model
                 .api

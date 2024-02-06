@@ -58,7 +58,6 @@ struct Role {
 struct Permissions {
     server_admin: bool,
     view_metrics: bool,
-    sensitive: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -111,7 +110,6 @@ pub async fn api_router() -> Router {
             perms: Permissions {
                 server_admin: true,
                 view_metrics: true,
-                sensitive: true,
             },
             models: Vec::new(),
             quotas: Vec::new(),
