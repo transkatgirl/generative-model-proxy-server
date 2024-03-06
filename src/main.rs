@@ -10,9 +10,10 @@ use tracing_subscriber::{filter, layer::SubscriberExt, util::SubscriberInitExt};
 mod api;
 mod limiter;
 mod model;
+mod model_v2;
 
 #[derive(Parser, Debug)]
-#[command(author, version, about, long_about = None)]
+#[command(author, version, about)]
 struct Args {
     #[arg(short, long, default_value = "127.0.0.1:8080")]
     bind_to: String,

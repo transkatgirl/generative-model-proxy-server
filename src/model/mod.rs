@@ -2,6 +2,7 @@ use std::{any::Any, fmt::Debug, future::Future, sync::Arc};
 
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot};
+use tracing::Level;
 
 mod openai;
 pub(super) trait CallableModelAPI:
@@ -312,7 +313,12 @@ fn spawn_model_handler_task<M: CallableModelAPI>(
     mut channel: mpsc::UnboundedReceiver<PackagedRequest>,
 ) {
     tokio::spawn(async move {
+        let span = tracing::span!(Level::TRACE, "spawn_model_handler");
+        let enter = span.enter();
+
         let client = Arc::new(model.init());
+
+        drop(enter);
 
         while let Some(request) = channel.recv().await {
             let model_request = match request.body.into_any().downcast::<M::ModelRequest>() {
