@@ -10,7 +10,7 @@ use tracing_subscriber::{filter, layer::SubscriberExt, util::SubscriberInitExt};
 mod api;
 mod limiter;
 mod model;
-mod model_v2;
+mod model_v3;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about)]
