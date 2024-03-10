@@ -7,27 +7,26 @@ use std::{
 };
 
 use axum::http::StatusCode;
-use fast32::base32::CROCKFORD;
-use ring::digest;
+use reqwest::Client;
+use serde_json::Value;
 use tokio::sync::{OwnedRwLockReadGuard, RwLock};
 use uuid::Uuid;
 
 use super::{
     super::limiter::{Limiter, PendingRequestHandle},
-    super::model::{
-        CallableModelAPI, ModelAPIClient, ModelRequest, ModelResponse, ResponseStatus,
-        RoutableModelRequest, RoutableModelResponse,
-    },
+    super::model::{self, ModelBackend, ModelError, ModelResponse, TaggedModelRequest, TokenUsage},
     Model, Quota, Role, User,
 };
 
 type AppUser = Arc<RwLock<User>>;
 type AppRole = Arc<RwLock<Role>>;
 type AppQuota = Arc<(RwLock<Quota>, Limiter)>;
-type AppModel = Arc<(RwLock<Model>, ModelAPIClient)>;
+type AppModel = Arc<RwLock<Model>>;
 
 #[derive(Debug, Clone)]
 pub(super) struct AppState {
+    http_client: Client,
+
     users: Arc<RwLock<HashMap<Uuid, AppUser>>>,
     roles: Arc<RwLock<HashMap<Uuid, AppRole>>>,
     quotas: Arc<RwLock<HashMap<Uuid, AppQuota>>>,
@@ -42,6 +41,7 @@ impl AppState {
     #[tracing::instrument(level = "debug")]
     pub(super) fn new() -> AppState {
         AppState {
+            http_client: model::get_configured_client().unwrap(),
             users: Arc::new(RwLock::new(HashMap::new())),
             roles: Arc::new(RwLock::new(HashMap::new())),
             quotas: Arc::new(RwLock::new(HashMap::new())),
@@ -66,7 +66,7 @@ impl AppState {
                 tags.push(user.uuid);
                 for uuid in &user.models {
                     if let Some(model) = self.get_model_with_quotas(uuid).await {
-                        models.insert(model.0 .0.read().await.label.clone(), model.clone());
+                        models.insert(model.0.read().await.label.clone(), model.clone());
                     }
                 }
                 for quota_member in &user.quotas {
@@ -84,7 +84,7 @@ impl AppState {
                         }
                         for uuid in &role.models {
                             if let Some(model) = self.get_model_with_quotas(uuid).await {
-                                models.insert(model.0 .0.read().await.label.clone(), model.clone());
+                                models.insert(model.0.read().await.label.clone(), model.clone());
                             }
                         }
                         for quota_member in &role.quotas {
@@ -96,12 +96,15 @@ impl AppState {
                     }
                 }
 
+                tags.push(Uuid::new_v4());
+
                 return Some(FlattenedAppState {
                     admin,
                     tags: Arc::new(tags),
                     models: Arc::new(models),
                     quotas: Arc::new(quotas),
                     arrived_at,
+                    http_client: self.http_client.clone(),
                 });
             }
         }
@@ -300,8 +303,7 @@ impl AppState {
     #[tracing::instrument(skip(self), level = "debug")]
     pub(super) async fn add_or_replace_model(&self, model: Model) -> bool {
         let uuid = model.uuid;
-        let client = model.api.init();
-        let model = Arc::new((RwLock::new(model), client));
+        let model = Arc::new(RwLock::new(model));
 
         self.models
             .write()
@@ -315,7 +317,7 @@ impl AppState {
         let mut models = Vec::new();
 
         for (_, model) in self.models.read().await.iter() {
-            models.push(model.0.read().await.to_owned());
+            models.push(model.read().await.to_owned());
         }
 
         models
@@ -331,7 +333,7 @@ impl AppState {
         if let Some(model) = self.get_model(uuid).await {
             let mut quotas = Vec::new();
 
-            for quota_member in &model.0.read().await.quotas {
+            for quota_member in &model.read().await.quotas {
                 if let Some(quota) = self.get_quota(&quota_member.quota).await {
                     quotas.push(quota)
                 }
@@ -346,7 +348,7 @@ impl AppState {
     #[tracing::instrument(level = "debug")]
     pub(super) async fn update_model_label(&self, uuid: &Uuid, label: String) -> Option<()> {
         if let Some(model) = self.models.read().await.get(uuid) {
-            let mut model = model.0.write().await;
+            let mut model = model.write().await;
             model.label = label;
             return Some(());
         }
@@ -370,34 +372,37 @@ pub(super) struct FlattenedAppState {
     pub(super) tags: Arc<Vec<Uuid>>,
     models: Arc<HashMap<String, (AppModel, Vec<AppQuota>)>>,
     quotas: Arc<Vec<AppQuota>>,
+    http_client: Client,
     arrived_at: Instant,
 }
 
 impl FlattenedAppState {
     #[tracing::instrument(level = "debug")]
-    pub(super) async fn model_request(
-        &self,
-        request: ModelRequest,
-    ) -> Result<(StatusCode, ModelResponse), StatusCode> {
-        let model_label = request.get_model();
+    pub(super) async fn model_request(&self, request: Value) -> (StatusCode, Value) {
+        let request = TaggedModelRequest::new(self.tags.clone(), request);
 
-        if let Some(model) = self.models.get(&model_label) {
-            let (model, model_client, model_quotas) =
-                (&model.0 .0.read().await, &model.0 .1, &model.1);
+        let model_label = match request.get_model() {
+            Some(label) => label,
+            None => return from_model_error(ModelError::UnknownModel),
+        };
+
+        if let Some((model, model_quotas)) = self.models.get(model_label) {
+            let model = model.read().await;
 
             let mut request_handles = Vec::new();
 
-            let tokens = match model.api.get_context_len() {
-                Some(context_len) => context_len * request.get_total_n(),
-                None => request.get_total_n(),
-            };
+            let tokens = model
+                .api
+                .get_max_tokens()
+                .map(|max_tokens| max_tokens as u32 * request.get_count() as u32)
+                .unwrap_or(request.get_count() as u32);
 
             for quota in self.quotas.iter() {
                 match quota.1.token_request(tokens, self.arrived_at).await {
                     Some(handle) => {
                         request_handles.push((quota.clone(), handle));
                     }
-                    None => return Err(StatusCode::TOO_MANY_REQUESTS),
+                    None => return from_model_error(ModelError::UserRateLimit),
                 }
             }
             for quota in model_quotas {
@@ -405,43 +410,29 @@ impl FlattenedAppState {
                     Some(handle) => {
                         request_handles.push((quota.clone(), handle));
                     }
-                    None => return Err(StatusCode::TOO_MANY_REQUESTS),
+                    None => return from_model_error(ModelError::UserRateLimit),
                 }
             }
 
-            let request_label =
-                CROCKFORD.encode(digest::digest(&digest::SHA256, self.tags[0].as_bytes()).as_ref());
+            let response = model.api.generate(&self.http_client, request).await;
 
-            return match model
-                .api
-                .generate(model_client, &request_label, &model_label, request)
-                .await
-            {
-                Ok(response) => {
-                    if let Some(tokens) = response.get_token_count() {
-                        for (quota, handle) in request_handles {
-                            quota.1.token_request_finalize(tokens, handle).await;
-                        }
-                    }
-
-                    let status = match response.get_status() {
-                        ResponseStatus::Success => StatusCode::OK,
-                        ResponseStatus::InvalidRequest => StatusCode::BAD_REQUEST,
-                        ResponseStatus::InternalError => StatusCode::INTERNAL_SERVER_ERROR,
-                        ResponseStatus::BadUpstream => StatusCode::BAD_GATEWAY,
-                        ResponseStatus::ModelUnavailable => StatusCode::SERVICE_UNAVAILABLE,
-                    };
-
-                    return Ok((status, response));
+            if let Some(usage) = response.usage {
+                for (quota, handle) in request_handles {
+                    quota
+                        .1
+                        .token_request_finalize(usage.total as u32, handle)
+                        .await;
                 }
-                Err(ResponseStatus::Success) => Err(StatusCode::OK),
-                Err(ResponseStatus::InvalidRequest) => Err(StatusCode::BAD_REQUEST),
-                Err(ResponseStatus::InternalError) => Err(StatusCode::INTERNAL_SERVER_ERROR),
-                Err(ResponseStatus::BadUpstream) => Err(StatusCode::BAD_GATEWAY),
-                Err(ResponseStatus::ModelUnavailable) => Err(StatusCode::SERVICE_UNAVAILABLE),
-            };
-        }
+            }
 
-        Err(StatusCode::NOT_FOUND)
+            (response.status, response.response)
+        } else {
+            from_model_error(ModelError::UnknownModel)
+        }
     }
+}
+
+fn from_model_error(error: ModelError) -> (StatusCode, Value) {
+    let response = ModelResponse::from_error(error);
+    (response.status, response.response)
 }

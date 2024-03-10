@@ -9,15 +9,13 @@ use axum::{
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use tower_http::trace::TraceLayer;
 use uuid::Uuid;
 
 mod state;
 
-use super::{
-    limiter::Limit,
-    model::{ModelAPI, ModelRequest, ModelResponse},
-};
+use super::{limiter::Limit, model::ModelBackend};
 use state::{AppState, FlattenedAppState};
 
 /*
@@ -69,7 +67,7 @@ struct Model {
     #[serde(default)]
     uuid: Uuid,
 
-    api: ModelAPI,
+    api: ModelBackend,
 
     quotas: Vec<QuotaMember>,
 }
@@ -211,12 +209,11 @@ async fn authenticate_admin(
 
 async fn model_request(
     Extension(state): Extension<FlattenedAppState>,
-    Json(payload): Json<ModelRequest>,
-) -> Result<(StatusCode, Json<ModelResponse>), StatusCode> {
-    state
-        .model_request(payload)
-        .await
-        .map(|(status, response)| (status, Json(response)))
+    Json(payload): Json<Value>,
+) -> (StatusCode, Json<Value>) {
+    let response = state.model_request(payload).await;
+
+    (response.0, Json(response.1))
 }
 
 async fn get_users(State(state): State<AppState>) -> Json<Vec<User>> {
@@ -350,7 +347,7 @@ async fn get_model(
     Path(uuid): Path<Uuid>,
 ) -> Result<Json<Model>, StatusCode> {
     match state.get_model(&uuid).await {
-        Some(model) => Ok(Json(model.0.read().await.clone())),
+        Some(model) => Ok(Json(model.read().await.clone())),
         None => Err(StatusCode::NOT_FOUND),
     }
 }

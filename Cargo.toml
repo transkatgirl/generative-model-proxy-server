@@ -10,7 +10,6 @@ authors = [
 
 [dependencies]
 anyhow = "1.0"
-async-openai = { path = "vendored-deps/async-openai" }
 axum = { version = "0.7.4", features = [
 	"http2",
 ] }
