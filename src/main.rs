@@ -1,8 +1,12 @@
+use std::time::Duration;
+
 use anyhow::{Context, Result};
 use clap::Parser;
 use opentelemetry::KeyValue;
 use opentelemetry_otlp::WithExportConfig;
 use opentelemetry_sdk::{trace, Resource};
+use reqwest::{Client, ClientBuilder};
+use sled::Db; // sled should probably be replaced with a proper database at some point. will need to write manual migrations when that time comes.
 use tokio::net::TcpListener;
 use tracing::Level;
 use tracing_subscriber::{filter, layer::SubscriberExt, util::SubscriberInitExt};
@@ -17,8 +21,17 @@ struct Args {
     #[arg(short, long, default_value = "127.0.0.1:8080")]
     bind_to: String,
 
+    #[arg(short, long, default_value = "database.sled")]
+    database_file: String,
+
     #[arg(short, long)]
     opentelemetry_endpoint: Option<String>,
+}
+
+#[derive(Clone)]
+struct AppState {
+    http: Client,
+    database: Db,
 }
 
 #[tokio::main]
@@ -36,6 +49,7 @@ async fn main() -> Result<()> {
                     ("tokio_util", Level::INFO),
                     ("tonic", Level::INFO),
                     ("tower_http", Level::DEBUG),
+                    ("sled", Level::INFO),
                 ]),
         )
         .with(tracing_subscriber::fmt::layer().pretty());
@@ -61,10 +75,22 @@ async fn main() -> Result<()> {
         None => registry.init(),
     }
 
+    let state = AppState {
+        http: ClientBuilder::new()
+            .user_agent("language-model-proxy-server")
+            .connect_timeout(Duration::from_secs(5))
+            .http2_keep_alive_interval(Some(Duration::from_secs(5)))
+            .http2_keep_alive_timeout(Duration::from_secs(15))
+            .http2_keep_alive_while_idle(true)
+            .build()
+            .context("Unable to initalize HTTP client")?,
+        database: sled::open(&args.database_file).context("Unable to initalize database")?,
+    };
+
     let listener = TcpListener::bind(&args.bind_to)
         .await
         .with_context(|| format!("Failed to bind HTTP server to {}", &args.bind_to))?;
-    axum::serve(listener, api::api_router().await)
+    axum::serve(listener, api::api_router(state).await)
         .await
         .context("Failed to start HTTP server")?;
 
