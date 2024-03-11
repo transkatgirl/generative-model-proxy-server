@@ -1,438 +1,239 @@
-use std::{
-    clone::Clone,
-    collections::{hash_map::Entry, HashMap},
-    fmt::Debug,
-    sync::Arc,
-    time::Instant,
+use std::fmt::Debug;
+
+use axum::{http::StatusCode, Json};
+
+use serde::{de::DeserializeOwned, Serialize};
+use sled::{
+    transaction::{ConflictableTransactionError, Transactional},
+    Batch,
 };
 
-use axum::http::StatusCode;
-use reqwest::Client;
-use serde_json::Value;
-use tokio::sync::{OwnedRwLockReadGuard, RwLock};
-use uuid::Uuid;
+use super::AppState;
 
-use super::{
-    super::limiter::{Limiter, PendingRequestHandle},
-    super::model::{self, ModelBackend, ModelError, ModelResponse, TaggedModelRequest, TokenUsage},
-    Model, Quota, Role, User,
-};
+pub(super) trait RelatedTo {
+    type Link: Serialize + DeserializeOwned;
 
-type AppUser = Arc<RwLock<User>>;
-type AppRole = Arc<RwLock<Role>>;
-type AppQuota = Arc<(RwLock<Quota>, Limiter)>;
-type AppModel = Arc<RwLock<Model>>;
-
-#[derive(Debug, Clone)]
-pub(super) struct AppState {
-    http_client: Client,
-
-    users: Arc<RwLock<HashMap<Uuid, AppUser>>>,
-    roles: Arc<RwLock<HashMap<Uuid, AppRole>>>,
-    quotas: Arc<RwLock<HashMap<Uuid, AppQuota>>>,
-    models: Arc<RwLock<HashMap<Uuid, AppModel>>>,
-
-    api_keys: Arc<RwLock<HashMap<String, Uuid>>>,
+    fn get_keys(&self) -> Vec<Self::Link>;
 }
 
-// TODO: Add functions to save/load state from disk
-// TODO: Figure out logging/metrics
-impl AppState {
-    #[tracing::instrument(level = "debug")]
-    pub(super) fn new() -> AppState {
-        AppState {
-            http_client: model::get_configured_client().unwrap(),
-            users: Arc::new(RwLock::new(HashMap::new())),
-            roles: Arc::new(RwLock::new(HashMap::new())),
-            quotas: Arc::new(RwLock::new(HashMap::new())),
-            models: Arc::new(RwLock::new(HashMap::new())),
-            api_keys: Arc::new(RwLock::new(HashMap::new())),
+#[tracing::instrument(skip(state), level = "debug")]
+pub(super) fn get_items<V>(table: &str, state: AppState) -> Result<Json<Vec<V>>, StatusCode>
+where
+    V: DeserializeOwned,
+{
+    match state.database.open_tree(table.as_bytes()) {
+        Ok(tree) => Ok(Json(
+            tree.iter()
+                .filter_map(|item| {
+                    item.ok()
+                        .and_then(|(_, value)| postcard::from_bytes(&value).ok())
+                })
+                .collect(),
+        )),
+        Err(error) => {
+            tracing::warn!("Unable to open \"{}\" table: {}", table, error);
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
         }
     }
+}
 
-    #[tracing::instrument(skip(self), level = "debug")]
-    pub(super) async fn authenticate(
-        &self,
-        api_key: &str,
-        arrived_at: Instant,
-    ) -> Option<FlattenedAppState> {
-        if let Some(uuid) = self.api_keys.read().await.get(api_key) {
-            if let Some(user) = self.get_user(uuid).await {
-                let mut tags = Vec::new();
-                let mut models = HashMap::new();
-                let mut quotas = Vec::new();
-                let mut admin = user.admin;
-
-                tags.push(user.uuid);
-                for uuid in &user.models {
-                    if let Some(model) = self.get_model_with_quotas(uuid).await {
-                        models.insert(model.0.read().await.label.clone(), model.clone());
-                    }
+#[tracing::instrument(skip(state), level = "debug")]
+pub(super) fn get_item<K, V>(table: &str, state: AppState, key: &K) -> Result<Json<V>, StatusCode>
+where
+    K: Serialize + Debug,
+    V: DeserializeOwned,
+{
+    match state.database.open_tree(table.as_bytes()) {
+        Ok(tree) => tree
+            .transaction(|tree| {
+                match tree
+                    .get(postcard::to_stdvec(key).map_err(ConflictableTransactionError::Abort)?)?
+                {
+                    Some(value) => Ok(Ok(Json(
+                        postcard::from_bytes(&value)
+                            .map_err(ConflictableTransactionError::Abort)?,
+                    ))),
+                    None => Ok(Err(StatusCode::NOT_FOUND)),
                 }
-                for quota_member in &user.quotas {
-                    if let Some(quota) = self.get_quota(&quota_member.quota).await {
-                        quotas.push(quota.clone());
-                        tags.push(quota.0.read().await.uuid);
-                    }
-                }
-
-                for uuid in &user.roles {
-                    if let Some(role) = self.get_role(uuid).await {
-                        tags.push(role.uuid);
-                        if role.admin {
-                            admin = true
-                        }
-                        for uuid in &role.models {
-                            if let Some(model) = self.get_model_with_quotas(uuid).await {
-                                models.insert(model.0.read().await.label.clone(), model.clone());
-                            }
-                        }
-                        for quota_member in &role.quotas {
-                            if let Some(quota) = self.get_quota(&quota_member.quota).await {
-                                quotas.push(quota.clone());
-                                tags.push(quota.0.read().await.uuid);
-                            }
-                        }
-                    }
-                }
-
-                tags.push(Uuid::new_v4());
-
-                return Some(FlattenedAppState {
-                    admin,
-                    tags: Arc::new(tags),
-                    models: Arc::new(models),
-                    quotas: Arc::new(quotas),
-                    arrived_at,
-                    http_client: self.http_client.clone(),
-                });
-            }
-        }
-
-        None
-    }
-
-    #[tracing::instrument(skip(self), level = "debug")]
-    pub(super) async fn add_or_update_user(&self, user: User) -> bool {
-        let uuid = user.uuid;
-
-        match self.users.write().await.entry(uuid) {
-            Entry::Occupied(entry) => {
-                let mut app_user = entry.get().write().await;
-                let mut api_keys = self.api_keys.write().await;
-
-                for api_key in &app_user.api_keys {
-                    api_keys.remove(api_key);
-                }
-
-                for api_key in &user.api_keys {
-                    api_keys.insert(api_key.clone(), user.uuid);
-                }
-
-                *app_user = user;
-
-                false
-            }
-            Entry::Vacant(entry) => {
-                let user = Arc::new(RwLock::new(user));
-
-                entry.insert(user.clone());
-
-                for api_key in &user.read().await.api_keys {
-                    self.api_keys.write().await.insert(api_key.clone(), uuid);
-                }
-
-                true
-            }
+            })
+            .unwrap_or_else(|error| {
+                tracing::warn!("Unable to apply database transaction: {}", error);
+                Err(StatusCode::INTERNAL_SERVER_ERROR)
+            }),
+        Err(error) => {
+            tracing::warn!("Unable to open \"{}\" table: {}", table, error);
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
         }
     }
+}
 
-    #[tracing::instrument(skip(self), level = "debug")]
-    pub(super) async fn get_users_snapshot(&self) -> Vec<User> {
-        let mut users = Vec::new();
+#[tracing::instrument(skip(state), level = "debug")]
+pub(super) fn insert_item<K, V>(table: &str, state: AppState, key: &K, value: &V) -> StatusCode
+where
+    K: Serialize + Debug,
+    V: Serialize + Debug,
+{
+    match state.database.open_tree(table.as_bytes()) {
+        Ok(tree) => tree
+            .transaction(|tree| {
+                tree.insert(
+                    postcard::to_stdvec(key).map_err(ConflictableTransactionError::Abort)?,
+                    postcard::to_stdvec(value).map_err(ConflictableTransactionError::Abort)?,
+                )?;
 
-        for (_, user) in self.users.read().await.iter() {
-            users.push(user.read().await.to_owned());
+                Ok(StatusCode::OK)
+            })
+            .unwrap_or_else(|error| {
+                tracing::warn!("Unable to apply database transaction: {}", error);
+                StatusCode::INTERNAL_SERVER_ERROR
+            }),
+        Err(error) => {
+            tracing::warn!("Unable to open \"{}\" table: {}", table, error);
+            StatusCode::INTERNAL_SERVER_ERROR
         }
-
-        users
     }
+}
 
-    #[tracing::instrument(skip(self), level = "trace")]
-    pub(super) async fn get_user(&self, uuid: &Uuid) -> Option<OwnedRwLockReadGuard<User>> {
-        if let Some(user) = self.users.read().await.get(uuid) {
-            return Some(user.clone().read_owned().await);
+#[tracing::instrument(skip(state), level = "debug")]
+pub(super) fn insert_related_items<K, L, V, W>(
+    tables: (&str, &str),
+    state: AppState,
+    main_item: (&K, &V),
+    related_items: &[(L, W)],
+) -> StatusCode
+where
+    K: Serialize + Debug,
+    L: Serialize + Debug,
+    V: Serialize + DeserializeOwned + RelatedTo + Debug,
+    W: Serialize + Debug,
+{
+    let table_main = match state.database.open_tree(tables.0.as_bytes()) {
+        Ok(tree) => tree,
+        Err(error) => {
+            tracing::warn!("Unable to open \"{}\" table: {}", tables.0, error);
+            return StatusCode::INTERNAL_SERVER_ERROR;
         }
+    };
 
-        None
-    }
+    let table_related = match state.database.open_tree(tables.1.as_bytes()) {
+        Ok(tree) => tree,
+        Err(error) => {
+            tracing::warn!("Unable to open \"{}\" table: {}", tables.1, error);
+            return StatusCode::INTERNAL_SERVER_ERROR;
+        }
+    };
 
-    #[tracing::instrument(skip(self), level = "debug")]
-    pub(super) async fn update_user(&self, user: User) -> bool {
-        if let Some(app_user) = self.users.read().await.get(&user.uuid) {
-            let mut app_user = app_user.write().await;
-            let mut api_keys = self.api_keys.write().await;
+    (&table_main, &table_related)
+        .transaction(|(table_main, table_related)| {
+            let mut batch = Batch::default();
+            if let Some(payload) = table_main.insert(
+                postcard::to_stdvec(main_item.0).map_err(ConflictableTransactionError::Abort)?,
+                postcard::to_stdvec(main_item.1).map_err(ConflictableTransactionError::Abort)?,
+            )? {
+                let deserialized: V =
+                    postcard::from_bytes(&payload).map_err(ConflictableTransactionError::Abort)?;
 
-            for api_key in &app_user.api_keys {
-                api_keys.remove(api_key);
+                for linked_key in deserialized.get_keys() {
+                    batch.remove(
+                        postcard::to_stdvec(&linked_key)
+                            .map_err(ConflictableTransactionError::Abort)?,
+                    )
+                }
             }
 
-            for api_key in &user.api_keys {
-                api_keys.insert(api_key.clone(), user.uuid);
+            for (key, value) in related_items {
+                batch.insert(
+                    postcard::to_stdvec(key).map_err(ConflictableTransactionError::Abort)?,
+                    postcard::to_stdvec(value).map_err(ConflictableTransactionError::Abort)?,
+                )
             }
 
-            *app_user = user;
+            table_related.apply_batch(&batch)?;
 
-            false
-        } else {
-            self.add_or_update_user(user).await
+            Ok(StatusCode::OK)
+        })
+        .unwrap_or_else(|error| {
+            tracing::warn!("Unable to apply database transaction: {}", error);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })
+}
+
+#[tracing::instrument(skip(state), level = "debug")]
+pub(super) fn remove_item<K>(table: &str, state: AppState, key: &K) -> StatusCode
+where
+    K: Serialize + Debug,
+{
+    match state.database.open_tree(table.as_bytes()) {
+        Ok(tree) => tree
+            .transaction(|tree| {
+                tree.remove(
+                    postcard::to_stdvec(key).map_err(ConflictableTransactionError::Abort)?,
+                )?;
+
+                Ok(StatusCode::OK)
+            })
+            .unwrap_or_else(|error| {
+                tracing::warn!("Unable to apply database transaction: {}", error);
+                StatusCode::INTERNAL_SERVER_ERROR
+            }),
+        Err(error) => {
+            tracing::warn!("Unable to open \"{}\" table: {}", table, error);
+            StatusCode::INTERNAL_SERVER_ERROR
         }
     }
+}
 
-    #[tracing::instrument(skip(self), level = "debug")]
-    pub(super) async fn remove_user(&self, uuid: &Uuid) -> Option<AppUser> {
-        if let Some(user) = self.users.write().await.remove(uuid) {
+#[tracing::instrument(skip(state), level = "debug")]
+pub(super) fn remove_related_items<K, V>(
+    tables: (&str, &str),
+    state: AppState,
+    key: &K,
+) -> StatusCode
+where
+    K: Serialize + Debug,
+    V: Serialize + DeserializeOwned + RelatedTo + Debug,
+{
+    let table_main = match state.database.open_tree(tables.0.as_bytes()) {
+        Ok(tree) => tree,
+        Err(error) => {
+            tracing::warn!("Unable to open \"{}\" table: {}", tables.0, error);
+            return StatusCode::INTERNAL_SERVER_ERROR;
+        }
+    };
+
+    let table_related = match state.database.open_tree(tables.1.as_bytes()) {
+        Ok(tree) => tree,
+        Err(error) => {
+            tracing::warn!("Unable to open \"{}\" table: {}", tables.1, error);
+            return StatusCode::INTERNAL_SERVER_ERROR;
+        }
+    };
+
+    (&table_main, &table_related)
+        .transaction(|(table_main, table_related)| {
+            match table_main
+                .remove(postcard::to_stdvec(key).map_err(ConflictableTransactionError::Abort)?)?
             {
-                let user = user.read().await;
+                Some(payload) => {
+                    let deserialized: V = postcard::from_bytes(&payload)
+                        .map_err(ConflictableTransactionError::Abort)?;
 
-                for api_key in &user.api_keys {
-                    self.api_keys.write().await.remove(api_key);
-                }
-            }
-
-            return Some(user);
-        }
-
-        None
-    }
-
-    #[tracing::instrument(skip(self), level = "debug")]
-    pub(super) async fn get_roles_snapshot(&self) -> Vec<Role> {
-        let mut roles = Vec::new();
-
-        for (_, role) in self.roles.read().await.iter() {
-            roles.push(role.read().await.to_owned());
-        }
-
-        roles
-    }
-
-    #[tracing::instrument(skip(self), level = "debug")]
-    pub(super) async fn add_or_update_role(&self, role: Role) -> bool {
-        let uuid = role.uuid;
-        let role = Arc::new(RwLock::new(role));
-
-        self.roles.write().await.insert(uuid, role).is_none()
-    }
-
-    #[tracing::instrument(skip(self), level = "trace")]
-    pub(super) async fn get_role(&self, uuid: &Uuid) -> Option<OwnedRwLockReadGuard<Role>> {
-        if let Some(role) = self.roles.read().await.get(uuid) {
-            return Some(role.clone().read_owned().await);
-        }
-
-        None
-    }
-
-    #[tracing::instrument(skip(self), level = "debug")]
-    pub(super) async fn update_role(&self, role: Role) -> bool {
-        if let Some(app_role) = self.roles.read().await.get(&role.uuid) {
-            let mut app_role = app_role.write().await;
-            *app_role = role;
-
-            false
-        } else {
-            self.add_or_update_role(role).await
-        }
-    }
-
-    #[tracing::instrument(skip(self), level = "debug")]
-    pub(super) async fn remove_role(&self, uuid: &Uuid) -> Option<AppRole> {
-        if let Some(role) = self.roles.write().await.remove(uuid) {
-            return Some(role);
-        }
-
-        None
-    }
-
-    #[tracing::instrument(skip(self), level = "debug")]
-    pub(super) async fn add_or_replace_quota(&self, quota: Quota) -> bool {
-        let uuid = quota.uuid;
-        let limiter = Limiter::new(&quota.limits);
-        let quota = Arc::new((RwLock::new(quota), limiter));
-
-        self.quotas.write().await.insert(uuid, quota).is_none()
-    }
-
-    #[tracing::instrument(skip(self), level = "debug")]
-    pub(super) async fn get_quotas_snapshot(&self) -> Vec<Quota> {
-        let mut quotas = Vec::new();
-
-        for (_, quota) in self.quotas.read().await.iter() {
-            quotas.push(quota.0.read().await.to_owned());
-        }
-
-        quotas
-    }
-
-    #[tracing::instrument(skip(self), level = "trace")]
-    pub(super) async fn get_quota(&self, uuid: &Uuid) -> Option<AppQuota> {
-        self.quotas.read().await.get(uuid).cloned()
-    }
-
-    #[tracing::instrument(skip(self), level = "debug")]
-    pub(super) async fn update_quota_label(&self, uuid: &Uuid, label: String) -> Option<()> {
-        if let Some(quota) = self.quotas.read().await.get(uuid) {
-            let mut quota = quota.0.write().await;
-            quota.label = label;
-            return Some(());
-        }
-
-        None
-    }
-
-    #[tracing::instrument(skip(self), level = "debug")]
-    pub(super) async fn remove_quota(&self, uuid: &Uuid) -> Option<AppQuota> {
-        if let Some(quota) = self.quotas.write().await.remove(uuid) {
-            return Some(quota);
-        }
-
-        None
-    }
-
-    #[tracing::instrument(skip(self), level = "debug")]
-    pub(super) async fn add_or_replace_model(&self, model: Model) -> bool {
-        let uuid = model.uuid;
-        let model = Arc::new(RwLock::new(model));
-
-        self.models
-            .write()
-            .await
-            .insert(uuid, model.clone())
-            .is_none()
-    }
-
-    #[tracing::instrument(skip(self), level = "debug")]
-    pub(super) async fn get_models_snapshot(&self) -> Vec<Model> {
-        let mut models = Vec::new();
-
-        for (_, model) in self.models.read().await.iter() {
-            models.push(model.read().await.to_owned());
-        }
-
-        models
-    }
-
-    #[tracing::instrument(skip(self), level = "trace")]
-    pub(super) async fn get_model(&self, uuid: &Uuid) -> Option<AppModel> {
-        self.models.read().await.get(uuid).cloned()
-    }
-
-    #[tracing::instrument(skip(self), level = "trace")]
-    async fn get_model_with_quotas(&self, uuid: &Uuid) -> Option<(AppModel, Vec<AppQuota>)> {
-        if let Some(model) = self.get_model(uuid).await {
-            let mut quotas = Vec::new();
-
-            for quota_member in &model.read().await.quotas {
-                if let Some(quota) = self.get_quota(&quota_member.quota).await {
-                    quotas.push(quota)
-                }
-            }
-
-            return Some((model, quotas));
-        }
-
-        None
-    }
-
-    #[tracing::instrument(level = "debug")]
-    pub(super) async fn update_model_label(&self, uuid: &Uuid, label: String) -> Option<()> {
-        if let Some(model) = self.models.read().await.get(uuid) {
-            let mut model = model.write().await;
-            model.label = label;
-            return Some(());
-        }
-
-        None
-    }
-
-    #[tracing::instrument(level = "debug")]
-    pub(super) async fn remove_model(&self, uuid: &Uuid) -> Option<AppModel> {
-        if let Some(model) = self.models.write().await.remove(uuid) {
-            return Some(model);
-        }
-
-        None
-    }
-}
-
-#[derive(Debug, Clone)]
-pub(super) struct FlattenedAppState {
-    pub(super) admin: bool,
-    pub(super) tags: Arc<Vec<Uuid>>,
-    models: Arc<HashMap<String, (AppModel, Vec<AppQuota>)>>,
-    quotas: Arc<Vec<AppQuota>>,
-    http_client: Client,
-    arrived_at: Instant,
-}
-
-impl FlattenedAppState {
-    #[tracing::instrument(level = "debug")]
-    pub(super) async fn model_request(&self, request: Value) -> (StatusCode, Value) {
-        let request = TaggedModelRequest::new(self.tags.clone(), request);
-
-        let model_label = match request.get_model() {
-            Some(label) => label,
-            None => return from_model_error(ModelError::UnknownModel),
-        };
-
-        if let Some((model, model_quotas)) = self.models.get(model_label) {
-            let model = model.read().await;
-
-            let mut request_handles = Vec::new();
-
-            let tokens = model
-                .api
-                .get_max_tokens()
-                .map(|max_tokens| max_tokens as u32 * request.get_count() as u32)
-                .unwrap_or(request.get_count() as u32);
-
-            for quota in self.quotas.iter() {
-                match quota.1.token_request(tokens, self.arrived_at).await {
-                    Some(handle) => {
-                        request_handles.push((quota.clone(), handle));
+                    let mut batch = Batch::default();
+                    for linked_key in deserialized.get_keys() {
+                        batch.remove(
+                            postcard::to_stdvec(&linked_key)
+                                .map_err(ConflictableTransactionError::Abort)?,
+                        )
                     }
-                    None => return from_model_error(ModelError::UserRateLimit),
+                    table_related.apply_batch(&batch)?;
+
+                    Ok(StatusCode::OK)
                 }
+                None => Ok(StatusCode::NOT_FOUND),
             }
-            for quota in model_quotas {
-                match quota.1.token_request(tokens, self.arrived_at).await {
-                    Some(handle) => {
-                        request_handles.push((quota.clone(), handle));
-                    }
-                    None => return from_model_error(ModelError::UserRateLimit),
-                }
-            }
-
-            let response = model.api.generate(&self.http_client, request).await;
-
-            if let Some(usage) = response.usage {
-                for (quota, handle) in request_handles {
-                    quota
-                        .1
-                        .token_request_finalize(usage.total as u32, handle)
-                        .await;
-                }
-            }
-
-            (response.status, response.response)
-        } else {
-            from_model_error(ModelError::UnknownModel)
-        }
-    }
-}
-
-fn from_model_error(error: ModelError) -> (StatusCode, Value) {
-    let response = ModelResponse::from_error(error);
-    (response.status, response.response)
+        })
+        .unwrap_or_else(|error| {
+            tracing::warn!("Unable to apply database transaction: {}", error);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })
 }
