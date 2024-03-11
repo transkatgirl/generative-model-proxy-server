@@ -241,7 +241,7 @@ where
 }
 
 #[tracing::instrument(skip(state), level = "debug")]
-fn get_item<K, V>(table: &str, state: AppState, key: K) -> Result<Json<V>, StatusCode>
+fn get_item<K, V>(table: &str, state: AppState, key: &K) -> Result<Json<V>, StatusCode>
 where
     K: Serialize + Debug,
     V: DeserializeOwned,
@@ -250,7 +250,7 @@ where
         Ok(tree) => tree
             .transaction(|tree| {
                 match tree
-                    .get(postcard::to_stdvec(&key).map_err(ConflictableTransactionError::Abort)?)?
+                    .get(postcard::to_stdvec(key).map_err(ConflictableTransactionError::Abort)?)?
                 {
                     Some(value) => Ok(Ok(Json(
                         postcard::from_bytes(&value)
@@ -270,8 +270,14 @@ where
     }
 }
 
+pub trait RelatedTo {
+    type Link: Serialize + DeserializeOwned;
+
+    fn get_keys(&self) -> Vec<Self::Link>;
+}
+
 #[tracing::instrument(skip(state), level = "debug")]
-fn insert_item<K, V>(table: &str, state: AppState, key: K, value: V) -> StatusCode
+fn insert_item<K, V>(table: &str, state: AppState, key: &K, value: &V) -> StatusCode
 where
     K: Serialize + Debug,
     V: Serialize + Debug,
@@ -280,8 +286,8 @@ where
         Ok(tree) => tree
             .transaction(|tree| {
                 tree.insert(
-                    postcard::to_stdvec(&key).map_err(ConflictableTransactionError::Abort)?,
-                    postcard::to_stdvec(&value).map_err(ConflictableTransactionError::Abort)?,
+                    postcard::to_stdvec(key).map_err(ConflictableTransactionError::Abort)?,
+                    postcard::to_stdvec(value).map_err(ConflictableTransactionError::Abort)?,
                 )?;
 
                 Ok(StatusCode::OK)
@@ -298,7 +304,71 @@ where
 }
 
 #[tracing::instrument(skip(state), level = "debug")]
-fn remove_item<K>(table: &str, state: AppState, key: K) -> StatusCode
+fn insert_related_items<K, L, V, W>(
+    tables: (&str, &str),
+    state: AppState,
+    main_item: (&K, &V),
+    related_items: &[(L, W)],
+) -> StatusCode
+where
+    K: Serialize + Debug,
+    L: Serialize + Debug,
+    V: Serialize + DeserializeOwned + RelatedTo + Debug,
+    W: Serialize + Debug,
+{
+    let table_main = match state.database.open_tree(tables.0.as_bytes()) {
+        Ok(tree) => tree,
+        Err(error) => {
+            tracing::warn!("Unable to open \"{}\" table: {}", tables.0, error);
+            return StatusCode::INTERNAL_SERVER_ERROR;
+        }
+    };
+
+    let table_related = match state.database.open_tree(tables.1.as_bytes()) {
+        Ok(tree) => tree,
+        Err(error) => {
+            tracing::warn!("Unable to open \"{}\" table: {}", tables.1, error);
+            return StatusCode::INTERNAL_SERVER_ERROR;
+        }
+    };
+
+    (&table_main, &table_related)
+        .transaction(|(table_main, table_related)| {
+            let mut batch = Batch::default();
+            if let Some(payload) = table_main.insert(
+                postcard::to_stdvec(main_item.0).map_err(ConflictableTransactionError::Abort)?,
+                postcard::to_stdvec(main_item.1).map_err(ConflictableTransactionError::Abort)?,
+            )? {
+                let deserialized: V =
+                    postcard::from_bytes(&payload).map_err(ConflictableTransactionError::Abort)?;
+
+                for linked_key in deserialized.get_keys() {
+                    batch.remove(
+                        postcard::to_stdvec(&linked_key)
+                            .map_err(ConflictableTransactionError::Abort)?,
+                    )
+                }
+            }
+
+            for (key, value) in related_items {
+                batch.insert(
+                    postcard::to_stdvec(key).map_err(ConflictableTransactionError::Abort)?,
+                    postcard::to_stdvec(value).map_err(ConflictableTransactionError::Abort)?,
+                )
+            }
+
+            table_related.apply_batch(&batch)?;
+
+            Ok(StatusCode::OK)
+        })
+        .unwrap_or_else(|error| {
+            tracing::warn!("Unable to apply database transaction: {}", error);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })
+}
+
+#[tracing::instrument(skip(state), level = "debug")]
+fn remove_item<K>(table: &str, state: AppState, key: &K) -> StatusCode
 where
     K: Serialize + Debug,
 {
@@ -306,7 +376,7 @@ where
         Ok(tree) => tree
             .transaction(|tree| {
                 tree.remove(
-                    postcard::to_stdvec(&key).map_err(ConflictableTransactionError::Abort)?,
+                    postcard::to_stdvec(key).map_err(ConflictableTransactionError::Abort)?,
                 )?;
 
                 Ok(StatusCode::OK)
@@ -319,6 +389,64 @@ where
             tracing::warn!("Unable to open \"{}\" table: {}", table, error);
             StatusCode::INTERNAL_SERVER_ERROR
         }
+    }
+}
+
+fn remove_related_items<K, V>(tables: (&str, &str), state: AppState, key: &K) -> StatusCode
+where
+    K: Serialize + Debug,
+    V: Serialize + DeserializeOwned + RelatedTo + Debug,
+{
+    let table_main = match state.database.open_tree(tables.0.as_bytes()) {
+        Ok(tree) => tree,
+        Err(error) => {
+            tracing::warn!("Unable to open \"{}\" table: {}", tables.0, error);
+            return StatusCode::INTERNAL_SERVER_ERROR;
+        }
+    };
+
+    let table_related = match state.database.open_tree(tables.1.as_bytes()) {
+        Ok(tree) => tree,
+        Err(error) => {
+            tracing::warn!("Unable to open \"{}\" table: {}", tables.1, error);
+            return StatusCode::INTERNAL_SERVER_ERROR;
+        }
+    };
+
+    (&table_main, &table_related)
+        .transaction(|(table_main, table_related)| {
+            match table_main
+                .remove(postcard::to_stdvec(key).map_err(ConflictableTransactionError::Abort)?)?
+            {
+                Some(payload) => {
+                    let deserialized: V = postcard::from_bytes(&payload)
+                        .map_err(ConflictableTransactionError::Abort)?;
+
+                    let mut batch = Batch::default();
+                    for linked_key in deserialized.get_keys() {
+                        batch.remove(
+                            postcard::to_stdvec(&linked_key)
+                                .map_err(ConflictableTransactionError::Abort)?,
+                        )
+                    }
+                    table_related.apply_batch(&batch)?;
+
+                    Ok(StatusCode::OK)
+                }
+                None => Ok(StatusCode::NOT_FOUND),
+            }
+        })
+        .unwrap_or_else(|error| {
+            tracing::warn!("Unable to apply database transaction: {}", error);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })
+}
+
+impl RelatedTo for User {
+    type Link = String;
+
+    fn get_keys(&self) -> Vec<Self::Link> {
+        self.api_keys.clone()
     }
 }
 
@@ -330,7 +458,7 @@ async fn get_user(
     State(state): State<AppState>,
     Path(uuid): Path<Uuid>,
 ) -> Result<Json<User>, StatusCode> {
-    get_item("users", state, uuid)
+    get_item("users", state, &uuid)
 }
 
 async fn add_user_post(
@@ -357,57 +485,18 @@ async fn add_user_put(State(state): State<AppState>, Json(payload): Json<User>) 
         return StatusCode::BAD_REQUEST;
     }
 
-    let users = match state.database.open_tree(b"users") {
-        Ok(tree) => tree,
-        Err(error) => {
-            tracing::warn!("Unable to open \"users\" table: {}", error);
-            return StatusCode::INTERNAL_SERVER_ERROR;
-        }
-    };
+    let related_items: Vec<_> = payload
+        .api_keys
+        .iter()
+        .map(|item| (item, payload.uuid))
+        .collect();
 
-    let api_keys = match state.database.open_tree(b"api_keys") {
-        Ok(tree) => tree,
-        Err(error) => {
-            tracing::warn!("Unable to open \"api_keys\" table: {}", error);
-            return StatusCode::INTERNAL_SERVER_ERROR;
-        }
-    };
-
-    (&users, &api_keys)
-        .transaction(|(users, api_keys)| {
-            let uuid =
-                postcard::to_stdvec(&payload.uuid).map_err(ConflictableTransactionError::Abort)?;
-            let serialized_payload =
-                postcard::to_stdvec(&payload).map_err(ConflictableTransactionError::Abort)?;
-
-            let mut batch = Batch::default();
-            if let Some(user) = users.insert(uuid.clone(), serialized_payload)? {
-                let user: User =
-                    postcard::from_bytes(&user).map_err(ConflictableTransactionError::Abort)?;
-
-                for api_key in user.api_keys {
-                    batch.remove(
-                        postcard::to_stdvec(&api_key)
-                            .map_err(ConflictableTransactionError::Abort)?,
-                    )
-                }
-            }
-
-            for api_key in &payload.api_keys {
-                batch.insert(
-                    postcard::to_stdvec(&api_key).map_err(ConflictableTransactionError::Abort)?,
-                    uuid.clone(),
-                )
-            }
-
-            api_keys.apply_batch(&batch)?;
-
-            Ok(StatusCode::OK)
-        })
-        .unwrap_or_else(|error| {
-            tracing::warn!("Unable to apply database transaction: {}", error);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })
+    insert_related_items(
+        ("users", "api_keys"),
+        state,
+        (&payload.uuid, &payload),
+        &related_items,
+    )
 }
 
 async fn update_user(
@@ -425,48 +514,7 @@ async fn update_user(
 
 #[tracing::instrument(skip(state), level = "debug")]
 async fn delete_user(State(state): State<AppState>, Path(uuid): Path<Uuid>) -> StatusCode {
-    let users = match state.database.open_tree(b"users") {
-        Ok(tree) => tree,
-        Err(error) => {
-            tracing::warn!("Unable to open \"users\" table: {}", error);
-            return StatusCode::INTERNAL_SERVER_ERROR;
-        }
-    };
-
-    let api_keys = match state.database.open_tree(b"api_keys") {
-        Ok(tree) => tree,
-        Err(error) => {
-            tracing::warn!("Unable to open \"api_keys\" table: {}", error);
-            return StatusCode::INTERNAL_SERVER_ERROR;
-        }
-    };
-
-    (&users, &api_keys)
-        .transaction(|(users, api_keys)| {
-            let uuid = postcard::to_stdvec(&uuid).map_err(ConflictableTransactionError::Abort)?;
-
-            if let Some(user) = users.remove(uuid)? {
-                let user: User =
-                    postcard::from_bytes(&user).map_err(ConflictableTransactionError::Abort)?;
-
-                let mut batch = Batch::default();
-                for api_key in user.api_keys {
-                    batch.remove(
-                        postcard::to_stdvec(&api_key)
-                            .map_err(ConflictableTransactionError::Abort)?,
-                    );
-                }
-                api_keys.apply_batch(&batch)?;
-
-                Ok(StatusCode::OK)
-            } else {
-                Ok(StatusCode::NOT_FOUND)
-            }
-        })
-        .unwrap_or_else(|error| {
-            tracing::warn!("Unable to apply database transaction: {}", error);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })
+    remove_related_items::<_, User>(("users", "api_keys"), state, &uuid)
 }
 
 async fn get_roles(State(state): State<AppState>) -> Result<Json<Vec<Role>>, StatusCode> {
@@ -477,7 +525,7 @@ async fn get_role(
     State(state): State<AppState>,
     Path(uuid): Path<Uuid>,
 ) -> Result<Json<Role>, StatusCode> {
-    get_item("roles", state, uuid)
+    get_item("roles", state, &uuid)
 }
 
 async fn add_role_post(
@@ -487,13 +535,12 @@ async fn add_role_post(
     if payload.uuid != Uuid::default() {
         return Err(StatusCode::BAD_REQUEST);
     }
-    let uuid = Uuid::new_v4();
-    payload.uuid = uuid;
+    payload.uuid = Uuid::new_v4();
 
-    let status = insert_item("roles", state, uuid, payload);
+    let status = insert_item("roles", state, &payload.uuid, &payload);
 
     if status.is_success() {
-        Ok(Json(uuid))
+        Ok(Json(payload.uuid))
     } else {
         Err(status)
     }
@@ -504,7 +551,7 @@ async fn add_role_put(State(state): State<AppState>, Json(payload): Json<Role>) 
         return StatusCode::BAD_REQUEST;
     }
 
-    insert_item("roles", state, payload.uuid, payload)
+    insert_item("roles", state, &payload.uuid, &payload)
 }
 
 async fn update_role(
@@ -517,11 +564,11 @@ async fn update_role(
     }
     payload.uuid = uuid;
 
-    insert_item("roles", state, payload.uuid, payload)
+    insert_item("roles", state, &payload.uuid, &payload)
 }
 
 async fn delete_role(State(state): State<AppState>, Path(uuid): Path<Uuid>) -> StatusCode {
-    remove_item("roles", state, uuid)
+    remove_item("roles", state, &uuid)
 }
 
 async fn get_models(State(state): State<AppState>) -> Result<Json<Vec<Model>>, StatusCode> {
@@ -532,7 +579,7 @@ async fn get_model(
     State(state): State<AppState>,
     Path(uuid): Path<Uuid>,
 ) -> Result<Json<Model>, StatusCode> {
-    get_item("models", state, uuid)
+    get_item("models", state, &uuid)
 }
 
 async fn add_model_post(
@@ -542,13 +589,12 @@ async fn add_model_post(
     if payload.uuid != Uuid::default() {
         return Err(StatusCode::BAD_REQUEST);
     }
-    let uuid = Uuid::new_v4();
-    payload.uuid = uuid;
+    payload.uuid = Uuid::new_v4();
 
-    let status = insert_item("models", state, uuid, payload);
+    let status = insert_item("models", state, &payload.uuid, &payload);
 
     if status.is_success() {
-        Ok(Json(uuid))
+        Ok(Json(payload.uuid))
     } else {
         Err(status)
     }
@@ -559,7 +605,7 @@ async fn add_model_put(State(state): State<AppState>, Json(payload): Json<Model>
         return StatusCode::BAD_REQUEST;
     }
 
-    insert_item("models", state, payload.uuid, payload)
+    insert_item("models", state, &payload.uuid, &payload)
 }
 
 async fn update_model(
@@ -572,11 +618,11 @@ async fn update_model(
     }
     payload.uuid = uuid;
 
-    insert_item("models", state, payload.uuid, payload)
+    insert_item("models", state, &payload.uuid, &payload)
 }
 
 async fn delete_model(State(state): State<AppState>, Path(uuid): Path<Uuid>) -> StatusCode {
-    remove_item("models", state, uuid)
+    remove_item("models", state, &uuid)
 }
 
 async fn get_quotas(State(state): State<AppState>) -> Result<Json<Vec<Quota>>, StatusCode> {
@@ -587,7 +633,7 @@ async fn get_quota(
     State(state): State<AppState>,
     Path(uuid): Path<Uuid>,
 ) -> Result<Json<Quota>, StatusCode> {
-    get_item("quotas", state, uuid)
+    get_item("quotas", state, &uuid)
 }
 
 async fn add_quota_post(

@@ -1,12 +1,11 @@
 use std::{
     cmp::Ordering,
-    sync::Arc,
     time::{Duration, Instant},
 };
 
 use gcra::{GcraError, GcraState, RateLimit};
 use serde::{Deserialize, Serialize};
-use tokio::{sync::Mutex, time};
+use tokio::time;
 use tracing::{event, Level};
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy)]
@@ -23,138 +22,86 @@ pub(super) struct Limit {
 }
 
 #[derive(Debug)]
-pub(super) struct Limiter {
-    request_limiters: Vec<(RateLimit, Arc<Mutex<GcraState>>)>,
-    token_limiters: Vec<(RateLimit, Arc<Mutex<GcraState>>)>,
+pub(super) struct Request {
+    pub(super) arrived_at: Instant,
+    pub(super) estimated_tokens: u32,
 }
 
 #[derive(Debug)]
-pub(super) struct PendingRequestHandle {
-    arrived_at: Instant,
-    tokens: u32,
+pub(super) struct Response {
+    pub(super) request: Request,
+    pub(super) actual_tokens: u32,
 }
 
-// TODO: Add prioritization
-impl Limiter {
+impl Limit {
     #[tracing::instrument(level = "debug")]
-    pub(super) fn new(limits: &[Limit]) -> Self {
-        let mut limiter = Limiter {
-            request_limiters: Vec::new(),
-            token_limiters: Vec::new(),
+    pub(super) async fn request(
+        &self,
+        clock_state: &mut Option<Instant>,
+        request: &Request,
+    ) -> bool {
+        let mut state = GcraState { tat: *clock_state };
+        let rate_limit = RateLimit::new(self.count, self.per);
+        let cost = match self.r#type {
+            LimitItem::Request => 1,
+            LimitItem::Token => request.estimated_tokens,
         };
 
-        for limit in limits {
-            let state = Arc::new(Mutex::new(GcraState::default()));
-            let rate_limit = RateLimit::new(limit.count, limit.per);
-
-            match limit.r#type {
-                LimitItem::Request => {
-                    limiter.request_limiters.push((rate_limit, state));
-                }
-                LimitItem::Token => {
-                    limiter.token_limiters.push((rate_limit, state));
-                }
+        match state.check_and_modify_at(&rate_limit, request.arrived_at, cost) {
+            Ok(_) => {}
+            Err(GcraError::DeniedUntil { next_allowed_at }) => {
+                time::sleep_until(time::Instant::from_std(next_allowed_at)).await;
+                state.tat = Some(next_allowed_at + rate_limit.period);
+            }
+            Err(GcraError::DeniedIndefinitely {
+                cost: _,
+                rate_limit: _,
+            }) => {
+                return false;
             }
         }
 
-        limiter
+        *clock_state = state.tat;
+
+        true
     }
 
     #[tracing::instrument(level = "debug")]
-    pub(super) async fn plain_request(&self, arrived_at: Instant) {
-        for (rate_limit, state_mutex) in &self.request_limiters {
-            let mut state = state_mutex.lock().await;
-
-            match state.check_and_modify_at(rate_limit, arrived_at, 1) {
-                Ok(_) => {}
-                Err(GcraError::DeniedUntil { next_allowed_at }) => {
-                    time::sleep_until(time::Instant::from_std(next_allowed_at)).await;
-                    state.tat = Some(next_allowed_at + rate_limit.period);
-                }
-                Err(_) => {
-                    event!(
-                        Level::WARN,
-                        "Request rate limiter has <1 capacity!\n{:?}",
-                        rate_limit
-                    );
-                    time::sleep(rate_limit.period).await;
-                }
-            }
-        }
-    }
-
-    #[tracing::instrument(level = "trace")]
-    fn is_token_count_oversized(&self, tokens: u32) -> bool {
-        for (rate_limit, _) in &self.token_limiters {
-            if tokens > rate_limit.resource_limit {
-                return true;
-            }
+    pub(super) async fn response(&self, clock_state: &mut Option<Instant>, response: Response) {
+        if let LimitItem::Request = self.r#type {
+            return;
         }
 
-        false
-    }
+        let mut state = GcraState { tat: *clock_state };
+        let rate_limit = RateLimit::new(self.count, self.per);
 
-    #[tracing::instrument(level = "debug")]
-    pub(super) async fn token_request(
-        &self,
-        tokens: u32,
-        arrived_at: Instant,
-    ) -> Option<PendingRequestHandle> {
-        if self.is_token_count_oversized(tokens) {
-            return None;
-        }
-
-        self.plain_request(arrived_at).await;
-
-        for (rate_limit, state_mutex) in &self.token_limiters {
-            let mut state = state_mutex.lock().await;
-
-            match state.check_and_modify_at(rate_limit, arrived_at, 1) {
-                Ok(_) => {}
-                Err(GcraError::DeniedUntil { next_allowed_at }) => {
-                    time::sleep_until(time::Instant::from_std(next_allowed_at)).await;
-                    state.tat = Some(next_allowed_at + rate_limit.period);
-                }
-                Err(GcraError::DeniedIndefinitely {
-                    cost: _,
-                    rate_limit: _,
-                }) => {
-                    event!(
-                        Level::WARN,
-                        "Token rate limiter has incorrect capacity!\n{:?}",
-                        rate_limit
-                    );
-                    time::sleep(rate_limit.period).await;
-                }
-            }
-        }
-
-        Some(PendingRequestHandle { arrived_at, tokens })
-    }
-
-    #[tracing::instrument(level = "debug")]
-    pub(super) async fn token_request_finalize(&self, tokens: u32, handle: PendingRequestHandle) {
-        match handle.tokens.cmp(&tokens) {
+        match response
+            .request
+            .estimated_tokens
+            .cmp(&response.actual_tokens)
+        {
             Ordering::Greater => {
-                let tokens = handle.tokens - tokens;
+                let excess_cost = response.request.estimated_tokens - response.actual_tokens;
 
-                for (rate_limit, state_mutex) in &self.token_limiters {
-                    let mut state = state_mutex.lock().await;
-
-                    let _ = state.revert_at(rate_limit, handle.arrived_at, tokens);
-                }
+                let _ = state.revert_at(&rate_limit, response.request.arrived_at, excess_cost);
+                *clock_state = state.tat;
             }
             Ordering::Equal => {}
             Ordering::Less => {
                 event!(
                     Level::WARN,
                     "Request had greater final token count ({}) than estimated maximum of {}!",
-                    tokens,
-                    handle.tokens
+                    response.actual_tokens,
+                    response.request.estimated_tokens
                 );
-                let tokens = tokens - handle.tokens;
+                let cost = response.actual_tokens - response.request.estimated_tokens;
 
-                let _ = self.token_request(tokens, Instant::now()).await;
+                if let Err(GcraError::DeniedUntil { next_allowed_at }) =
+                    state.check_and_modify_at(&rate_limit, response.request.arrived_at, cost)
+                {
+                    time::sleep_until(time::Instant::from_std(next_allowed_at)).await;
+                    *clock_state = Some(next_allowed_at + rate_limit.period);
+                }
             }
         }
     }
