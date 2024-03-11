@@ -220,9 +220,9 @@ async fn model_request(
 }
 
 #[tracing::instrument(skip(state), level = "debug")]
-fn get_items<T>(table: &str, state: AppState) -> Result<Json<Vec<T>>, StatusCode>
+fn get_items<V>(table: &str, state: AppState) -> Result<Json<Vec<V>>, StatusCode>
 where
-    T: DeserializeOwned,
+    V: DeserializeOwned,
 {
     match state.database.open_tree(table.as_bytes()) {
         Ok(tree) => Ok(Json(
@@ -241,18 +241,20 @@ where
 }
 
 #[tracing::instrument(skip(state), level = "debug")]
-fn get_item<T>(table: &str, state: AppState, uuid: Uuid) -> Result<Json<T>, StatusCode>
+fn get_item<K, V>(table: &str, state: AppState, key: K) -> Result<Json<V>, StatusCode>
 where
-    T: DeserializeOwned,
+    K: Serialize + Debug,
+    V: DeserializeOwned,
 {
     match state.database.open_tree(table.as_bytes()) {
         Ok(tree) => tree
             .transaction(|tree| {
                 match tree
-                    .get(postcard::to_stdvec(&uuid).map_err(ConflictableTransactionError::Abort)?)?
+                    .get(postcard::to_stdvec(&key).map_err(ConflictableTransactionError::Abort)?)?
                 {
-                    Some(item) => Ok(Ok(Json(
-                        postcard::from_bytes(&item).map_err(ConflictableTransactionError::Abort)?,
+                    Some(value) => Ok(Ok(Json(
+                        postcard::from_bytes(&value)
+                            .map_err(ConflictableTransactionError::Abort)?,
                     ))),
                     None => Ok(Err(StatusCode::NOT_FOUND)),
                 }
@@ -269,16 +271,17 @@ where
 }
 
 #[tracing::instrument(skip(state), level = "debug")]
-fn insert_item<T>(table: &str, state: AppState, uuid: Uuid, payload: T) -> StatusCode
+fn insert_item<K, V>(table: &str, state: AppState, key: K, value: V) -> StatusCode
 where
-    T: Serialize + Debug,
+    K: Serialize + Debug,
+    V: Serialize + Debug,
 {
     match state.database.open_tree(table.as_bytes()) {
         Ok(tree) => tree
             .transaction(|tree| {
                 tree.insert(
-                    postcard::to_stdvec(&uuid).map_err(ConflictableTransactionError::Abort)?,
-                    postcard::to_stdvec(&payload).map_err(ConflictableTransactionError::Abort)?,
+                    postcard::to_stdvec(&key).map_err(ConflictableTransactionError::Abort)?,
+                    postcard::to_stdvec(&value).map_err(ConflictableTransactionError::Abort)?,
                 )?;
 
                 Ok(StatusCode::OK)
@@ -295,12 +298,15 @@ where
 }
 
 #[tracing::instrument(skip(state), level = "debug")]
-fn remove_item(table: &str, state: AppState, uuid: Uuid) -> StatusCode {
+fn remove_item<K>(table: &str, state: AppState, key: K) -> StatusCode
+where
+    K: Serialize + Debug,
+{
     match state.database.open_tree(table.as_bytes()) {
         Ok(tree) => tree
             .transaction(|tree| {
                 tree.remove(
-                    postcard::to_stdvec(&uuid).map_err(ConflictableTransactionError::Abort)?,
+                    postcard::to_stdvec(&key).map_err(ConflictableTransactionError::Abort)?,
                 )?;
 
                 Ok(StatusCode::OK)
