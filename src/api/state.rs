@@ -1,4 +1,4 @@
-use std::fmt::Debug;
+use std::{collections::HashMap, fmt::Debug, hash::Hash};
 
 use axum::{http::StatusCode, Json};
 
@@ -10,10 +10,18 @@ use sled::{
 
 use super::AppState;
 
-pub(super) trait RelatedTo {
-    type Link: Serialize + DeserializeOwned;
+// TODO: Review https://serde.rs/lifetimes.html and fix deserializer lifetimes (if applicable)
 
-    fn get_keys(&self) -> Vec<Self::Link>;
+pub(super) trait RelatedToItem {
+    type Key: Serialize;
+
+    fn get_key(&self, table: &str) -> Self::Key;
+}
+
+pub(super) trait RelatedToItemSet {
+    type Key: Serialize;
+
+    fn get_keys(&self, table: &str) -> Vec<Self::Key>;
 }
 
 #[tracing::instrument(skip(state), level = "debug")]
@@ -67,6 +75,60 @@ where
     }
 }
 
+pub(super) fn get_related_item<K, V, W>(
+    tables: (&str, &str),
+    id: &str,
+    state: AppState,
+    key: &K,
+) -> Result<Json<W>, StatusCode>
+where
+    K: Serialize + Debug,
+    V: DeserializeOwned + RelatedToItem + Debug,
+    W: DeserializeOwned + Debug,
+{
+    let table_main = match state.database.open_tree(tables.0.as_bytes()) {
+        Ok(tree) => tree,
+        Err(error) => {
+            tracing::warn!("Unable to open \"{}\" table: {}", tables.0, error);
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        }
+    };
+
+    let table_related = match state.database.open_tree(tables.1.as_bytes()) {
+        Ok(tree) => tree,
+        Err(error) => {
+            tracing::warn!("Unable to open \"{}\" table: {}", tables.1, error);
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        }
+    };
+
+    (&table_main, &table_related)
+        .transaction(|(table_main, table_related)| {
+            if let Some(value) = table_main
+                .get(postcard::to_stdvec(key).map_err(ConflictableTransactionError::Abort)?)?
+            {
+                let deserialized: V =
+                    postcard::from_bytes(&value).map_err(ConflictableTransactionError::Abort)?;
+
+                if let Some(value) = table_related.get(
+                    postcard::to_stdvec(&deserialized.get_key(id))
+                        .map_err(ConflictableTransactionError::Abort)?,
+                )? {
+                    return Ok(Ok(Json(
+                        postcard::from_bytes(&value)
+                            .map_err(ConflictableTransactionError::Abort)?,
+                    )));
+                }
+            }
+
+            Ok(Err(StatusCode::NOT_FOUND))
+        })
+        .unwrap_or_else(|error| {
+            tracing::warn!("Unable to apply database transaction: {}", error);
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        })
+}
+
 #[tracing::instrument(skip(state), level = "debug")]
 pub(super) fn insert_item<K, V>(table: &str, state: AppState, key: &K, value: &V) -> StatusCode
 where
@@ -104,7 +166,7 @@ pub(super) fn insert_related_items<K, L, V, W>(
 where
     K: Serialize + Debug,
     L: Serialize + Debug,
-    V: Serialize + DeserializeOwned + RelatedTo + Debug,
+    V: Serialize + DeserializeOwned + RelatedToItemSet + Debug,
     W: Serialize + Debug,
 {
     let table_main = match state.database.open_tree(tables.0.as_bytes()) {
@@ -133,7 +195,7 @@ where
                 let deserialized: V =
                     postcard::from_bytes(&payload).map_err(ConflictableTransactionError::Abort)?;
 
-                for linked_key in deserialized.get_keys() {
+                for linked_key in deserialized.get_keys(tables.1) {
                     batch.remove(
                         postcard::to_stdvec(&linked_key)
                             .map_err(ConflictableTransactionError::Abort)?,
@@ -191,7 +253,7 @@ pub(super) fn remove_related_items<K, V>(
 ) -> StatusCode
 where
     K: Serialize + Debug,
-    V: Serialize + DeserializeOwned + RelatedTo + Debug,
+    V: Serialize + DeserializeOwned + RelatedToItemSet,
 {
     let table_main = match state.database.open_tree(tables.0.as_bytes()) {
         Ok(tree) => tree,
@@ -219,7 +281,7 @@ where
                         .map_err(ConflictableTransactionError::Abort)?;
 
                     let mut batch = Batch::default();
-                    for linked_key in deserialized.get_keys() {
+                    for linked_key in deserialized.get_keys(tables.1) {
                         batch.remove(
                             postcard::to_stdvec(&linked_key)
                                 .map_err(ConflictableTransactionError::Abort)?,

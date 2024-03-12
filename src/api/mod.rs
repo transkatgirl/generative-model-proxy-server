@@ -1,4 +1,8 @@
-use std::{clone::Clone, fmt::Debug, time::Instant};
+use std::{
+    clone::Clone,
+    fmt::Debug,
+    time::{Duration, Instant, SystemTime},
+};
 
 use axum::{
     extract::{Extension, Path, Request, State},
@@ -16,7 +20,9 @@ use uuid::Uuid;
 
 mod state;
 
-use state::RelatedTo;
+use state::RelatedToItemSet;
+
+use self::state::RelatedToItem;
 
 use super::{limiter::Limit, model::ModelBackend, AppState};
 
@@ -90,19 +96,10 @@ struct Quota {
     limits: Vec<Limit>,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
-struct LabelUpdateRequest {
-    label: String,
-    uuid: Uuid,
-}
-
 #[derive(Debug, Clone)]
 struct Authenticated {
     tags: Vec<Uuid>,
 }
-
-#[derive(Debug, PartialEq)]
-struct DatabaseTransactionError;
 
 #[tracing::instrument(level = "debug", skip(state))]
 pub async fn api_router(state: AppState) -> Router {
@@ -216,11 +213,66 @@ async fn model_request(
     todo!()
 }
 
-impl RelatedTo for User {
-    type Link = String;
+#[derive(Serialize, Deserialize)]
+#[serde(untagged)]
+enum StringOrUuid {
+    Uuid(Uuid),
+    String(String),
+}
 
-    fn get_keys(&self) -> Vec<Self::Link> {
-        self.api_keys.clone()
+impl RelatedToItemSet for User {
+    type Key = StringOrUuid;
+
+    fn get_keys(&self, table: &str) -> Vec<Self::Key> {
+        match table {
+            "roles" => self
+                .roles
+                .iter()
+                .map(|item| StringOrUuid::Uuid(*item))
+                .collect(),
+            "models" => self
+                .models
+                .iter()
+                .map(|item| StringOrUuid::Uuid(*item))
+                .collect(),
+            "quotas" => self
+                .quotas
+                .iter()
+                .map(|item| StringOrUuid::Uuid(item.quota))
+                .collect(),
+            _ => self
+                .api_keys
+                .iter()
+                .map(|item| StringOrUuid::String(item.clone()))
+                .collect(),
+        }
+    }
+}
+
+impl RelatedToItemSet for Role {
+    type Key = Uuid;
+
+    fn get_keys(&self, table: &str) -> Vec<Self::Key> {
+        match table {
+            "quotas" => self.quotas.iter().map(|item| item.quota).collect(),
+            _ => self.models.clone(),
+        }
+    }
+}
+
+impl RelatedToItemSet for Model {
+    type Key = Uuid;
+
+    fn get_keys(&self, _table: &str) -> Vec<Self::Key> {
+        self.quotas.iter().map(|item| item.quota).collect()
+    }
+}
+
+impl RelatedToItem for Uuid {
+    type Key = Uuid;
+
+    fn get_key(&self, _id: &str) -> Self::Key {
+        *self
     }
 }
 
@@ -454,11 +506,12 @@ async fn add_quota_put(State(state): State<AppState>, Json(payload): Json<Quota>
 async fn rename_quota(
     State(state): State<AppState>,
     Path(uuid): Path<Uuid>,
-    Json(payload): Json<LabelUpdateRequest>,
+    Json(mut payload): Json<Quota>,
 ) -> StatusCode {
     if payload.uuid != Uuid::default() && payload.uuid != uuid {
         return StatusCode::BAD_REQUEST;
     }
+    payload.uuid = uuid;
 
     todo!()
 }

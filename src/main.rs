@@ -1,8 +1,4 @@
-use std::{
-    collections::HashMap,
-    sync::Arc,
-    time::{Duration, Instant, SystemTime},
-};
+use std::{sync::Arc, time::Duration};
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -11,17 +7,15 @@ use opentelemetry_otlp::WithExportConfig;
 use opentelemetry_sdk::{trace, Resource};
 use reqwest::{Client, ClientBuilder};
 use sled::Db; // sled should probably be replaced with a proper database at some point. will need to write manual migrations when that time comes.
-use tokio::{
-    net::TcpListener,
-    sync::{Mutex, RwLock},
-};
+use tokio::net::TcpListener;
 use tracing::Level;
 use tracing_subscriber::{filter, layer::SubscriberExt, util::SubscriberInitExt};
-use uuid::Uuid;
 
 mod api;
 mod limiter;
 mod model;
+
+use limiter::LimiterClock;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about)]
@@ -40,7 +34,7 @@ struct Args {
 struct AppState {
     http: Client,
     database: Db,
-    clocks: Arc<RwLock<HashMap<Uuid, Mutex<Instant>>>>,
+    clock: Arc<LimiterClock>,
 }
 
 #[tokio::main]
@@ -94,7 +88,7 @@ async fn main() -> Result<()> {
             .build()
             .context("Unable to initalize HTTP client")?,
         database: sled::open(&args.database_file).context("Unable to initalize database")?,
-        clocks: Arc::new(RwLock::new(HashMap::new())),
+        clock: Arc::new(LimiterClock::new()),
     };
 
     let listener = TcpListener::bind(&args.bind_to)
