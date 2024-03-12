@@ -51,7 +51,7 @@ struct User {
     roles: Vec<Uuid>,
 
     models: Vec<Uuid>,
-    quotas: Vec<QuotaMember>,
+    quotas: Vec<Uuid>,
 }
 
 #[derive(Default, Serialize, Deserialize, Debug, Clone)]
@@ -63,7 +63,7 @@ struct Role {
     admin: bool,
 
     models: Vec<Uuid>,
-    quotas: Vec<QuotaMember>,
+    quotas: Vec<Uuid>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -74,9 +74,11 @@ struct Model {
     #[serde(default)]
     uuid: Uuid,
 
+    endpoints: Vec<String>,
+
     api: ModelBackend,
 
-    quotas: Vec<QuotaMember>,
+    quotas: Vec<Uuid>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -99,6 +101,10 @@ struct Quota {
 #[derive(Debug, Clone)]
 struct Authenticated {
     tags: Vec<Uuid>,
+    timestamp: Instant,
+
+    user: User,
+    roles: Vec<Role>,
 }
 
 #[tracing::instrument(level = "debug", skip(state))]
@@ -159,7 +165,7 @@ async fn authenticate(
     mut request: Request,
     next: Next,
 ) -> Result<Response, StatusCode> {
-    /*let arrived_at = Instant::now();
+    let arrived_at = Instant::now();
 
     if let Some(header_value) = request.headers().get("authorization") {
         match header_value.to_str() {
@@ -170,13 +176,17 @@ async fn authenticate(
                     .strip_prefix("basic ")
                     .or(header_string.strip_prefix("bearer "))
                 {
-                    Some(api_key) => match state.authenticate(api_key, arrived_at).await {
-                        Some(flattened_state) => {
-                            request.extensions_mut().insert(flattened_state);
-                            Ok(next.run(request).await)
-                        }
-                        None => Err(StatusCode::UNAUTHORIZED),
-                    },
+                    Some(api_key) => {
+                        /*match state.authenticate(api_key, arrived_at).await {
+                            Some(flattened_state) => {
+                                request.extensions_mut().insert(flattened_state);
+                                Ok(next.run(request).await)
+                            }
+                            None => Err(StatusCode::UNAUTHORIZED),
+                        },*/
+
+                        todo!()
+                    }
                     None => Err(StatusCode::UNAUTHORIZED),
                 }
             }
@@ -184,9 +194,7 @@ async fn authenticate(
         }
     } else {
         Err(StatusCode::UNAUTHORIZED)
-    }*/
-
-    todo!()
+    }
 }
 
 async fn authenticate_admin(
@@ -238,7 +246,7 @@ impl RelatedToItemSet for User {
             "quotas" => self
                 .quotas
                 .iter()
-                .map(|item| StringOrUuid::Uuid(item.quota))
+                .map(|item| StringOrUuid::Uuid(*item))
                 .collect(),
             _ => self
                 .api_keys
@@ -254,7 +262,7 @@ impl RelatedToItemSet for Role {
 
     fn get_keys(&self, table: &str) -> Vec<Self::Key> {
         match table {
-            "quotas" => self.quotas.iter().map(|item| item.quota).collect(),
+            "quotas" => self.quotas.clone(),
             _ => self.models.clone(),
         }
     }
@@ -264,7 +272,7 @@ impl RelatedToItemSet for Model {
     type Key = Uuid;
 
     fn get_keys(&self, _table: &str) -> Vec<Self::Key> {
-        self.quotas.iter().map(|item| item.quota).collect()
+        self.quotas.clone()
     }
 }
 
@@ -277,14 +285,14 @@ impl RelatedToItem for Uuid {
 }
 
 async fn get_users(State(state): State<AppState>) -> Result<Json<Vec<User>>, StatusCode> {
-    state::get_items("users", state)
+    state.get_items("users")
 }
 
 async fn get_user(
     State(state): State<AppState>,
     Path(uuid): Path<Uuid>,
 ) -> Result<Json<User>, StatusCode> {
-    state::get_item("users", state, &uuid)
+    state.get_item("users", &uuid)
 }
 
 async fn add_user_post(
@@ -302,9 +310,8 @@ async fn add_user_post(
         .map(|item| (item, payload.uuid))
         .collect();
 
-    let status = state::insert_related_items(
+    let status = state.insert_related_items(
         ("users", "api_keys"),
-        state,
         (&payload.uuid, &payload),
         &related_items,
     );
@@ -327,9 +334,8 @@ async fn add_user_put(State(state): State<AppState>, Json(payload): Json<User>) 
         .map(|item| (item, payload.uuid))
         .collect();
 
-    state::insert_related_items(
+    state.insert_related_items(
         ("users", "api_keys"),
-        state,
         (&payload.uuid, &payload),
         &related_items,
     )
@@ -351,9 +357,8 @@ async fn update_user(
         .map(|item| (item, payload.uuid))
         .collect();
 
-    state::insert_related_items(
+    state.insert_related_items(
         ("users", "api_keys"),
-        state,
         (&payload.uuid, &payload),
         &related_items,
     )
@@ -361,18 +366,18 @@ async fn update_user(
 
 #[tracing::instrument(skip(state), level = "debug")]
 async fn delete_user(State(state): State<AppState>, Path(uuid): Path<Uuid>) -> StatusCode {
-    state::remove_related_items::<_, User>(("users", "api_keys"), state, &uuid)
+    state.remove_related_items::<_, User>(("users", "api_keys"), &uuid)
 }
 
 async fn get_roles(State(state): State<AppState>) -> Result<Json<Vec<Role>>, StatusCode> {
-    state::get_items("roles", state)
+    state.get_items("roles")
 }
 
 async fn get_role(
     State(state): State<AppState>,
     Path(uuid): Path<Uuid>,
 ) -> Result<Json<Role>, StatusCode> {
-    state::get_item("roles", state, &uuid)
+    state.get_item("roles", &uuid)
 }
 
 async fn add_role_post(
@@ -384,7 +389,7 @@ async fn add_role_post(
     }
     payload.uuid = Uuid::new_v4();
 
-    let status = state::insert_item("roles", state, &payload.uuid, &payload);
+    let status = state.insert_item("roles", &payload.uuid, &payload);
 
     if status.is_success() {
         Ok(Json(payload.uuid))
@@ -398,7 +403,7 @@ async fn add_role_put(State(state): State<AppState>, Json(payload): Json<Role>) 
         return StatusCode::BAD_REQUEST;
     }
 
-    state::insert_item("roles", state, &payload.uuid, &payload)
+    state.insert_item("roles", &payload.uuid, &payload)
 }
 
 async fn update_role(
@@ -411,22 +416,22 @@ async fn update_role(
     }
     payload.uuid = uuid;
 
-    state::insert_item("roles", state, &payload.uuid, &payload)
+    state.insert_item("roles", &payload.uuid, &payload)
 }
 
 async fn delete_role(State(state): State<AppState>, Path(uuid): Path<Uuid>) -> StatusCode {
-    state::remove_item("roles", state, &uuid)
+    state.remove_item("roles", &uuid)
 }
 
 async fn get_models(State(state): State<AppState>) -> Result<Json<Vec<Model>>, StatusCode> {
-    state::get_items("models", state)
+    state.get_items("models")
 }
 
 async fn get_model(
     State(state): State<AppState>,
     Path(uuid): Path<Uuid>,
 ) -> Result<Json<Model>, StatusCode> {
-    state::get_item("models", state, &uuid)
+    state.get_item("models", &uuid)
 }
 
 async fn add_model_post(
@@ -438,7 +443,7 @@ async fn add_model_post(
     }
     payload.uuid = Uuid::new_v4();
 
-    let status = state::insert_item("models", state, &payload.uuid, &payload);
+    let status = state.insert_item("models", &payload.uuid, &payload);
 
     if status.is_success() {
         Ok(Json(payload.uuid))
@@ -452,7 +457,7 @@ async fn add_model_put(State(state): State<AppState>, Json(payload): Json<Model>
         return StatusCode::BAD_REQUEST;
     }
 
-    state::insert_item("models", state, &payload.uuid, &payload)
+    state.insert_item("models", &payload.uuid, &payload)
 }
 
 async fn update_model(
@@ -465,22 +470,22 @@ async fn update_model(
     }
     payload.uuid = uuid;
 
-    state::insert_item("models", state, &payload.uuid, &payload)
+    state.insert_item("models", &payload.uuid, &payload)
 }
 
 async fn delete_model(State(state): State<AppState>, Path(uuid): Path<Uuid>) -> StatusCode {
-    state::remove_item("models", state, &uuid)
+    state.remove_item("models", &uuid)
 }
 
 async fn get_quotas(State(state): State<AppState>) -> Result<Json<Vec<Quota>>, StatusCode> {
-    state::get_items("quotas", state)
+    state.get_items("quotas")
 }
 
 async fn get_quota(
     State(state): State<AppState>,
     Path(uuid): Path<Uuid>,
 ) -> Result<Json<Quota>, StatusCode> {
-    state::get_item("quotas", state, &uuid)
+    state.get_item("quotas", &uuid)
 }
 
 async fn add_quota_post(
@@ -492,7 +497,7 @@ async fn add_quota_post(
     }
     payload.uuid = Uuid::new_v4();
 
-    let status = state::insert_item("quotas", state, &payload.uuid, &payload);
+    let status = state.insert_item("quotas", &payload.uuid, &payload);
 
     if status.is_success() {
         Ok(Json(payload.uuid))
@@ -506,7 +511,7 @@ async fn add_quota_put(State(state): State<AppState>, Json(payload): Json<Quota>
         return StatusCode::BAD_REQUEST;
     }
 
-    state::insert_item("quotas", state, &payload.uuid, &payload)
+    state.insert_item("quotas", &payload.uuid, &payload)
 }
 
 async fn update_quota(
@@ -519,9 +524,9 @@ async fn update_quota(
     }
     payload.uuid = uuid;
 
-    state::insert_item("quotas", state, &payload.uuid, &payload)
+    state.insert_item("quotas", &payload.uuid, &payload)
 }
 
 async fn delete_quota(State(state): State<AppState>, Path(uuid): Path<Uuid>) -> StatusCode {
-    state::remove_item("quotas", state, &uuid)
+    state.remove_item("quotas", &uuid)
 }
