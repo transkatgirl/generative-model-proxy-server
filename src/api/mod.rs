@@ -141,7 +141,7 @@ pub async fn api_router(state: AppState) -> Router {
         )
         .route(
             "/quotas/:uuid",
-            get(get_quota).patch(rename_quota).delete(delete_quota),
+            get(get_quota).patch(update_quota).delete(delete_quota),
         )
         .with_state(state.clone())
         .route_layer(middleware::from_fn(authenticate_admin));
@@ -492,7 +492,13 @@ async fn add_quota_post(
     }
     payload.uuid = Uuid::new_v4();
 
-    todo!()
+    let status = state::insert_item("quotas", state, &payload.uuid, &payload);
+
+    if status.is_success() {
+        Ok(Json(payload.uuid))
+    } else {
+        Err(status)
+    }
 }
 
 async fn add_quota_put(State(state): State<AppState>, Json(payload): Json<Quota>) -> StatusCode {
@@ -500,10 +506,10 @@ async fn add_quota_put(State(state): State<AppState>, Json(payload): Json<Quota>
         return StatusCode::BAD_REQUEST;
     }
 
-    todo!()
+    state::insert_item("quotas", state, &payload.uuid, &payload)
 }
 
-async fn rename_quota(
+async fn update_quota(
     State(state): State<AppState>,
     Path(uuid): Path<Uuid>,
     Json(mut payload): Json<Quota>,
@@ -513,9 +519,9 @@ async fn rename_quota(
     }
     payload.uuid = uuid;
 
-    todo!()
+    state::insert_item("quotas", state, &payload.uuid, &payload)
 }
 
 async fn delete_quota(State(state): State<AppState>, Path(uuid): Path<Uuid>) -> StatusCode {
-    todo!()
+    state::remove_item("quotas", state, &uuid)
 }
