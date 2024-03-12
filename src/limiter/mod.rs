@@ -6,7 +6,6 @@ use std::{
 
 use gcra::{GcraError, GcraState, RateLimit};
 use serde::{Deserialize, Serialize};
-use tokio::time;
 use tracing::{event, Level};
 use uuid::Uuid;
 
@@ -46,7 +45,7 @@ struct LimiterState {
 }
 
 impl LimiterState {
-    #[tracing::instrument(skip(clock), level = "trace")]
+    #[tracing::instrument(skip(clock), level = "trace", ret)]
     fn from_monotonic(clock: &LimiterClock, timestamp: Instant) -> LimiterState {
         LimiterState {
             uuid: clock.uuid,
@@ -55,7 +54,7 @@ impl LimiterState {
         }
     }
 
-    #[tracing::instrument(skip(clock), level = "trace")]
+    #[tracing::instrument(skip(clock), level = "trace", ret)]
     fn to_monotonic(&self, clock: &LimiterClock) -> Instant {
         match self.uuid == clock.uuid {
             true => match self.monotonic {
@@ -90,9 +89,16 @@ pub(super) struct Response {
     pub(super) actual_tokens: u32,
 }
 
+#[derive(Debug)]
+pub(super) enum LimiterResult {
+    Ready,
+    WaitUntil(Instant),
+    Oversized,
+}
+
 impl Limit {
-    #[tracing::instrument(skip(clock), level = "debug")]
-    pub(super) async fn request(&mut self, clock: &LimiterClock, request: &Request) -> bool {
+    #[tracing::instrument(skip(clock), level = "debug", ret)]
+    pub(super) fn request(&mut self, clock: &LimiterClock, request: &Request) -> LimiterResult {
         let mut state = GcraState {
             tat: self.state.map(|state| state.to_monotonic(clock)),
         };
@@ -102,31 +108,30 @@ impl Limit {
             LimitItem::Token => request.estimated_tokens,
         };
 
-        match state.check_and_modify_at(&rate_limit, request.arrived_at, cost) {
-            Ok(_) => {}
+        let result = match state.check_and_modify_at(&rate_limit, request.arrived_at, cost) {
+            Ok(_) => LimiterResult::Ready,
             Err(GcraError::DeniedUntil { next_allowed_at }) => {
-                time::sleep_until(time::Instant::from_std(next_allowed_at)).await;
                 state.tat = Some(next_allowed_at + rate_limit.period);
+
+                LimiterResult::WaitUntil(next_allowed_at)
             }
             Err(GcraError::DeniedIndefinitely {
                 cost: _,
                 rate_limit: _,
-            }) => {
-                return false;
-            }
-        }
+            }) => return LimiterResult::Oversized,
+        };
 
         self.state = state
             .tat
             .map(|timestamp| LimiterState::from_monotonic(clock, timestamp));
 
-        true
+        result
     }
 
-    #[tracing::instrument(skip(clock), level = "debug")]
-    pub(super) async fn response(&mut self, clock: &LimiterClock, response: Response) {
+    #[tracing::instrument(skip(clock), level = "debug", ret)]
+    pub(super) fn response(&mut self, clock: &LimiterClock, response: Response) -> LimiterResult {
         if let LimitItem::Request = self.r#type {
-            return;
+            return LimiterResult::Ready;
         }
 
         let mut state = GcraState {
@@ -134,17 +139,21 @@ impl Limit {
         };
         let rate_limit = RateLimit::new(self.count, self.per);
 
-        match response
+        let result = match response
             .request
             .estimated_tokens
             .cmp(&response.actual_tokens)
         {
             Ordering::Greater => {
-                let excess_cost = response.request.estimated_tokens - response.actual_tokens;
+                let _ = state.revert_at(
+                    &rate_limit,
+                    response.request.arrived_at,
+                    response.request.estimated_tokens - response.actual_tokens,
+                );
 
-                let _ = state.revert_at(&rate_limit, response.request.arrived_at, excess_cost);
+                LimiterResult::Ready
             }
-            Ordering::Equal => {}
+            Ordering::Equal => LimiterResult::Ready,
             Ordering::Less => {
                 event!(
                     Level::WARN,
@@ -154,16 +163,48 @@ impl Limit {
                 );
                 let cost = response.actual_tokens - response.request.estimated_tokens;
 
-                if let Err(GcraError::DeniedUntil { next_allowed_at }) =
-                    state.check_and_modify_at(&rate_limit, response.request.arrived_at, cost)
-                {
-                    time::sleep_until(time::Instant::from_std(next_allowed_at)).await;
+                match state.check_and_modify_at(&rate_limit, response.request.arrived_at, cost) {
+                    Ok(_) => LimiterResult::Ready,
+                    Err(GcraError::DeniedUntil { next_allowed_at }) => {
+                        state.tat = Some(next_allowed_at + rate_limit.period);
+
+                        LimiterResult::WaitUntil(next_allowed_at)
+                    }
+                    Err(GcraError::DeniedIndefinitely {
+                        cost: _,
+                        rate_limit: _,
+                    }) => {
+                        event!(
+                            Level::WARN,
+                            "Request had greater final token count ({}) than rate limiter maximum of {}!",
+                            response.actual_tokens,
+                            rate_limit.resource_limit,
+                        );
+                        match state.check_and_modify_at(
+                            &rate_limit,
+                            response.request.arrived_at,
+                            rate_limit.resource_limit,
+                        ) {
+                            Ok(_) => LimiterResult::Ready,
+                            Err(GcraError::DeniedUntil { next_allowed_at }) => {
+                                state.tat = Some(next_allowed_at + rate_limit.period);
+
+                                LimiterResult::WaitUntil(next_allowed_at)
+                            }
+                            Err(GcraError::DeniedIndefinitely {
+                                cost: _,
+                                rate_limit: _,
+                            }) => LimiterResult::Oversized,
+                        }
+                    }
                 }
             }
-        }
+        };
 
         self.state = state
             .tat
             .map(|timestamp| LimiterState::from_monotonic(clock, timestamp));
+
+        result
     }
 }
