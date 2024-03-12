@@ -11,7 +11,7 @@ use uuid::Uuid;
 
 // TODO: Perform rate-limiting based on headers, support Audio models
 
-#[instrument(level = "trace")]
+#[instrument(level = "trace", ret)]
 fn get_prompt_count(prompt: &Value) -> usize {
     match prompt {
         Value::Array(array) => {
@@ -30,7 +30,7 @@ fn get_prompt_count(prompt: &Value) -> usize {
     }
 }
 
-#[instrument(level = "trace")]
+#[instrument(level = "trace", ret)]
 fn get_usage(response: &Value) -> Option<TokenUsage> {
     if let Value::Object(data) = response {
         if let Some(Value::Object(usage)) = data.get("usage") {
@@ -77,7 +77,7 @@ pub(super) struct TaggedModelRequest {
 }
 
 impl TaggedModelRequest {
-    #[instrument(level = "trace")]
+    #[instrument(level = "trace", ret)]
     pub(super) fn new(tags: Arc<Vec<Uuid>>, mut request: Value) -> TaggedModelRequest {
         if let Some(request) = request.as_object_mut() {
             match tags.first() {
@@ -96,14 +96,14 @@ impl TaggedModelRequest {
         TaggedModelRequest { tags, request }
     }
 
-    #[instrument(level = "trace")]
+    #[instrument(level = "trace", ret)]
     pub(super) fn get_model(&self) -> Option<&str> {
         self.request
             .as_object()
             .and_then(|request| request.get("model").and_then(|value| value.as_str()))
     }
 
-    #[instrument(level = "trace")]
+    #[instrument(level = "trace", ret)]
     pub(super) fn get_count(&self) -> usize {
         match &self.request {
             Value::Object(request) => {
@@ -132,7 +132,7 @@ impl TaggedModelRequest {
         }
     }
 
-    #[instrument(level = "trace")]
+    #[instrument(level = "trace", ret)]
     pub(super) fn get_max_tokens(&self) -> Option<u64> {
         if let Value::Object(request) = &self.request {
             request
@@ -278,7 +278,7 @@ struct OpenAIModelBackend {
 }
 
 impl ModelBackend {
-    #[instrument(level = "trace")]
+    #[instrument(level = "trace", ret)]
     pub(super) fn get_max_tokens(&self) -> Option<u64> {
         match &self {
             Self::OpenAI(backend) => backend.model_context_len,
@@ -286,7 +286,7 @@ impl ModelBackend {
         }
     }
 
-    #[instrument(level = "debug")]
+    #[instrument(level = "debug", ret)]
     pub(super) async fn generate(
         &self,
         http_client: &Client,

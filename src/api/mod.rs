@@ -20,9 +20,7 @@ use uuid::Uuid;
 
 mod state;
 
-use state::RelatedToItemSet;
-
-use self::state::RelatedToItem;
+use state::{RelatedToItem, RelatedToItemSet};
 
 use super::{limiter::Limit, model::ModelBackend, AppState};
 
@@ -100,9 +98,7 @@ struct Quota {
 
 #[derive(Debug, Clone)]
 struct Authenticated {
-    tags: Vec<Uuid>,
     timestamp: Instant,
-
     user: User,
     roles: Vec<Role>,
 }
@@ -149,23 +145,23 @@ pub async fn api_router(state: AppState) -> Router {
             "/quotas/:uuid",
             get(get_quota).patch(update_quota).delete(delete_quota),
         )
-        .with_state(state.clone())
         .route_layer(middleware::from_fn(authenticate_admin));
 
     Router::new()
         .nest("/v1/", openai_routes)
         .nest("/admin", admin_routes)
+        .with_state(state.clone())
         .route_layer(middleware::from_fn_with_state(state, authenticate))
         .layer(TraceLayer::new_for_http())
 }
 
-//#[tracing::instrument(level = "debug", skip(state))]
+#[tracing::instrument(level = "trace", skip(state), ret)]
 async fn authenticate(
     State(state): State<AppState>,
     mut request: Request,
     next: Next,
 ) -> Result<Response, StatusCode> {
-    let arrived_at = Instant::now();
+    let timestamp = Instant::now();
 
     if let Some(header_value) = request.headers().get("authorization") {
         match header_value.to_str() {
@@ -177,15 +173,31 @@ async fn authenticate(
                     .or(header_string.strip_prefix("bearer "))
                 {
                     Some(api_key) => {
-                        /*match state.authenticate(api_key, arrived_at).await {
-                            Some(flattened_state) => {
-                                request.extensions_mut().insert(flattened_state);
+                        match state
+                            .get_related_item::<_, Uuid, User>(("api_keys", "users"), &api_key)
+                        {
+                            Ok(Json(user)) => {
+                                let roles: Vec<Role> = user
+                                    .roles
+                                    .iter()
+                                    .filter_map(|uuid| {
+                                        state.get_item("roles", uuid).map(|item| item.0).ok()
+                                    })
+                                    .collect();
+
+                                request.extensions_mut().insert(Authenticated {
+                                    timestamp,
+                                    user,
+                                    roles,
+                                });
                                 Ok(next.run(request).await)
                             }
-                            None => Err(StatusCode::UNAUTHORIZED),
-                        },*/
-
-                        todo!()
+                            Err(status) => Err(if status.is_client_error() {
+                                StatusCode::UNAUTHORIZED
+                            } else {
+                                status
+                            }),
+                        }
                     }
                     None => Err(StatusCode::UNAUTHORIZED),
                 }
@@ -197,21 +209,29 @@ async fn authenticate(
     }
 }
 
+#[tracing::instrument(level = "trace", skip(auth), ret)]
 async fn authenticate_admin(
-    Extension(state): Extension<Authenticated>,
+    Extension(auth): Extension<Authenticated>,
     request: Request,
     next: Next,
 ) -> Result<Response, StatusCode> {
-    /*match state.admin {
-        true => Ok(next.run(request).await),
-        false => Err(StatusCode::UNAUTHORIZED),
-    }*/
+    if auth.user.admin {
+        return Ok(next.run(request).await);
+    }
 
-    todo!()
+    for role in auth.roles {
+        if role.admin {
+            return Ok(next.run(request).await);
+        }
+    }
+
+    Err(StatusCode::UNAUTHORIZED)
 }
 
+#[tracing::instrument(level = "trace", skip(state), ret)]
 async fn model_request(
-    Extension(state): Extension<Authenticated>,
+    Extension(auth): Extension<Authenticated>,
+    State(state): State<AppState>,
     Json(payload): Json<Value>,
 ) -> (StatusCode, Json<Value>) {
     /*let response = state.model_request(payload).await;

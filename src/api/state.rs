@@ -80,7 +80,6 @@ impl AppState {
     pub(super) fn get_related_item<K, V, W>(
         &self,
         tables: (&str, &str),
-        id: &str,
         key: &K,
     ) -> Result<Json<W>, StatusCode>
     where
@@ -113,7 +112,7 @@ impl AppState {
                         .map_err(ConflictableTransactionError::Abort)?;
 
                     if let Some(value) = table_related.get(
-                        postcard::to_stdvec(&deserialized.get_key(id))
+                        postcard::to_stdvec(&deserialized.get_key(tables.1))
                             .map_err(ConflictableTransactionError::Abort)?,
                     )? {
                         return Ok(Ok(Json(
