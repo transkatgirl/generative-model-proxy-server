@@ -231,12 +231,17 @@ async fn model_request(
     State(state): State<AppState>,
     request: Result<TaggedModelRequest, ModelError>,
 ) -> Result<ModelResponse, ModelError> {
-    let request = match request {
+    let mut request = match request {
         Ok(request) => request,
         Err(error) => return Err(error),
     };
 
-    let models = auth
+    let label = match request.get_model() {
+        Some(label) => label,
+        None => return Err(ModelError::UnspecifiedModel),
+    };
+
+    let model = match auth
         .user
         .models
         .iter()
@@ -247,36 +252,32 @@ async fn model_request(
                 .map(|item| item.0)
                 .ok()
         })
-        .filter(|model| model.types.contains(&request.r#type));
+        .find(|model| model.types.contains(&request.r#type) && model.label == label)
+    {
+        Some(model) => model,
+        None => return Err(ModelError::UnknownModel),
+    };
 
-    let quotas = auth
+    let quotas: Vec<Uuid> = auth
         .user
         .quotas
         .iter()
-        .chain(auth.roles.iter().flat_map(|role| role.quotas.iter()));
+        .chain(auth.roles.iter().flat_map(|role| role.quotas.iter()))
+        .chain(model.quotas.iter())
+        .copied()
+        .collect();
 
-    let tags = iter::once(auth.user.uuid)
-        .chain(auth.user.roles.iter().copied())
-        .chain(auth.user.quotas.iter().copied())
-        .chain(
-            auth.roles
-                .iter()
-                .flat_map(|role| role.quotas.iter().copied()),
-        );
-
-    //let request = TaggedModelRequest::from(value)
-
-    /*for model in models {
-        if model.label =
-    }*/
+    request.tags = iter::once(auth.user.uuid)
+        .chain(auth.roles.iter().map(|role| role.uuid))
+        .chain(quotas.iter().cloned())
+        .chain(iter::once(model.uuid))
+        .collect();
 
     // TODO: Add rate limiting
 
-    /*let response = state.model_request(payload).await;
+    let response = model.api.generate(&state.http, request).await;
 
-    (response.0, Json(response.1))*/
-
-    todo!()
+    Ok(response)
 }
 
 #[async_trait]
