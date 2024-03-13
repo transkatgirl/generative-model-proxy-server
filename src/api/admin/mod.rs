@@ -2,7 +2,7 @@ use axum::{
     extract::{Path, State},
     http::StatusCode,
     middleware,
-    response::{IntoResponse, Response},
+    response::{Html, IntoResponse, Response},
     routing::get,
     Json, Router,
 };
@@ -48,6 +48,11 @@ pub fn admin_router() -> Router<AppState> {
         .route(
             "/quotas/:uuid",
             get(get_quota).patch(update_quota).delete(delete_quota),
+        )
+        .route("/setup-instructions", get(Html(include_str!("setup.html"))))
+        .route(
+            "/documentation",
+            get(Html(include_str!("documentation.html"))),
         )
         .fallback(StatusCode::NOT_FOUND)
         .layer(middleware::from_fn(super::authenticate_admin))

@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width,initial-scale=1">
+	<title>Setup instructions</title>
+</head>
+
+<body>
+	<h1>First-time Setup Instructions</h1>
+	<p>When first configuring your proxy server, you will need to add an administrator user <em>before</em>
+		performing any further actions on the
+		<code>/admin/</code>
+		API. The first-time setup API key will be
+		<strong>immediately</strong>
+		disabled once any items have been added to the database.
+	</p>
+	<p>You can add your first administrator user using the following <code>curl</code> command:</p>
+	<pre>
+<code id="line-1">curl http://localhost:8080/admin/users \</code>
+<code>	--header "Authorization: Bearer setup-key" \</code>
+<code>	--json \</code>
+<code>	'{</code>
+<code>		"label": "Administrator",</code>
+<code>		"api_keys": [</code>
+<code id="line-7">			"YOUR_API_KEY_GOES_HERE"</code>
+<code>		],</code>
+<code>		"admin": true</code>
+<code>	}'</code>
+	</pre>
+	<p>
+		After running this command,
+		<strong>save your API key in a secure place</strong>.
+		After leaving or refereshing this page,
+		<strong>you will not be able to recover it without resetting the database</strong>.
+	</p>
+	<p id="key-reminder">After adding a user, please see <a href="./documentation">the proxy's documentation</a> for
+		more information regarding setup.</p>
+	<script>
+		document.getElementById("line-1").innerText = "curl " + new URL("./users", new URL(window.location.pathname, window.location.origin).href) + " \\";
+
+		function dec2base32(dec) {
+			return dec.toString(32).padStart(2, "0");
+		}
+
+		function generateKey(len) {
+			var arr = new Uint8Array((len || 40) / 2);
+			window.crypto.getRandomValues(arr);
+			return Array.from(arr, dec2base32).join('');
+		}
+
+		var api_key = generateKey(32);
+		document.getElementById("line-7").innerText = "			\"" + api_key + "\"";
+		document.getElementById("key-reminder").innerHTML = "The API key of your added user will be <code>" + api_key + "</code>. " + document.getElementById("key-reminder").innerHTML;
+	</script>
+</body>

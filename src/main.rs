@@ -2,6 +2,7 @@ use std::{sync::Arc, time::Duration};
 
 use anyhow::{Context, Result};
 use clap::Parser;
+use http::uri::{Authority, Parts, PathAndQuery, Scheme, Uri};
 use opentelemetry::KeyValue;
 use opentelemetry_otlp::WithExportConfig;
 use opentelemetry_sdk::{trace, Resource};
@@ -96,6 +97,20 @@ async fn main() -> Result<()> {
     let listener = TcpListener::bind(&args.bind_to)
         .await
         .with_context(|| format!("Failed to bind HTTP server to {}", &args.bind_to))?;
+
+    if state.is_database_empty() {
+        let mut parts = Parts::default();
+        parts.scheme = Some(Scheme::HTTP);
+        parts.authority = Authority::try_from(args.bind_to.clone()).ok();
+        parts.path_and_query = Some(PathAndQuery::from_static("/admin/setup-instructions"));
+
+        let uri = match Uri::from_parts(parts) {
+            Ok(uri) => format!("{}", uri),
+            Err(_) => "/admin/setup-instructions".to_string(),
+        };
+
+        tracing::warn!("It looks like your database is empty. Please see {} (login with a blank username and \"setup-key\" as the password) for more information.", uri)
+    }
 
     axum::serve(listener, api::api_router(state))
         .with_graceful_shutdown(async move {

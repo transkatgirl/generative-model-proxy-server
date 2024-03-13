@@ -45,7 +45,7 @@ pub(super) enum DatabaseFunctionResult<T, E> {
 
 impl AppState {
     #[tracing::instrument(skip(self), level = "debug")]
-    pub(super) fn is_database_empty(&self) -> bool {
+    pub fn is_database_empty(&self) -> bool {
         self.database.tree_names().len() < 2
     }
 

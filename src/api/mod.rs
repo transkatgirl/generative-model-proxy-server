@@ -18,6 +18,7 @@ use http::{
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::time;
+use tower::ServiceBuilder;
 use tower_http::trace::TraceLayer;
 use uuid::Uuid;
 
@@ -101,18 +102,17 @@ struct Authenticated {
 
 #[tracing::instrument(level = "debug", skip(state))]
 pub fn api_router(state: AppState) -> Router {
-    if state.is_database_empty() {
-        tracing::warn!("It looks like your database is empty. Please use the /admin/ API to create your first administrator user using the API key \"setup-key\". Once the database is no longer empty, this API key will automatically be disabled.")
-    }
-
     Router::new()
         .fallback(model_request)
         .nest("/admin", admin::admin_router())
         .with_state(state.clone())
-        .layer(DefaultBodyLimit::max(16_777_216))
-        .layer(middleware::from_fn_with_state(state, authenticate))
-        .layer(middleware::map_response(modify_response))
-        .layer(TraceLayer::new_for_http())
+        .layer(
+            ServiceBuilder::new()
+                .layer(DefaultBodyLimit::max(16_777_216))
+                .layer(TraceLayer::new_for_http())
+                .layer(middleware::map_response(modify_response))
+                .layer(middleware::from_fn_with_state(state, authenticate)),
+        )
 }
 
 #[tracing::instrument(level = "trace", skip(state), ret)]
