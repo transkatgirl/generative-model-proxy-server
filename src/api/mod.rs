@@ -28,7 +28,7 @@ use state::{RelatedToItem, RelatedToItemSet};
 
 use crate::limiter::{self, LimiterResult};
 
-use self::state::{DatabaseActionResult, DatabaseFunctionResult, DatabaseValueResult};
+use self::state::{DatabaseFunctionResult, DatabaseValueResult};
 
 use super::{
     limiter::Limit,
@@ -94,6 +94,7 @@ struct Quota {
 #[derive(Debug, Clone)]
 struct Authenticated {
     timestamp: Instant,
+    admin: bool,
     user: User,
     roles: Vec<Role>,
 }
@@ -101,26 +102,7 @@ struct Authenticated {
 #[tracing::instrument(level = "debug", skip(state))]
 pub fn api_router(state: AppState) -> Router {
     if state.is_database_empty() {
-        let setup_user = User {
-            label: "setup-user".to_string(),
-            uuid: Uuid::new_v4(),
-            admin: true,
-            api_keys: vec![format!("{}", Uuid::new_v4())],
-            roles: Vec::new(),
-            models: Vec::new(),
-            quotas: Vec::new(),
-        };
-
-        if let DatabaseActionResult::Success = state.insert_related_items(
-            ("users", "api_keys"),
-            (&setup_user.uuid, &setup_user),
-            &[(setup_user.api_keys[0].clone(), setup_user.uuid)],
-        ) {
-            tracing::info!(
-                "Added administrator API key {}. Please use the /admin/ API to configure your proxy.",
-                setup_user.api_keys[0]
-            )
-        }
+        tracing::warn!("It looks like your database is empty. Please use the /admin/ API to create your first administrator user using the API key \"setup-key\". Once the database is no longer empty, this API key will automatically be disabled.")
     }
 
     Router::new()
@@ -162,12 +144,32 @@ async fn authenticate(
             })
         }) {
         Some(api_key) => {
+            if state.is_database_empty() && api_key == "setup-key" {
+                request.extensions_mut().insert(Authenticated {
+                    timestamp,
+                    admin: true,
+                    user: User::default(),
+                    roles: Vec::new(),
+                });
+
+                return Ok(next.run(request).await);
+            }
+
             match state.get_related_item::<_, Uuid, User>(("api_keys", "users"), &api_key) {
                 DatabaseValueResult::Success(user) => {
-                    match state.get_items_skip_missing("roles", &user.roles) {
+                    match state.get_items_skip_missing::<_, Role>("roles", &user.roles) {
                         DatabaseValueResult::Success(roles) => {
+                            let mut admin = user.admin;
+
+                            for role in &roles {
+                                if role.admin {
+                                    admin = true;
+                                }
+                            }
+
                             request.extensions_mut().insert(Authenticated {
                                 timestamp,
+                                admin,
                                 user,
                                 roles,
                             })
@@ -192,14 +194,8 @@ async fn authenticate_admin(
     request: Request,
     next: Next,
 ) -> Result<Response, ModelError> {
-    if auth.user.admin {
+    if auth.admin {
         return Ok(next.run(request).await);
-    }
-
-    for role in auth.roles {
-        if role.admin {
-            return Ok(next.run(request).await);
-        }
     }
 
     Err(ModelError::UnknownEndpoint)
@@ -234,16 +230,22 @@ async fn model_request(
         None => return Err(ModelError::UnspecifiedModel),
     };
 
-    let model = match state.get_items_skip_missing::<_, Model>(
-        "models",
-        &auth
-            .user
-            .models
-            .iter()
-            .chain(auth.roles.iter().flat_map(|role| role.models.iter()))
-            .cloned()
-            .collect::<Vec<_>>(),
-    ) {
+    let models_result = if auth.admin {
+        state.get_table("models")
+    } else {
+        state.get_items_skip_missing::<_, Model>(
+            "models",
+            &auth
+                .user
+                .models
+                .iter()
+                .chain(auth.roles.iter().flat_map(|role| role.models.iter()))
+                .cloned()
+                .collect::<Vec<_>>(),
+        )
+    };
+
+    let model = match models_result {
         DatabaseValueResult::Success(models) => match models
             .iter()
             .find(|model| model.types.contains(&request.r#type) && model.label == label)
