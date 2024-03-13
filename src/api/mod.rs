@@ -74,10 +74,12 @@ struct Model {
     #[serde(default)]
     uuid: Uuid,
 
+    name: String,
     types: Vec<RequestType>,
 
     api: ModelBackend,
 
+    #[serde(default)]
     quotas: Vec<Uuid>,
 }
 
@@ -225,8 +227,8 @@ async fn model_request(
         Err(error) => return Err(error),
     };
 
-    let label = match request.get_model() {
-        Some(label) => label,
+    let model_name = match request.get_model() {
+        Some(model_name) => model_name,
         None => return Err(ModelError::UnspecifiedModel),
     };
 
@@ -248,7 +250,7 @@ async fn model_request(
     let model = match models_result {
         DatabaseValueResult::Success(models) => match models
             .iter()
-            .find(|model| model.types.contains(&request.r#type) && model.label == label)
+            .find(|model| model.types.contains(&request.r#type) && model.name == model_name)
         {
             Some(model) => model.clone(),
             None => return Err(ModelError::UnknownModel),

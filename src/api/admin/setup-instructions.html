@@ -17,7 +17,7 @@
 	</p>
 	<p>You can add your first administrator user using the following <code>curl</code> command:</p>
 	<pre>
-<code id="line-1">curl http://localhost:8080/admin/users \</code>
+<code id="line-1">curl http://127.0.0.1:8080/admin/users \</code>
 <code>	--header "Authorization: Bearer setup-key" \</code>
 <code>	--json \</code>
 <code>	'{</code>
@@ -32,9 +32,9 @@
 		After running this command,
 		<strong>save your API key in a secure place</strong>.
 		After leaving or refereshing this page,
-		<strong>you will not be able to recover it without resetting the database</strong>.
+		<strong>you will not be able to easily recover it without resetting the database</strong>.
 	</p>
-	<p id="key-reminder">After adding a user, please see <a href="./documentation">the proxy's documentation</a> for
+	<p id="key-reminder">After adding a user, please see <a href="./manual">the proxy's documentation</a> for
 		more information regarding setup.</p>
 	<script>
 		document.getElementById("line-1").innerText = "curl " + new URL("./users", new URL(window.location.pathname, window.location.origin).href) + " \\";

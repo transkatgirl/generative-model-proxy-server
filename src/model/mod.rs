@@ -313,7 +313,6 @@ pub(super) enum ModelError {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
-#[serde(tag = "type")]
 #[allow(private_interfaces)]
 pub(super) enum ModelBackend {
     OpenAI(OpenAIModelBackend),
