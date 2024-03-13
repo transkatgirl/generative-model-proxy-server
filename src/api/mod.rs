@@ -3,15 +3,14 @@ use std::{clone::Clone, fmt::Debug, iter, time::Instant};
 use axum::{
     async_trait,
     body::{self, Bytes},
-    extract::{Extension, FromRequest, Multipart, Path, Request, State},
+    extract::{Extension, FromRequest, Multipart, Request, State},
     http::StatusCode,
     middleware::{self, Next},
     response::{IntoResponse, Response},
-    routing::{get, post},
     Form, Json, Router,
 };
 
-use base64::{engine::general_purpose::STANDARD, Engine};
+use fast32::base64::RFC4648;
 use http::{
     header::{AUTHORIZATION, CONTENT_TYPE},
     Method,
@@ -22,13 +21,14 @@ use tokio::time;
 use tower_http::trace::TraceLayer;
 use uuid::Uuid;
 
+mod admin;
 mod state;
 
 use state::{RelatedToItem, RelatedToItemSet};
 
 use crate::limiter::{self, LimiterResult};
 
-use self::state::{DatabaseActionResult, DatabaseFunctionResult, DatabaseValueResult};
+use self::state::{DatabaseFunctionResult, DatabaseValueResult};
 
 use super::{
     limiter::Limit,
@@ -37,10 +37,6 @@ use super::{
 };
 
 // TODO: Add API documentation
-
-// TODO: Separate admin routes into separate file
-
-// TODO: Look into async version of base64 library
 
 // TODO: Increase max body size
 
@@ -105,46 +101,10 @@ struct Authenticated {
 }
 
 #[tracing::instrument(level = "debug", skip(state))]
-pub async fn api_router(state: AppState) -> Router {
-    let admin_routes = Router::new()
-        .route(
-            "/users",
-            get(get_users).post(add_user_post).put(add_user_put),
-        )
-        .route(
-            "/users/:uuid",
-            get(get_user).put(update_user).delete(delete_user),
-        )
-        .route(
-            "/roles",
-            get(get_roles).post(add_role_post).put(add_role_put),
-        )
-        .route(
-            "/roles/:uuid",
-            get(get_role).put(update_role).delete(delete_role),
-        )
-        .route(
-            "/models",
-            get(get_models).post(add_model_post).put(add_model_put),
-        )
-        .route(
-            "/models/:uuid",
-            get(get_model).put(update_model).delete(delete_model),
-        )
-        .route(
-            "/quotas",
-            get(get_quotas).post(add_quota_post).put(add_quota_put),
-        )
-        .route(
-            "/quotas/:uuid",
-            get(get_quota).patch(update_quota).delete(delete_quota),
-        )
-        .fallback(StatusCode::NOT_FOUND)
-        .route_layer(middleware::from_fn(authenticate_admin));
-
+pub fn api_router(state: AppState) -> Router {
     Router::new()
-        .fallback(post(model_request))
-        .nest("/admin", admin_routes)
+        .fallback(model_request)
+        .nest("/admin", admin::admin_router())
         .with_state(state.clone())
         .route_layer(middleware::from_fn_with_state(state, authenticate))
         .layer(TraceLayer::new_for_http())
@@ -392,9 +352,9 @@ where
                             "file_name": field.file_name(),
                             "content_type": field.content_type(),
                             "headers": field.headers().iter().map(|(key, value)| {
-                                (key.as_str(), value.to_str().map(|value| Value::String(value.to_string())).unwrap_or(Value::String(STANDARD.encode(value.as_bytes()))))
+                                (key.as_str(), value.to_str().map(|value| Value::String(value.to_string())).unwrap_or(Value::String(RFC4648.encode(value.as_bytes()))))
                             }).collect::<Vec<(_, Value)>>(),
-                            "content": field.bytes().await.ok().map(|bytes| STANDARD.encode(bytes)),
+                            "content": field.bytes().await.ok().map(|bytes| RFC4648.encode(bytes.as_ref())),
                         }))
                     }
 
@@ -439,7 +399,7 @@ impl IntoResponse for ModelResponse {
     fn into_response(self) -> axum::response::Response {
         if self.status == StatusCode::OK {
             if let Value::String(string) = &self.response {
-                if let Ok(data) = STANDARD.decode(string) {
+                if let Ok(data) = RFC4648.decode(string.as_bytes()) {
                     return (self.status, data).into_response();
                 }
             }
@@ -452,32 +412,6 @@ impl IntoResponse for ModelResponse {
 impl IntoResponse for ModelError {
     fn into_response(self) -> axum::response::Response {
         ModelResponse::from(self).into_response()
-    }
-}
-
-impl From<DatabaseActionResult> for StatusCode {
-    fn from(value: DatabaseActionResult) -> Self {
-        match value {
-            DatabaseActionResult::Success => StatusCode::OK,
-            DatabaseActionResult::NotFound => StatusCode::NOT_FOUND,
-            DatabaseActionResult::BackendError => StatusCode::INTERNAL_SERVER_ERROR,
-        }
-    }
-}
-
-impl<T> From<DatabaseValueResult<T>> for Result<Json<T>, StatusCode> {
-    fn from(value: DatabaseValueResult<T>) -> Self {
-        match value {
-            DatabaseValueResult::Success(result) => Ok(Json(result)),
-            DatabaseValueResult::NotFound => Err(StatusCode::NOT_FOUND),
-            DatabaseValueResult::BackendError => Err(StatusCode::INTERNAL_SERVER_ERROR),
-        }
-    }
-}
-
-impl IntoResponse for DatabaseActionResult {
-    fn into_response(self) -> Response {
-        StatusCode::from(self).into_response()
     }
 }
 
@@ -517,284 +451,10 @@ impl RelatedToItemSet for User {
     }
 }
 
-impl RelatedToItemSet for Role {
-    type Key = Uuid;
-
-    fn get_keys(&self, table: &str) -> Vec<Self::Key> {
-        match table {
-            "quotas" => self.quotas.clone(),
-            _ => self.models.clone(),
-        }
-    }
-}
-
-impl RelatedToItemSet for Model {
-    type Key = Uuid;
-
-    fn get_keys(&self, _table: &str) -> Vec<Self::Key> {
-        self.quotas.clone()
-    }
-}
-
 impl RelatedToItem for Uuid {
     type Key = Uuid;
 
     fn get_key(&self, _id: &str) -> Self::Key {
         *self
     }
-}
-
-async fn get_users(State(state): State<AppState>) -> Result<Json<Vec<User>>, StatusCode> {
-    state.get_table("users").into()
-}
-
-async fn get_user(
-    State(state): State<AppState>,
-    Path(uuid): Path<Uuid>,
-) -> Result<Json<User>, StatusCode> {
-    state.get_item("users", &uuid).into()
-}
-
-async fn add_user_post(
-    State(state): State<AppState>,
-    Json(mut payload): Json<User>,
-) -> Result<Json<Uuid>, StatusCode> {
-    if payload.uuid != Uuid::default() {
-        return Err(StatusCode::BAD_REQUEST);
-    }
-    payload.uuid = Uuid::new_v4();
-
-    let related_items: Vec<_> = payload
-        .api_keys
-        .iter()
-        .map(|item| (item, payload.uuid))
-        .collect();
-
-    match state.insert_related_items(
-        ("users", "api_keys"),
-        (&payload.uuid, &payload),
-        &related_items,
-    ) {
-        DatabaseActionResult::Success => Ok(Json(payload.uuid)),
-        DatabaseActionResult::NotFound => Err(StatusCode::NOT_FOUND),
-        DatabaseActionResult::BackendError => Err(StatusCode::INTERNAL_SERVER_ERROR),
-    }
-}
-
-async fn add_user_put(State(state): State<AppState>, Json(payload): Json<User>) -> StatusCode {
-    if payload.uuid == Uuid::default() {
-        return StatusCode::BAD_REQUEST;
-    }
-
-    let related_items: Vec<_> = payload
-        .api_keys
-        .iter()
-        .map(|item| (item, payload.uuid))
-        .collect();
-
-    state
-        .insert_related_items(
-            ("users", "api_keys"),
-            (&payload.uuid, &payload),
-            &related_items,
-        )
-        .into()
-}
-
-async fn update_user(
-    State(state): State<AppState>,
-    Path(uuid): Path<Uuid>,
-    Json(mut payload): Json<User>,
-) -> StatusCode {
-    if payload.uuid != Uuid::default() && payload.uuid != uuid {
-        return StatusCode::BAD_REQUEST;
-    }
-    payload.uuid = uuid;
-
-    let related_items: Vec<_> = payload
-        .api_keys
-        .iter()
-        .map(|item| (item, payload.uuid))
-        .collect();
-
-    state
-        .insert_related_items(
-            ("users", "api_keys"),
-            (&payload.uuid, &payload),
-            &related_items,
-        )
-        .into()
-}
-
-#[tracing::instrument(skip(state), level = "debug")]
-async fn delete_user(
-    State(state): State<AppState>,
-    Path(uuid): Path<Uuid>,
-) -> DatabaseActionResult {
-    state.remove_related_items::<_, User>(("users", "api_keys"), &uuid)
-}
-
-async fn get_roles(State(state): State<AppState>) -> Result<Json<Vec<Role>>, StatusCode> {
-    state.get_table("roles").into()
-}
-
-async fn get_role(
-    State(state): State<AppState>,
-    Path(uuid): Path<Uuid>,
-) -> Result<Json<Role>, StatusCode> {
-    state.get_item("roles", &uuid).into()
-}
-
-async fn add_role_post(
-    State(state): State<AppState>,
-    Json(mut payload): Json<Role>,
-) -> Result<Json<Uuid>, StatusCode> {
-    if payload.uuid != Uuid::default() {
-        return Err(StatusCode::BAD_REQUEST);
-    }
-    payload.uuid = Uuid::new_v4();
-
-    match state.insert_item("roles", &payload.uuid, &payload) {
-        DatabaseActionResult::Success => Ok(Json(payload.uuid)),
-        DatabaseActionResult::NotFound => Err(StatusCode::NOT_FOUND),
-        DatabaseActionResult::BackendError => Err(StatusCode::INTERNAL_SERVER_ERROR),
-    }
-}
-
-async fn add_role_put(State(state): State<AppState>, Json(payload): Json<Role>) -> StatusCode {
-    if payload.uuid == Uuid::default() {
-        return StatusCode::BAD_REQUEST;
-    }
-
-    state.insert_item("roles", &payload.uuid, &payload).into()
-}
-
-async fn update_role(
-    State(state): State<AppState>,
-    Path(uuid): Path<Uuid>,
-    Json(mut payload): Json<Role>,
-) -> StatusCode {
-    if payload.uuid != Uuid::default() && payload.uuid != uuid {
-        return StatusCode::BAD_REQUEST;
-    }
-    payload.uuid = uuid;
-
-    state.insert_item("roles", &payload.uuid, &payload).into()
-}
-
-async fn delete_role(
-    State(state): State<AppState>,
-    Path(uuid): Path<Uuid>,
-) -> DatabaseActionResult {
-    state.remove_item("roles", &uuid)
-}
-
-async fn get_models(State(state): State<AppState>) -> Result<Json<Vec<Model>>, StatusCode> {
-    state.get_table("models").into()
-}
-
-async fn get_model(
-    State(state): State<AppState>,
-    Path(uuid): Path<Uuid>,
-) -> Result<Json<Model>, StatusCode> {
-    state.get_item("models", &uuid).into()
-}
-
-async fn add_model_post(
-    State(state): State<AppState>,
-    Json(mut payload): Json<Model>,
-) -> Result<Json<Uuid>, StatusCode> {
-    if payload.uuid != Uuid::default() {
-        return Err(StatusCode::BAD_REQUEST);
-    }
-    payload.uuid = Uuid::new_v4();
-
-    match state.insert_item("models", &payload.uuid, &payload) {
-        DatabaseActionResult::Success => Ok(Json(payload.uuid)),
-        DatabaseActionResult::NotFound => Err(StatusCode::NOT_FOUND),
-        DatabaseActionResult::BackendError => Err(StatusCode::INTERNAL_SERVER_ERROR),
-    }
-}
-
-async fn add_model_put(State(state): State<AppState>, Json(payload): Json<Model>) -> StatusCode {
-    if payload.uuid == Uuid::default() {
-        return StatusCode::BAD_REQUEST;
-    }
-
-    state.insert_item("models", &payload.uuid, &payload).into()
-}
-
-async fn update_model(
-    State(state): State<AppState>,
-    Path(uuid): Path<Uuid>,
-    Json(mut payload): Json<Model>,
-) -> StatusCode {
-    if payload.uuid != Uuid::default() && payload.uuid != uuid {
-        return StatusCode::BAD_REQUEST;
-    }
-    payload.uuid = uuid;
-
-    state.insert_item("models", &payload.uuid, &payload).into()
-}
-
-async fn delete_model(
-    State(state): State<AppState>,
-    Path(uuid): Path<Uuid>,
-) -> DatabaseActionResult {
-    state.remove_item("models", &uuid)
-}
-
-async fn get_quotas(State(state): State<AppState>) -> Result<Json<Vec<Quota>>, StatusCode> {
-    state.get_table("quotas").into()
-}
-
-async fn get_quota(
-    State(state): State<AppState>,
-    Path(uuid): Path<Uuid>,
-) -> Result<Json<Quota>, StatusCode> {
-    state.get_item("quotas", &uuid).into()
-}
-
-async fn add_quota_post(
-    State(state): State<AppState>,
-    Json(mut payload): Json<Quota>,
-) -> Result<Json<Uuid>, StatusCode> {
-    if payload.uuid != Uuid::default() {
-        return Err(StatusCode::BAD_REQUEST);
-    }
-    payload.uuid = Uuid::new_v4();
-
-    match state.insert_item("quotas", &payload.uuid, &payload) {
-        DatabaseActionResult::Success => Ok(Json(payload.uuid)),
-        DatabaseActionResult::NotFound => Err(StatusCode::NOT_FOUND),
-        DatabaseActionResult::BackendError => Err(StatusCode::INTERNAL_SERVER_ERROR),
-    }
-}
-
-async fn add_quota_put(State(state): State<AppState>, Json(payload): Json<Quota>) -> StatusCode {
-    if payload.uuid == Uuid::default() {
-        return StatusCode::BAD_REQUEST;
-    }
-
-    state.insert_item("quotas", &payload.uuid, &payload).into()
-}
-
-async fn update_quota(
-    State(state): State<AppState>,
-    Path(uuid): Path<Uuid>,
-    Json(mut payload): Json<Quota>,
-) -> StatusCode {
-    if payload.uuid != Uuid::default() && payload.uuid != uuid {
-        return StatusCode::BAD_REQUEST;
-    }
-    payload.uuid = uuid;
-
-    state.insert_item("quotas", &payload.uuid, &payload).into()
-}
-
-async fn delete_quota(
-    State(state): State<AppState>,
-    Path(uuid): Path<Uuid>,
-) -> DatabaseActionResult {
-    state.remove_item("quotas", &uuid)
 }

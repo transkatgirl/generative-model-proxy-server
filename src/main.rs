@@ -94,7 +94,7 @@ async fn main() -> Result<()> {
     let listener = TcpListener::bind(&args.bind_to)
         .await
         .with_context(|| format!("Failed to bind HTTP server to {}", &args.bind_to))?;
-    axum::serve(listener, api::api_router(state).await)
+    axum::serve(listener, api::api_router(state))
         .await
         .context("Failed to start HTTP server")?;
 
