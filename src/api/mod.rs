@@ -24,6 +24,7 @@ use http::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
+use tokio::time;
 use tower_http::trace::TraceLayer;
 use uuid::Uuid;
 
@@ -31,21 +32,15 @@ mod state;
 
 use state::{RelatedToItem, RelatedToItemSet};
 
+use crate::limiter::{self, LimiterResult};
+
 use super::{
     limiter::Limit,
     model::{ModelBackend, ModelError, ModelResponse, RequestType, TaggedModelRequest},
     AppState,
 };
 
-/*
-# API todos:
-- **Add documentation**
-
-# App todos:
-- Clean up logging
-- Add state save/restore
-- Improve error handling
-*/
+// TODO: Add API documentation
 
 // TODO: Separate admin routes into separate file
 
@@ -93,12 +88,6 @@ struct Model {
     api: ModelBackend,
 
     quotas: Vec<Uuid>,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-struct QuotaMember {
-    quota: Uuid,
-    //priority: Option<u32>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -245,7 +234,7 @@ async fn model_request(
         None => return Err(ModelError::UnspecifiedModel),
     };
 
-    let models = match state.get_items_skip_missing::<_, Model>(
+    let model = match state.get_items_skip_missing::<_, Model>(
         "models",
         &auth
             .user
@@ -255,17 +244,19 @@ async fn model_request(
             .cloned()
             .collect::<Vec<_>>(),
     ) {
-        Ok(models) => models,
+        Ok(models) => match models
+            .iter()
+            .find(|model| model.types.contains(&request.r#type) && model.label == label)
+        {
+            Some(model) => model.clone(),
+            None => return Err(ModelError::UnknownModel),
+        },
         Err(_) => return Err(ModelError::InternalError),
     };
 
-    let model = match models
-        .iter()
-        .find(|model| model.types.contains(&request.r#type) && model.label == label)
-    {
-        Some(model) => model,
-        None => return Err(ModelError::UnknownModel),
-    };
+    if request.get_max_tokens().unwrap_or(1) > model.api.get_max_tokens().unwrap_or(1) {
+        return Err(ModelError::UserRateLimit);
+    }
 
     let quotas: Vec<Uuid> = auth
         .user
@@ -278,13 +269,81 @@ async fn model_request(
 
     request.tags = iter::once(auth.user.uuid)
         .chain(auth.roles.iter().map(|role| role.uuid))
-        .chain(quotas.iter().cloned())
+        .chain(quotas.clone())
         .chain(iter::once(model.uuid))
         .collect();
 
-    // TODO: Add rate limiting
+    let limiter_request = limiter::Request {
+        arrived_at: auth.timestamp,
+        estimated_tokens: model
+            .api
+            .get_max_tokens()
+            .map(|max_tokens| {
+                request
+                    .get_max_tokens()
+                    .map(|request_max_tokens| request_max_tokens.min(max_tokens))
+                    .unwrap_or(max_tokens)
+            })
+            .unwrap_or(1)
+            .min(u32::MAX as u64) as u32,
+    };
+
+    let limit_request = |quota: &mut Quota| {
+        let mut wait_until = Instant::now();
+
+        for limit in &mut quota.limits {
+            match limit.request(&state.clock, &limiter_request) {
+                LimiterResult::Ready => {}
+                LimiterResult::WaitUntil(timestamp) => wait_until = wait_until.max(timestamp),
+                LimiterResult::Oversized => return Err(ModelError::UserRateLimit),
+            }
+        }
+
+        Ok(wait_until)
+    };
+
+    match state.modify_items_skip_missing("quotas", &quotas, limit_request) {
+        Ok(Ok(timestamps)) => {
+            if let Some(wait_until) = timestamps.iter().max().cloned() {
+                time::sleep_until(time::Instant::from_std(wait_until)).await
+            }
+        }
+        Ok(Err(error)) => return Err(error),
+        Err(_) => return Err(ModelError::InternalError),
+    }
 
     let response = model.api.generate(&state.http, request).await;
+
+    if let Some(usage) = &response.usage {
+        let limiter_response = limiter::Response {
+            request: limiter_request,
+            actual_tokens: usage.total.min(u32::MAX as u64) as u32,
+        };
+
+        let limit_response = |quota: &mut Quota| {
+            let mut wait_until = Instant::now();
+
+            for limit in &mut quota.limits {
+                match limit.response(&state.clock, &limiter_response) {
+                    LimiterResult::Ready => {}
+                    LimiterResult::WaitUntil(timestamp) => wait_until = wait_until.max(timestamp),
+                    LimiterResult::Oversized => return Err(ModelError::UserRateLimit),
+                }
+            }
+
+            Ok(wait_until)
+        };
+
+        match state.modify_items_skip_missing("quotas", &quotas, limit_response) {
+            Ok(Ok(timestamps)) => {
+                if let Some(wait_until) = timestamps.iter().max().cloned() {
+                    time::sleep_until(time::Instant::from_std(wait_until)).await
+                }
+            }
+            Ok(Err(error)) => return Err(error),
+            Err(_) => return Err(ModelError::InternalError),
+        }
+    }
 
     Ok(response)
 }

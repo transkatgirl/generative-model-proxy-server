@@ -199,7 +199,7 @@ impl AppState {
     pub(super) fn modify_items_skip_missing<K, V, F, T, E>(
         &self,
         table: &str,
-        keys: &[&K],
+        keys: &[K],
         filter_mapper: F,
     ) -> Result<Result<Vec<T>, E>, StatusCode>
     where

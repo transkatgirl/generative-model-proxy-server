@@ -129,7 +129,7 @@ impl Limit {
     }
 
     #[tracing::instrument(skip(clock), level = "debug", ret)]
-    pub(super) fn response(&mut self, clock: &LimiterClock, response: Response) -> LimiterResult {
+    pub(super) fn response(&mut self, clock: &LimiterClock, response: &Response) -> LimiterResult {
         if let LimitItem::Request = self.r#type {
             return LimiterResult::Ready;
         }
