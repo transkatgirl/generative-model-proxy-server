@@ -1,18 +1,21 @@
 use std::{
     clone::Clone,
+    collections::HashMap,
     fmt::Debug,
+    iter,
     time::{Duration, Instant, SystemTime},
 };
 
 use axum::{
-    extract::{Extension, Path, Request, State},
+    extract::{Extension, OriginalUri, Path, Request, State},
     http::StatusCode,
     middleware::{self, Next},
-    response::Response,
+    response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
 };
 
+use http::{Method, Uri};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tower_http::trace::TraceLayer;
@@ -22,7 +25,11 @@ mod state;
 
 use state::{RelatedToItem, RelatedToItemSet};
 
-use super::{limiter::Limit, model::ModelBackend, AppState};
+use super::{
+    limiter::Limit,
+    model::{ModelBackend, ModelError, ModelResponse, RequestType, TaggedModelRequest},
+    AppState,
+};
 
 /*
 # API todos:
@@ -72,7 +79,7 @@ struct Model {
     #[serde(default)]
     uuid: Uuid,
 
-    endpoints: Vec<String>,
+    types: Vec<RequestType>,
 
     api: ModelBackend,
 
@@ -105,13 +112,6 @@ struct Authenticated {
 
 #[tracing::instrument(level = "debug", skip(state))]
 pub async fn api_router(state: AppState) -> Router {
-    let openai_routes = Router::new()
-        .route("/chat/completions", post(model_request))
-        .route("/edits", post(model_request))
-        .route("/completions", post(model_request))
-        .route("/moderations", post(model_request))
-        .route("/embeddings", post(model_request));
-
     let admin_routes = Router::new()
         .route(
             "/users",
@@ -145,10 +145,11 @@ pub async fn api_router(state: AppState) -> Router {
             "/quotas/:uuid",
             get(get_quota).patch(update_quota).delete(delete_quota),
         )
+        .fallback(StatusCode::NOT_FOUND)
         .route_layer(middleware::from_fn(authenticate_admin));
 
     Router::new()
-        .nest("/v1/", openai_routes)
+        .fallback(post(model_request))
         .nest("/admin", admin_routes)
         .with_state(state.clone())
         .route_layer(middleware::from_fn_with_state(state, authenticate))
@@ -160,52 +161,45 @@ async fn authenticate(
     State(state): State<AppState>,
     mut request: Request,
     next: Next,
-) -> Result<Response, StatusCode> {
+) -> Result<Response, ModelError> {
     let timestamp = Instant::now();
 
-    if let Some(header_value) = request.headers().get("authorization") {
-        match header_value.to_str() {
-            Ok(header_string) => {
-                let header_string = header_string.to_ascii_lowercase();
-
-                match header_string
+    match request
+        .headers()
+        .get("authorization")
+        .and_then(|header_value| {
+            header_value.to_str().ok().and_then(|header_string| {
+                header_string
+                    .to_ascii_lowercase()
                     .strip_prefix("basic ")
                     .or(header_string.strip_prefix("bearer "))
-                {
-                    Some(api_key) => {
-                        match state
-                            .get_related_item::<_, Uuid, User>(("api_keys", "users"), &api_key)
-                        {
-                            Ok(Json(user)) => {
-                                let roles: Vec<Role> = user
-                                    .roles
-                                    .iter()
-                                    .filter_map(|uuid| {
-                                        state.get_item("roles", uuid).map(|item| item.0).ok()
-                                    })
-                                    .collect();
+                    .map(|string| string.to_string())
+            })
+        }) {
+        Some(api_key) => {
+            match state.get_related_item::<_, Uuid, User>(("api_keys", "users"), &api_key) {
+                Ok(Json(user)) => {
+                    let roles: Vec<Role> = user
+                        .roles
+                        .iter()
+                        .filter_map(|uuid| state.get_item("roles", uuid).map(|item| item.0).ok())
+                        .collect();
 
-                                request.extensions_mut().insert(Authenticated {
-                                    timestamp,
-                                    user,
-                                    roles,
-                                });
-                                Ok(next.run(request).await)
-                            }
-                            Err(status) => Err(if status.is_client_error() {
-                                StatusCode::UNAUTHORIZED
-                            } else {
-                                status
-                            }),
-                        }
-                    }
-                    None => Err(StatusCode::UNAUTHORIZED),
+                    request.extensions_mut().insert(Authenticated {
+                        timestamp,
+                        user,
+                        roles,
+                    });
+                    Ok(next.run(request).await)
                 }
+                Err(status) => Err(if status.is_client_error() {
+                    ModelError::AuthInvalid
+                } else {
+                    ModelError::InternalError
+                }),
             }
-            Err(_) => Err(StatusCode::UNAUTHORIZED),
         }
-    } else {
-        Err(StatusCode::UNAUTHORIZED)
+        None => Err(ModelError::AuthMissing),
     }
 }
 
@@ -214,7 +208,7 @@ async fn authenticate_admin(
     Extension(auth): Extension<Authenticated>,
     request: Request,
     next: Next,
-) -> Result<Response, StatusCode> {
+) -> Result<Response, ModelError> {
     if auth.user.admin {
         return Ok(next.run(request).await);
     }
@@ -225,20 +219,77 @@ async fn authenticate_admin(
         }
     }
 
-    Err(StatusCode::UNAUTHORIZED)
+    Err(ModelError::UnknownEndpoint)
 }
 
 #[tracing::instrument(level = "trace", skip(state), ret)]
 async fn model_request(
     Extension(auth): Extension<Authenticated>,
     State(state): State<AppState>,
-    Json(payload): Json<Value>,
-) -> (StatusCode, Json<Value>) {
+    request: Request,
+) -> Result<ModelResponse, ModelError> {
+    let request_type = match RequestType::try_from(request.uri()) {
+        Ok(r#type) => r#type,
+        Err(_) => return Err(ModelError::UnknownEndpoint),
+    };
+
+    if request.method() != Method::POST {
+        return Err(ModelError::BadEndpointMethod);
+    }
+
+    let models = auth
+        .user
+        .models
+        .iter()
+        .chain(auth.roles.iter().flat_map(|role| role.models.iter()))
+        .filter_map(|uuid| {
+            state
+                .get_item::<_, Model>("models", uuid)
+                .map(|item| item.0)
+                .ok()
+        })
+        .filter(|model| model.types.contains(&request_type));
+
+    let quotas = auth
+        .user
+        .quotas
+        .iter()
+        .chain(auth.roles.iter().flat_map(|role| role.quotas.iter()));
+
+    let tags = iter::once(auth.user.uuid)
+        .chain(auth.user.roles.iter().copied())
+        .chain(auth.user.quotas.iter().copied())
+        .chain(
+            auth.roles
+                .iter()
+                .flat_map(|role| role.quotas.iter().copied()),
+        );
+
+    //let request = TaggedModelRequest::from(value)
+
+    /*for model in models {
+        if model.label =
+    }*/
+
+    // TODO: Add rate limiting
+
     /*let response = state.model_request(payload).await;
 
     (response.0, Json(response.1))*/
 
     todo!()
+}
+
+impl IntoResponse for ModelResponse {
+    fn into_response(self) -> axum::response::Response {
+        (self.status, Json(self.response)).into_response()
+    }
+}
+
+impl IntoResponse for ModelError {
+    fn into_response(self) -> axum::response::Response {
+        ModelResponse::from(self).into_response()
+    }
 }
 
 #[derive(Serialize, Deserialize)]

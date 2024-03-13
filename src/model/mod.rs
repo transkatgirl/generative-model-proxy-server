@@ -1,7 +1,7 @@
 use std::{fmt::Debug, sync::Arc, time::Duration};
 
 use fast32::base32::CROCKFORD;
-use http::status::StatusCode;
+use http::{status::StatusCode, Uri};
 use reqwest::{Client, ClientBuilder, Url};
 use ring::digest;
 use serde::{Deserialize, Serialize};
@@ -72,13 +72,54 @@ pub(super) fn get_configured_client() -> reqwest::Result<Client> {
 #[derive(Debug)]
 pub(super) struct TaggedModelRequest {
     pub(super) tags: Arc<Vec<Uuid>>,
+    pub(super) r#type: RequestType,
 
     request: Value,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum RequestType {
+    TextChat,
+    TextCompletion,
+    TextEdit,
+    TextEmbedding,
+    TextModeration,
+    ImageGeneration,
+    ImageEdit,
+    ImageVariation,
+    AudioTTS,
+    AudioTranscription,
+    AudioTranslation,
+}
+
+impl TryFrom<&Uri> for RequestType {
+    type Error = &'static str;
+
+    fn try_from(value: &Uri) -> Result<Self, Self::Error> {
+        match value.path() {
+            "/v1/chat/completions" => Ok(RequestType::TextChat),
+            "/v1/completions" => Ok(RequestType::TextCompletion),
+            "/v1/edits" => Ok(RequestType::TextEdit),
+            "/v1/embeddings" => Ok(RequestType::TextEmbedding),
+            "/v1/moderations" => Ok(RequestType::TextModeration),
+            "/v1/images/generations" => Ok(RequestType::ImageGeneration),
+            "/v1/images/edits" => Ok(RequestType::ImageEdit),
+            "/v1/images/variations" => Ok(RequestType::ImageVariation),
+            "/v1/audio/speech" => Ok(RequestType::AudioTTS),
+            "/v1/audio/transcriptions" => Ok(RequestType::AudioTranscription),
+            "/v1/audio/translations" => Ok(RequestType::AudioTranslation),
+            _ => Err("Invalid URI"),
+        }
+    }
+}
+
 impl TaggedModelRequest {
     #[instrument(level = "trace", ret)]
-    pub(super) fn new(tags: Arc<Vec<Uuid>>, mut request: Value) -> TaggedModelRequest {
+    pub(super) fn new(
+        tags: Arc<Vec<Uuid>>,
+        r#type: RequestType,
+        mut request: Value,
+    ) -> TaggedModelRequest {
         if let Some(request) = request.as_object_mut() {
             match tags.first() {
                 Some(user) => request.insert(
@@ -93,7 +134,11 @@ impl TaggedModelRequest {
             request.remove("stream");
         }
 
-        TaggedModelRequest { tags, request }
+        TaggedModelRequest {
+            tags,
+            r#type,
+            request,
+        }
     }
 
     #[instrument(level = "trace", ret)]
@@ -151,31 +196,9 @@ pub(super) struct ModelResponse {
     pub(super) response: Value,
 }
 
-#[derive(Debug)]
-pub(super) struct TokenUsage {
-    pub(super) total: u64,
-    pub(super) input: Option<u64>,
-    pub(super) output: Option<u64>,
-}
-
-#[derive(Debug)]
-pub(super) enum ModelError {
-    BadRequest,
-    AuthMissing,
-    AuthInvalid,
-    UserRateLimit,
-    ModelRateLimit,
-    UnknownEndpoint,
-    UnknownModel,
-    UnspecifiedModel,
-    InternalError,
-    BackendError,
-}
-
-impl ModelResponse {
-    #[instrument(level = "trace")]
-    pub(super) fn from_error(error: ModelError) -> ModelResponse {
-        let response = match error {
+impl From<ModelError> for ModelResponse {
+    fn from(value: ModelError) -> Self {
+        let response = match value {
             ModelError::BadRequest => json!({
                 "message": "We could not parse the JSON body of your request. (HINT: This likely means you aren't using your HTTP library correctly. The API expects a JSON payload, but what was sent was not valid JSON. If you have trouble figuring out how to fix this, contact the proxy's administrator.)",
                 "type": "invalid_request_error",
@@ -212,6 +235,12 @@ impl ModelResponse {
                 "param": Value::Null,
                 "code": "unknown_url",
             }),
+            ModelError::BadEndpointMethod => json!({
+                "message": "Invalid request method. Please check the URL for typos, or contact the proxy's administrator for information regarding available endpoints.",
+                "type": "invalid_request_error",
+                "param": Value::Null,
+                "code": Value::Null,
+            }),
             ModelError::UnknownModel => json!({
                 "message": "The requested model does not exist.  Contact the proxy's administrator for more information.",
                 "type": "invalid_request_error",
@@ -238,13 +267,14 @@ impl ModelResponse {
             }),
         };
 
-        let status = match error {
+        let status = match value {
             ModelError::BadRequest => StatusCode::BAD_REQUEST,
             ModelError::AuthMissing => StatusCode::UNAUTHORIZED,
             ModelError::AuthInvalid => StatusCode::UNAUTHORIZED,
             ModelError::UserRateLimit => StatusCode::TOO_MANY_REQUESTS,
             ModelError::ModelRateLimit => StatusCode::SERVICE_UNAVAILABLE,
             ModelError::UnknownEndpoint => StatusCode::NOT_FOUND,
+            ModelError::BadEndpointMethod => StatusCode::METHOD_NOT_ALLOWED,
             ModelError::UnknownModel => StatusCode::NOT_FOUND,
             ModelError::UnspecifiedModel => StatusCode::BAD_REQUEST,
             ModelError::InternalError => StatusCode::INTERNAL_SERVER_ERROR,
@@ -259,6 +289,28 @@ impl ModelResponse {
     }
 }
 
+#[derive(Debug)]
+pub(super) struct TokenUsage {
+    pub(super) total: u64,
+    pub(super) input: Option<u64>,
+    pub(super) output: Option<u64>,
+}
+
+#[derive(Debug)]
+pub(super) enum ModelError {
+    BadRequest,
+    AuthMissing,
+    AuthInvalid,
+    UserRateLimit,
+    ModelRateLimit,
+    UnknownEndpoint,
+    BadEndpointMethod,
+    UnknownModel,
+    UnspecifiedModel,
+    InternalError,
+    BackendError,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(tag = "type")]
 #[allow(private_interfaces)]
@@ -271,7 +323,6 @@ pub(super) enum ModelBackend {
 struct OpenAIModelBackend {
     model_string: String,
     model_context_len: Option<u64>,
-    model_endpoint: String,
     openai_api_base: String,
     openai_api_key: String,
     openai_organization: Option<String>,
@@ -309,8 +360,21 @@ impl ModelBackend {
                         Value::String(config.model_string.clone()),
                     );
 
-                    let url = Url::parse(&config.openai_api_base)
-                        .and_then(|base_url| base_url.join(&config.model_endpoint));
+                    let url = Url::parse(&config.openai_api_base).and_then(|base_url| {
+                        base_url.join(match tagged_request.r#type {
+                            RequestType::TextChat => "/v1/chat/completions",
+                            RequestType::TextCompletion => "/v1/completions",
+                            RequestType::TextEdit => "/v1/edits",
+                            RequestType::TextEmbedding => "/v1/embeddings",
+                            RequestType::TextModeration => "/v1/moderations",
+                            RequestType::ImageGeneration => "/v1/images/generations",
+                            RequestType::ImageEdit => "/v1/images/edits",
+                            RequestType::ImageVariation => "/v1/images/variations",
+                            RequestType::AudioTTS => "/v1/audio/speech",
+                            RequestType::AudioTranscription => "/v1/audio/transcriptions",
+                            RequestType::AudioTranslation => "/v1/audio/translations",
+                        })
+                    });
 
                     match url {
                         Ok(url) => {
@@ -335,7 +399,7 @@ impl ModelBackend {
                                             status,
                                             body
                                         );
-                                        return ModelResponse::from_error(ModelError::BackendError);
+                                        return ModelResponse::from(ModelError::BackendError);
                                     }
 
                                     if status.is_client_error() {
@@ -347,9 +411,7 @@ impl ModelBackend {
                                                 "Failed to authenticate with backend: {:?}",
                                                 body
                                             );
-                                            return ModelResponse::from_error(
-                                                ModelError::BackendError,
-                                            );
+                                            return ModelResponse::from(ModelError::BackendError);
                                         }
 
                                         if status == StatusCode::NOT_FOUND
@@ -369,9 +431,7 @@ impl ModelBackend {
                                                 status,
                                                 body
                                             );
-                                            return ModelResponse::from_error(
-                                                ModelError::BackendError,
-                                            );
+                                            return ModelResponse::from(ModelError::BackendError);
                                         }
 
                                         if status == StatusCode::PAYMENT_REQUIRED
@@ -381,9 +441,7 @@ impl ModelBackend {
                                                 "Request was rate-limited by backend: {:?}",
                                                 body
                                             );
-                                            return ModelResponse::from_error(
-                                                ModelError::ModelRateLimit,
-                                            );
+                                            return ModelResponse::from(ModelError::ModelRateLimit);
                                         }
                                     }
 
@@ -411,13 +469,13 @@ impl ModelBackend {
                                                     "Error parsing response: {:?}",
                                                     error
                                                 );
-                                                ModelResponse::from_error(ModelError::BackendError)
+                                                ModelResponse::from(ModelError::BackendError)
                                             }
                                         },
                                         Err(error) => {
                                             tracing::warn!("Error receiving response: {:?}", error);
 
-                                            ModelResponse::from_error(ModelError::BackendError)
+                                            ModelResponse::from(ModelError::BackendError)
                                         }
                                     }
                                 }
@@ -426,26 +484,24 @@ impl ModelBackend {
 
                                     if error.is_connect() | error.is_redirect() | error.is_decode()
                                     {
-                                        return ModelResponse::from_error(ModelError::BackendError);
+                                        return ModelResponse::from(ModelError::BackendError);
                                     }
 
                                     if error.is_timeout() {
-                                        return ModelResponse::from_error(
-                                            ModelError::ModelRateLimit,
-                                        );
+                                        return ModelResponse::from(ModelError::ModelRateLimit);
                                     }
 
-                                    ModelResponse::from_error(ModelError::InternalError)
+                                    ModelResponse::from(ModelError::InternalError)
                                 }
                             }
                         }
                         Err(error) => {
                             tracing::warn!("Unable to parse model URL: {:?}", error);
-                            ModelResponse::from_error(ModelError::InternalError)
+                            ModelResponse::from(ModelError::InternalError)
                         }
                     }
                 } else {
-                    ModelResponse::from_error(ModelError::BadRequest)
+                    ModelResponse::from(ModelError::BadRequest)
                 }
             }
             Self::Loopback => ModelResponse {
