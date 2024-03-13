@@ -7,17 +7,23 @@ use std::{
 };
 
 use axum::{
-    extract::{Extension, OriginalUri, Path, Request, State},
+    async_trait,
+    body::{self, Bytes},
+    extract::{Extension, FromRequest, Multipart, OriginalUri, Path, RawForm, Request, State},
     http::StatusCode,
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post},
-    Json, Router,
+    Form, Json, Router,
 };
 
-use http::{Method, Uri};
+use base64::{engine::general_purpose::STANDARD, Engine};
+use http::{
+    header::{AUTHORIZATION, CONTENT_TYPE},
+    Method, Uri,
+};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{json, Map, Value};
 use tower_http::trace::TraceLayer;
 use uuid::Uuid;
 
@@ -33,9 +39,6 @@ use super::{
 
 /*
 # API todos:
-- Allow limiting models to specific endpoints
-- Rework model/quota API to be the same as users/roles
-- Improve error messages
 - **Add documentation**
 
 # App todos:
@@ -166,7 +169,7 @@ async fn authenticate(
 
     match request
         .headers()
-        .get("authorization")
+        .get(AUTHORIZATION)
         .and_then(|header_value| {
             header_value.to_str().ok().and_then(|header_string| {
                 header_string
@@ -226,16 +229,12 @@ async fn authenticate_admin(
 async fn model_request(
     Extension(auth): Extension<Authenticated>,
     State(state): State<AppState>,
-    request: Request,
+    request: Result<TaggedModelRequest, ModelError>,
 ) -> Result<ModelResponse, ModelError> {
-    let request_type = match RequestType::try_from(request.uri()) {
-        Ok(r#type) => r#type,
-        Err(_) => return Err(ModelError::UnknownEndpoint),
+    let request = match request {
+        Ok(request) => request,
+        Err(error) => return Err(error),
     };
-
-    if request.method() != Method::POST {
-        return Err(ModelError::BadEndpointMethod);
-    }
 
     let models = auth
         .user
@@ -248,7 +247,7 @@ async fn model_request(
                 .map(|item| item.0)
                 .ok()
         })
-        .filter(|model| model.types.contains(&request_type));
+        .filter(|model| model.types.contains(&request.r#type));
 
     let quotas = auth
         .user
@@ -278,6 +277,96 @@ async fn model_request(
     (response.0, Json(response.1))*/
 
     todo!()
+}
+
+#[async_trait]
+impl<S> FromRequest<S> for TaggedModelRequest
+where
+    Bytes: FromRequest<S>,
+    S: Send + Sync,
+{
+    type Rejection = ModelError;
+
+    #[tracing::instrument(level = "trace", skip(state), ret)]
+    async fn from_request(req: Request, state: &S) -> Result<Self, Self::Rejection> {
+        let r#type = match RequestType::try_from(req.uri()) {
+            Ok(r#type) => r#type,
+            Err(_) => return Err(ModelError::UnknownEndpoint),
+        };
+
+        if req.method() != Method::GET
+            || req.method() != Method::HEAD
+            || req.method() != Method::POST
+        {
+            return Err(ModelError::BadEndpointMethod);
+        }
+
+        let request = match req
+            .headers()
+            .get(CONTENT_TYPE)
+            .and_then(|header_value| {
+                header_value
+                    .to_str()
+                    .map(|header_string| header_string.to_ascii_lowercase())
+                    .ok()
+            })
+            .as_deref()
+        {
+            Some("application/x-www-form-urlencoded") => Form::from_request(req, state)
+                .await
+                .map(|value| value.0)
+                .unwrap_or(Value::Null),
+            Some("multipart/form-data") => match Multipart::from_request(req, state).await {
+                Ok(mut multipart) => {
+                    let mut json_fields = Vec::new();
+
+                    while let Some(field) = multipart.next_field().await.unwrap() {
+                        json_fields.push(json!({
+                            "name": field.name(),
+                            "file_name": field.file_name(),
+                            "content_type": field.content_type(),
+                            "headers": field.headers().iter().map(|(key, value)| {
+                                (key.as_str(), value.to_str().map(|value| Value::String(value.to_string())).unwrap_or(Value::String(STANDARD.encode(value.as_bytes()))))
+                            }).collect::<Vec<(_, Value)>>(),
+                            "content": field.bytes().await.ok().map(|bytes| STANDARD.encode(bytes)),
+                        }))
+                    }
+
+                    Value::Array(json_fields)
+                }
+                Err(_) => Value::Null,
+            },
+            Some("application/json") => Json::from_request(req, state)
+                .await
+                .map(|value| value.0)
+                .unwrap_or(Value::Null),
+            Some(_) => body::to_bytes(req.into_body(), usize::MAX)
+                .await
+                .ok()
+                .and_then(|body| Json::from_bytes(body.as_ref()).map(|value| value.0).ok())
+                .unwrap_or(Value::Null),
+            None => {
+                if req.method() == Method::HEAD || req.method() == Method::GET {
+                    Form::from_request(req, state)
+                        .await
+                        .map(|value| value.0)
+                        .unwrap_or(Value::Null)
+                } else {
+                    body::to_bytes(req.into_body(), usize::MAX)
+                        .await
+                        .ok()
+                        .and_then(|body| Json::from_bytes(body.as_ref()).map(|value| value.0).ok())
+                        .unwrap_or(Value::Null)
+                }
+            }
+        };
+
+        if request == Value::Null {
+            return Err(ModelError::BadRequest);
+        }
+
+        Ok(TaggedModelRequest::new(Vec::new(), r#type, request))
+    }
 }
 
 impl IntoResponse for ModelResponse {

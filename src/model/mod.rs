@@ -1,4 +1,4 @@
-use std::{fmt::Debug, sync::Arc, time::Duration};
+use std::{fmt::Debug, time::Duration};
 
 use fast32::base32::CROCKFORD;
 use http::{status::StatusCode, Uri};
@@ -71,7 +71,7 @@ pub(super) fn get_configured_client() -> reqwest::Result<Client> {
 
 #[derive(Debug)]
 pub(super) struct TaggedModelRequest {
-    pub(super) tags: Arc<Vec<Uuid>>,
+    pub(super) tags: Vec<Uuid>,
     pub(super) r#type: RequestType,
 
     request: Value,
@@ -116,7 +116,7 @@ impl TryFrom<&Uri> for RequestType {
 impl TaggedModelRequest {
     #[instrument(level = "trace", ret)]
     pub(super) fn new(
-        tags: Arc<Vec<Uuid>>,
+        tags: Vec<Uuid>,
         r#type: RequestType,
         mut request: Value,
     ) -> TaggedModelRequest {
