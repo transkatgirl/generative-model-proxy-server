@@ -7,7 +7,7 @@ use opentelemetry_otlp::WithExportConfig;
 use opentelemetry_sdk::{trace, Resource};
 use reqwest::{Client, ClientBuilder};
 use sled::Db; // sled should probably be replaced with a proper database at some point. will need to write manual migrations when that time comes.
-use tokio::net::TcpListener;
+use tokio::{net::TcpListener, signal};
 use tracing::Level;
 use tracing_subscriber::{filter, layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -78,6 +78,8 @@ async fn main() -> Result<()> {
         None => registry.init(),
     }
 
+    let database = sled::open(&args.database_file).context("Unable to initalize database")?;
+
     let state = AppState {
         http: ClientBuilder::new()
             .user_agent("language-model-proxy-server")
@@ -87,18 +89,27 @@ async fn main() -> Result<()> {
             .http2_keep_alive_while_idle(true)
             .build()
             .context("Unable to initalize HTTP client")?,
-        database: sled::open(&args.database_file).context("Unable to initalize database")?,
+        database: database.clone(),
         clock: Arc::new(LimiterClock::new()),
     };
 
     let listener = TcpListener::bind(&args.bind_to)
         .await
         .with_context(|| format!("Failed to bind HTTP server to {}", &args.bind_to))?;
+
     axum::serve(listener, api::api_router(state))
+        .with_graceful_shutdown(async move {
+            if let Err(error) = signal::ctrl_c().await {
+                tracing::error!("Unable to run signal handler task: {}", error)
+            }
+        })
         .await
         .context("Failed to start HTTP server")?;
 
-    // TODO: Graceful shutdown
+    tracing::debug!("flushing database to disk");
+    if let Err(error) = database.flush_async().await {
+        tracing::error!("Unable to flush database to disk: {}", error)
+    }
 
     Ok(())
 }

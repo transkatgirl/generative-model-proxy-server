@@ -3,7 +3,7 @@ use std::{clone::Clone, fmt::Debug, iter, time::Instant};
 use axum::{
     async_trait,
     body::{self, Bytes},
-    extract::{Extension, FromRequest, Multipart, Request, State},
+    extract::{DefaultBodyLimit, Extension, FromRequest, Multipart, Request, State},
     http::StatusCode,
     middleware::{self, Next},
     response::{IntoResponse, Response},
@@ -37,8 +37,6 @@ use super::{
 };
 
 // TODO: Add API documentation
-
-// TODO: Increase max body size
 
 #[derive(Default, Serialize, Deserialize, Debug, Clone)]
 #[serde(default)]
@@ -106,6 +104,7 @@ pub fn api_router(state: AppState) -> Router {
         .fallback(model_request)
         .nest("/admin", admin::admin_router())
         .with_state(state.clone())
+        .layer(DefaultBodyLimit::max(16_777_216))
         .route_layer(middleware::from_fn_with_state(state, authenticate))
         .layer(TraceLayer::new_for_http())
 }
