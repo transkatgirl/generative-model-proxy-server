@@ -47,6 +47,12 @@ use super::{
 - Improve error handling
 */
 
+// TODO: Separate admin routes into separate file
+
+// TODO: Look into async version of base64 library
+
+// TODO: Increase max body size
+
 #[derive(Default, Serialize, Deserialize, Debug, Clone)]
 #[serde(default)]
 struct User {
@@ -181,18 +187,16 @@ async fn authenticate(
         }) {
         Some(api_key) => {
             match state.get_related_item::<_, Uuid, User>(("api_keys", "users"), &api_key) {
-                Ok(Json(user)) => {
-                    let roles: Vec<Role> = user
-                        .roles
-                        .iter()
-                        .filter_map(|uuid| state.get_item("roles", uuid).map(|item| item.0).ok())
-                        .collect();
+                Ok(user) => {
+                    match state.get_items_skip_missing("roles", &user.roles) {
+                        Ok(roles) => request.extensions_mut().insert(Authenticated {
+                            timestamp,
+                            user,
+                            roles,
+                        }),
+                        Err(_) => return Err(ModelError::InternalError),
+                    };
 
-                    request.extensions_mut().insert(Authenticated {
-                        timestamp,
-                        user,
-                        roles,
-                    });
                     Ok(next.run(request).await)
                 }
                 Err(status) => Err(if status.is_client_error() {
@@ -241,17 +245,22 @@ async fn model_request(
         None => return Err(ModelError::UnspecifiedModel),
     };
 
-    let model = match auth
-        .user
-        .models
+    let models = match state.get_items_skip_missing::<_, Model>(
+        "models",
+        &auth
+            .user
+            .models
+            .iter()
+            .chain(auth.roles.iter().flat_map(|role| role.models.iter()))
+            .cloned()
+            .collect::<Vec<_>>(),
+    ) {
+        Ok(models) => models,
+        Err(_) => return Err(ModelError::InternalError),
+    };
+
+    let model = match models
         .iter()
-        .chain(auth.roles.iter().flat_map(|role| role.models.iter()))
-        .filter_map(|uuid| {
-            state
-                .get_item::<_, Model>("models", uuid)
-                .map(|item| item.0)
-                .ok()
-        })
         .find(|model| model.types.contains(&request.r#type) && model.label == label)
     {
         Some(model) => model,
@@ -372,6 +381,14 @@ where
 
 impl IntoResponse for ModelResponse {
     fn into_response(self) -> axum::response::Response {
+        if self.status == StatusCode::OK {
+            if let Value::String(string) = &self.response {
+                if let Ok(data) = STANDARD.decode(string) {
+                    return (self.status, data).into_response();
+                }
+            }
+        }
+
         (self.status, Json(self.response)).into_response()
     }
 }
@@ -446,14 +463,14 @@ impl RelatedToItem for Uuid {
 }
 
 async fn get_users(State(state): State<AppState>) -> Result<Json<Vec<User>>, StatusCode> {
-    state.get_items("users")
+    state.get_table("users").map(|output| Json(output))
 }
 
 async fn get_user(
     State(state): State<AppState>,
     Path(uuid): Path<Uuid>,
 ) -> Result<Json<User>, StatusCode> {
-    state.get_item("users", &uuid)
+    state.get_item("users", &uuid).map(|output| Json(output))
 }
 
 async fn add_user_post(
@@ -531,14 +548,14 @@ async fn delete_user(State(state): State<AppState>, Path(uuid): Path<Uuid>) -> S
 }
 
 async fn get_roles(State(state): State<AppState>) -> Result<Json<Vec<Role>>, StatusCode> {
-    state.get_items("roles")
+    state.get_table("roles").map(|output| Json(output))
 }
 
 async fn get_role(
     State(state): State<AppState>,
     Path(uuid): Path<Uuid>,
 ) -> Result<Json<Role>, StatusCode> {
-    state.get_item("roles", &uuid)
+    state.get_item("roles", &uuid).map(|output| Json(output))
 }
 
 async fn add_role_post(
@@ -585,14 +602,14 @@ async fn delete_role(State(state): State<AppState>, Path(uuid): Path<Uuid>) -> S
 }
 
 async fn get_models(State(state): State<AppState>) -> Result<Json<Vec<Model>>, StatusCode> {
-    state.get_items("models")
+    state.get_table("models").map(|output| Json(output))
 }
 
 async fn get_model(
     State(state): State<AppState>,
     Path(uuid): Path<Uuid>,
 ) -> Result<Json<Model>, StatusCode> {
-    state.get_item("models", &uuid)
+    state.get_item("models", &uuid).map(|output| Json(output))
 }
 
 async fn add_model_post(
@@ -639,14 +656,14 @@ async fn delete_model(State(state): State<AppState>, Path(uuid): Path<Uuid>) -> 
 }
 
 async fn get_quotas(State(state): State<AppState>) -> Result<Json<Vec<Quota>>, StatusCode> {
-    state.get_items("quotas")
+    state.get_table("quotas").map(|output| Json(output))
 }
 
 async fn get_quota(
     State(state): State<AppState>,
     Path(uuid): Path<Uuid>,
 ) -> Result<Json<Quota>, StatusCode> {
-    state.get_item("quotas", &uuid)
+    state.get_item("quotas", &uuid).map(|output| Json(output))
 }
 
 async fn add_quota_post(
