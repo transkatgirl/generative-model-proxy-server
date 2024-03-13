@@ -290,6 +290,7 @@ impl From<ModelError> for ModelResponse {
 }
 
 #[derive(Debug)]
+#[allow(dead_code)]
 pub(super) struct TokenUsage {
     pub(super) total: u64,
     pub(super) input: Option<u64>,

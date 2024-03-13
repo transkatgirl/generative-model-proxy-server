@@ -1,15 +1,9 @@
-use std::{
-    clone::Clone,
-    collections::HashMap,
-    fmt::Debug,
-    iter,
-    time::{Duration, Instant, SystemTime},
-};
+use std::{clone::Clone, fmt::Debug, iter, time::Instant};
 
 use axum::{
     async_trait,
     body::{self, Bytes},
-    extract::{Extension, FromRequest, Multipart, OriginalUri, Path, RawForm, Request, State},
+    extract::{Extension, FromRequest, Multipart, Path, Request, State},
     http::StatusCode,
     middleware::{self, Next},
     response::{IntoResponse, Response},
@@ -20,10 +14,10 @@ use axum::{
 use base64::{engine::general_purpose::STANDARD, Engine};
 use http::{
     header::{AUTHORIZATION, CONTENT_TYPE},
-    Method, Uri,
+    Method,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Map, Value};
+use serde_json::{json, Value};
 use tokio::time;
 use tower_http::trace::TraceLayer;
 use uuid::Uuid;
@@ -33,6 +27,8 @@ mod state;
 use state::{RelatedToItem, RelatedToItemSet};
 
 use crate::limiter::{self, LimiterResult};
+
+use self::state::{DatabaseActionResult, DatabaseFunctionResult, DatabaseValueResult};
 
 use super::{
     limiter::Limit,
@@ -176,23 +172,23 @@ async fn authenticate(
         }) {
         Some(api_key) => {
             match state.get_related_item::<_, Uuid, User>(("api_keys", "users"), &api_key) {
-                Ok(user) => {
+                DatabaseValueResult::Success(user) => {
                     match state.get_items_skip_missing("roles", &user.roles) {
-                        Ok(roles) => request.extensions_mut().insert(Authenticated {
-                            timestamp,
-                            user,
-                            roles,
-                        }),
-                        Err(_) => return Err(ModelError::InternalError),
+                        DatabaseValueResult::Success(roles) => {
+                            request.extensions_mut().insert(Authenticated {
+                                timestamp,
+                                user,
+                                roles,
+                            })
+                        }
+                        DatabaseValueResult::NotFound => return Err(ModelError::AuthInvalid),
+                        DatabaseValueResult::BackendError => return Err(ModelError::InternalError),
                     };
 
                     Ok(next.run(request).await)
                 }
-                Err(status) => Err(if status.is_client_error() {
-                    ModelError::AuthInvalid
-                } else {
-                    ModelError::InternalError
-                }),
+                DatabaseValueResult::NotFound => Err(ModelError::AuthInvalid),
+                DatabaseValueResult::BackendError => Err(ModelError::InternalError),
             }
         }
         None => Err(ModelError::AuthMissing),
@@ -244,14 +240,15 @@ async fn model_request(
             .cloned()
             .collect::<Vec<_>>(),
     ) {
-        Ok(models) => match models
+        DatabaseValueResult::Success(models) => match models
             .iter()
             .find(|model| model.types.contains(&request.r#type) && model.label == label)
         {
             Some(model) => model.clone(),
             None => return Err(ModelError::UnknownModel),
         },
-        Err(_) => return Err(ModelError::InternalError),
+        DatabaseValueResult::NotFound => return Err(ModelError::UnknownModel),
+        DatabaseValueResult::BackendError => return Err(ModelError::InternalError),
     };
 
     if request.get_max_tokens().unwrap_or(1) > model.api.get_max_tokens().unwrap_or(1) {
@@ -303,13 +300,13 @@ async fn model_request(
     };
 
     match state.modify_items_skip_missing("quotas", &quotas, limit_request) {
-        Ok(Ok(timestamps)) => {
+        DatabaseFunctionResult::Success(timestamps) => {
             if let Some(wait_until) = timestamps.iter().max().cloned() {
                 time::sleep_until(time::Instant::from_std(wait_until)).await
             }
         }
-        Ok(Err(error)) => return Err(error),
-        Err(_) => return Err(ModelError::InternalError),
+        DatabaseFunctionResult::FunctionError(error) => return Err(error),
+        DatabaseFunctionResult::BackendError => return Err(ModelError::InternalError),
     }
 
     let response = model.api.generate(&state.http, request).await;
@@ -335,13 +332,13 @@ async fn model_request(
         };
 
         match state.modify_items_skip_missing("quotas", &quotas, limit_response) {
-            Ok(Ok(timestamps)) => {
+            DatabaseFunctionResult::Success(timestamps) => {
                 if let Some(wait_until) = timestamps.iter().max().cloned() {
                     time::sleep_until(time::Instant::from_std(wait_until)).await
                 }
             }
-            Ok(Err(error)) => return Err(error),
-            Err(_) => return Err(ModelError::InternalError),
+            DatabaseFunctionResult::FunctionError(error) => return Err(error),
+            DatabaseFunctionResult::BackendError => return Err(ModelError::InternalError),
         }
     }
 
@@ -458,6 +455,32 @@ impl IntoResponse for ModelError {
     }
 }
 
+impl From<DatabaseActionResult> for StatusCode {
+    fn from(value: DatabaseActionResult) -> Self {
+        match value {
+            DatabaseActionResult::Success => StatusCode::OK,
+            DatabaseActionResult::NotFound => StatusCode::NOT_FOUND,
+            DatabaseActionResult::BackendError => StatusCode::INTERNAL_SERVER_ERROR,
+        }
+    }
+}
+
+impl<T> From<DatabaseValueResult<T>> for Result<Json<T>, StatusCode> {
+    fn from(value: DatabaseValueResult<T>) -> Self {
+        match value {
+            DatabaseValueResult::Success(result) => Ok(Json(result)),
+            DatabaseValueResult::NotFound => Err(StatusCode::NOT_FOUND),
+            DatabaseValueResult::BackendError => Err(StatusCode::INTERNAL_SERVER_ERROR),
+        }
+    }
+}
+
+impl IntoResponse for DatabaseActionResult {
+    fn into_response(self) -> Response {
+        StatusCode::from(self).into_response()
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(untagged)]
 enum StringOrUuid {
@@ -522,14 +545,14 @@ impl RelatedToItem for Uuid {
 }
 
 async fn get_users(State(state): State<AppState>) -> Result<Json<Vec<User>>, StatusCode> {
-    state.get_table("users").map(|output| Json(output))
+    state.get_table("users").into()
 }
 
 async fn get_user(
     State(state): State<AppState>,
     Path(uuid): Path<Uuid>,
 ) -> Result<Json<User>, StatusCode> {
-    state.get_item("users", &uuid).map(|output| Json(output))
+    state.get_item("users", &uuid).into()
 }
 
 async fn add_user_post(
@@ -547,16 +570,14 @@ async fn add_user_post(
         .map(|item| (item, payload.uuid))
         .collect();
 
-    let status = state.insert_related_items(
+    match state.insert_related_items(
         ("users", "api_keys"),
         (&payload.uuid, &payload),
         &related_items,
-    );
-
-    if status.is_success() {
-        Ok(Json(payload.uuid))
-    } else {
-        Err(status)
+    ) {
+        DatabaseActionResult::Success => Ok(Json(payload.uuid)),
+        DatabaseActionResult::NotFound => Err(StatusCode::NOT_FOUND),
+        DatabaseActionResult::BackendError => Err(StatusCode::INTERNAL_SERVER_ERROR),
     }
 }
 
@@ -571,11 +592,13 @@ async fn add_user_put(State(state): State<AppState>, Json(payload): Json<User>) 
         .map(|item| (item, payload.uuid))
         .collect();
 
-    state.insert_related_items(
-        ("users", "api_keys"),
-        (&payload.uuid, &payload),
-        &related_items,
-    )
+    state
+        .insert_related_items(
+            ("users", "api_keys"),
+            (&payload.uuid, &payload),
+            &related_items,
+        )
+        .into()
 }
 
 async fn update_user(
@@ -594,27 +617,32 @@ async fn update_user(
         .map(|item| (item, payload.uuid))
         .collect();
 
-    state.insert_related_items(
-        ("users", "api_keys"),
-        (&payload.uuid, &payload),
-        &related_items,
-    )
+    state
+        .insert_related_items(
+            ("users", "api_keys"),
+            (&payload.uuid, &payload),
+            &related_items,
+        )
+        .into()
 }
 
 #[tracing::instrument(skip(state), level = "debug")]
-async fn delete_user(State(state): State<AppState>, Path(uuid): Path<Uuid>) -> StatusCode {
+async fn delete_user(
+    State(state): State<AppState>,
+    Path(uuid): Path<Uuid>,
+) -> DatabaseActionResult {
     state.remove_related_items::<_, User>(("users", "api_keys"), &uuid)
 }
 
 async fn get_roles(State(state): State<AppState>) -> Result<Json<Vec<Role>>, StatusCode> {
-    state.get_table("roles").map(|output| Json(output))
+    state.get_table("roles").into()
 }
 
 async fn get_role(
     State(state): State<AppState>,
     Path(uuid): Path<Uuid>,
 ) -> Result<Json<Role>, StatusCode> {
-    state.get_item("roles", &uuid).map(|output| Json(output))
+    state.get_item("roles", &uuid).into()
 }
 
 async fn add_role_post(
@@ -626,12 +654,10 @@ async fn add_role_post(
     }
     payload.uuid = Uuid::new_v4();
 
-    let status = state.insert_item("roles", &payload.uuid, &payload);
-
-    if status.is_success() {
-        Ok(Json(payload.uuid))
-    } else {
-        Err(status)
+    match state.insert_item("roles", &payload.uuid, &payload) {
+        DatabaseActionResult::Success => Ok(Json(payload.uuid)),
+        DatabaseActionResult::NotFound => Err(StatusCode::NOT_FOUND),
+        DatabaseActionResult::BackendError => Err(StatusCode::INTERNAL_SERVER_ERROR),
     }
 }
 
@@ -640,7 +666,7 @@ async fn add_role_put(State(state): State<AppState>, Json(payload): Json<Role>) 
         return StatusCode::BAD_REQUEST;
     }
 
-    state.insert_item("roles", &payload.uuid, &payload)
+    state.insert_item("roles", &payload.uuid, &payload).into()
 }
 
 async fn update_role(
@@ -653,22 +679,25 @@ async fn update_role(
     }
     payload.uuid = uuid;
 
-    state.insert_item("roles", &payload.uuid, &payload)
+    state.insert_item("roles", &payload.uuid, &payload).into()
 }
 
-async fn delete_role(State(state): State<AppState>, Path(uuid): Path<Uuid>) -> StatusCode {
+async fn delete_role(
+    State(state): State<AppState>,
+    Path(uuid): Path<Uuid>,
+) -> DatabaseActionResult {
     state.remove_item("roles", &uuid)
 }
 
 async fn get_models(State(state): State<AppState>) -> Result<Json<Vec<Model>>, StatusCode> {
-    state.get_table("models").map(|output| Json(output))
+    state.get_table("models").into()
 }
 
 async fn get_model(
     State(state): State<AppState>,
     Path(uuid): Path<Uuid>,
 ) -> Result<Json<Model>, StatusCode> {
-    state.get_item("models", &uuid).map(|output| Json(output))
+    state.get_item("models", &uuid).into()
 }
 
 async fn add_model_post(
@@ -680,12 +709,10 @@ async fn add_model_post(
     }
     payload.uuid = Uuid::new_v4();
 
-    let status = state.insert_item("models", &payload.uuid, &payload);
-
-    if status.is_success() {
-        Ok(Json(payload.uuid))
-    } else {
-        Err(status)
+    match state.insert_item("models", &payload.uuid, &payload) {
+        DatabaseActionResult::Success => Ok(Json(payload.uuid)),
+        DatabaseActionResult::NotFound => Err(StatusCode::NOT_FOUND),
+        DatabaseActionResult::BackendError => Err(StatusCode::INTERNAL_SERVER_ERROR),
     }
 }
 
@@ -694,7 +721,7 @@ async fn add_model_put(State(state): State<AppState>, Json(payload): Json<Model>
         return StatusCode::BAD_REQUEST;
     }
 
-    state.insert_item("models", &payload.uuid, &payload)
+    state.insert_item("models", &payload.uuid, &payload).into()
 }
 
 async fn update_model(
@@ -707,22 +734,25 @@ async fn update_model(
     }
     payload.uuid = uuid;
 
-    state.insert_item("models", &payload.uuid, &payload)
+    state.insert_item("models", &payload.uuid, &payload).into()
 }
 
-async fn delete_model(State(state): State<AppState>, Path(uuid): Path<Uuid>) -> StatusCode {
+async fn delete_model(
+    State(state): State<AppState>,
+    Path(uuid): Path<Uuid>,
+) -> DatabaseActionResult {
     state.remove_item("models", &uuid)
 }
 
 async fn get_quotas(State(state): State<AppState>) -> Result<Json<Vec<Quota>>, StatusCode> {
-    state.get_table("quotas").map(|output| Json(output))
+    state.get_table("quotas").into()
 }
 
 async fn get_quota(
     State(state): State<AppState>,
     Path(uuid): Path<Uuid>,
 ) -> Result<Json<Quota>, StatusCode> {
-    state.get_item("quotas", &uuid).map(|output| Json(output))
+    state.get_item("quotas", &uuid).into()
 }
 
 async fn add_quota_post(
@@ -734,12 +764,10 @@ async fn add_quota_post(
     }
     payload.uuid = Uuid::new_v4();
 
-    let status = state.insert_item("quotas", &payload.uuid, &payload);
-
-    if status.is_success() {
-        Ok(Json(payload.uuid))
-    } else {
-        Err(status)
+    match state.insert_item("quotas", &payload.uuid, &payload) {
+        DatabaseActionResult::Success => Ok(Json(payload.uuid)),
+        DatabaseActionResult::NotFound => Err(StatusCode::NOT_FOUND),
+        DatabaseActionResult::BackendError => Err(StatusCode::INTERNAL_SERVER_ERROR),
     }
 }
 
@@ -748,7 +776,7 @@ async fn add_quota_put(State(state): State<AppState>, Json(payload): Json<Quota>
         return StatusCode::BAD_REQUEST;
     }
 
-    state.insert_item("quotas", &payload.uuid, &payload)
+    state.insert_item("quotas", &payload.uuid, &payload).into()
 }
 
 async fn update_quota(
@@ -761,9 +789,12 @@ async fn update_quota(
     }
     payload.uuid = uuid;
 
-    state.insert_item("quotas", &payload.uuid, &payload)
+    state.insert_item("quotas", &payload.uuid, &payload).into()
 }
 
-async fn delete_quota(State(state): State<AppState>, Path(uuid): Path<Uuid>) -> StatusCode {
+async fn delete_quota(
+    State(state): State<AppState>,
+    Path(uuid): Path<Uuid>,
+) -> DatabaseActionResult {
     state.remove_item("quotas", &uuid)
 }

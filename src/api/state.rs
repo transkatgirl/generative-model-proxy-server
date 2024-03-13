@@ -1,5 +1,3 @@
-use axum::http::StatusCode;
-
 use serde::{de::DeserializeOwned, Serialize};
 use sled::{
     transaction::{ConflictableTransactionError, TransactionError, Transactional},
@@ -27,29 +25,48 @@ enum Either<A, B> {
     B(B),
 }
 
+pub(super) enum DatabaseActionResult {
+    Success,
+    NotFound,
+    BackendError,
+}
+
+pub(super) enum DatabaseValueResult<T> {
+    Success(T),
+    NotFound,
+    BackendError,
+}
+
+pub(super) enum DatabaseFunctionResult<T, E> {
+    Success(T),
+    FunctionError(E),
+    BackendError,
+}
+
 impl AppState {
     #[tracing::instrument(skip(self), level = "debug")]
-    pub(super) fn get_table<V>(&self, table: &str) -> Result<Vec<V>, StatusCode>
+    pub(super) fn get_table<V>(&self, table: &str) -> DatabaseValueResult<Vec<V>>
     where
         V: DeserializeOwned,
     {
         match self.database.open_tree(table.as_bytes()) {
-            Ok(tree) => Ok(tree
-                .iter()
-                .filter_map(|item| {
-                    item.ok()
-                        .and_then(|(_, value)| postcard::from_bytes(&value).ok())
-                })
-                .collect()),
+            Ok(tree) => DatabaseValueResult::Success(
+                tree.iter()
+                    .filter_map(|item| {
+                        item.ok()
+                            .and_then(|(_, value)| postcard::from_bytes(&value).ok())
+                    })
+                    .collect(),
+            ),
             Err(error) => {
                 tracing::warn!("Unable to open \"{}\" table: {}", table, error);
-                Err(StatusCode::INTERNAL_SERVER_ERROR)
+                DatabaseValueResult::BackendError
             }
         }
     }
 
     #[tracing::instrument(skip(self, key), level = "debug")]
-    pub(super) fn get_item<K, V>(&self, table: &str, key: &K) -> Result<V, StatusCode>
+    pub(super) fn get_item<K, V>(&self, table: &str, key: &K) -> DatabaseValueResult<V>
     where
         K: Serialize,
         V: DeserializeOwned,
@@ -60,18 +77,20 @@ impl AppState {
                     match tree.get(
                         postcard::to_stdvec(key).map_err(ConflictableTransactionError::Abort)?,
                     )? {
-                        Some(value) => Ok(Ok(postcard::from_bytes(&value)
-                            .map_err(ConflictableTransactionError::Abort)?)),
-                        None => Ok(Err(StatusCode::NOT_FOUND)),
+                        Some(value) => Ok(DatabaseValueResult::Success(
+                            postcard::from_bytes(&value)
+                                .map_err(ConflictableTransactionError::Abort)?,
+                        )),
+                        None => Ok(DatabaseValueResult::NotFound),
                     }
                 })
                 .unwrap_or_else(|error| {
                     tracing::warn!("Unable to apply database transaction: {}", error);
-                    Err(StatusCode::INTERNAL_SERVER_ERROR)
+                    DatabaseValueResult::BackendError
                 }),
             Err(error) => {
                 tracing::warn!("Unable to open \"{}\" table: {}", table, error);
-                Err(StatusCode::INTERNAL_SERVER_ERROR)
+                DatabaseValueResult::BackendError
             }
         }
     }
@@ -81,7 +100,7 @@ impl AppState {
         &self,
         table: &str,
         keys: &[K],
-    ) -> Result<Vec<V>, StatusCode>
+    ) -> DatabaseValueResult<Vec<V>>
     where
         K: Serialize,
         V: DeserializeOwned,
@@ -103,15 +122,15 @@ impl AppState {
                         }
                     }
 
-                    Ok(Ok(values))
+                    Ok(DatabaseValueResult::Success(values))
                 })
                 .unwrap_or_else(|error| {
                     tracing::warn!("Unable to apply database transaction: {}", error);
-                    Err(StatusCode::INTERNAL_SERVER_ERROR)
+                    DatabaseValueResult::BackendError
                 }),
             Err(error) => {
                 tracing::warn!("Unable to open \"{}\" table: {}", table, error);
-                Err(StatusCode::INTERNAL_SERVER_ERROR)
+                DatabaseValueResult::BackendError
             }
         }
     }
@@ -121,7 +140,7 @@ impl AppState {
         &self,
         tables: (&str, &str),
         key: &K,
-    ) -> Result<W, StatusCode>
+    ) -> DatabaseValueResult<W>
     where
         K: Serialize,
         V: DeserializeOwned + RelatedToItem,
@@ -131,7 +150,7 @@ impl AppState {
             Ok(tree) => tree,
             Err(error) => {
                 tracing::warn!("Unable to open \"{}\" table: {}", tables.0, error);
-                return Err(StatusCode::INTERNAL_SERVER_ERROR);
+                return DatabaseValueResult::BackendError;
             }
         };
 
@@ -139,7 +158,7 @@ impl AppState {
             Ok(tree) => tree,
             Err(error) => {
                 tracing::warn!("Unable to open \"{}\" table: {}", tables.1, error);
-                return Err(StatusCode::INTERNAL_SERVER_ERROR);
+                return DatabaseValueResult::BackendError;
             }
         };
 
@@ -155,21 +174,23 @@ impl AppState {
                         postcard::to_stdvec(&deserialized.get_key(tables.1))
                             .map_err(ConflictableTransactionError::Abort)?,
                     )? {
-                        return Ok(Ok(postcard::from_bytes(&value)
-                            .map_err(ConflictableTransactionError::Abort)?));
+                        return Ok(DatabaseValueResult::Success(
+                            postcard::from_bytes(&value)
+                                .map_err(ConflictableTransactionError::Abort)?,
+                        ));
                     }
                 }
 
-                Ok(Err(StatusCode::NOT_FOUND))
+                Ok(DatabaseValueResult::NotFound)
             })
             .unwrap_or_else(|error| {
                 tracing::warn!("Unable to apply database transaction: {}", error);
-                Err(StatusCode::INTERNAL_SERVER_ERROR)
+                DatabaseValueResult::BackendError
             })
     }
 
     #[tracing::instrument(skip(self, key, value), level = "debug")]
-    pub(super) fn insert_item<K, V>(&self, table: &str, key: &K, value: &V) -> StatusCode
+    pub(super) fn insert_item<K, V>(&self, table: &str, key: &K, value: &V) -> DatabaseActionResult
     where
         K: Serialize,
         V: Serialize,
@@ -182,15 +203,15 @@ impl AppState {
                         postcard::to_stdvec(value).map_err(ConflictableTransactionError::Abort)?,
                     )?;
 
-                    Ok(StatusCode::OK)
+                    Ok(DatabaseActionResult::Success)
                 })
                 .unwrap_or_else(|error| {
                     tracing::warn!("Unable to apply database transaction: {}", error);
-                    StatusCode::INTERNAL_SERVER_ERROR
+                    DatabaseActionResult::BackendError
                 }),
             Err(error) => {
                 tracing::warn!("Unable to open \"{}\" table: {}", table, error);
-                StatusCode::INTERNAL_SERVER_ERROR
+                DatabaseActionResult::BackendError
             }
         }
     }
@@ -201,7 +222,7 @@ impl AppState {
         table: &str,
         keys: &[K],
         filter_mapper: F,
-    ) -> Result<Result<Vec<T>, E>, StatusCode>
+    ) -> DatabaseFunctionResult<Vec<T>, E>
     where
         K: Serialize,
         V: Serialize + DeserializeOwned,
@@ -237,22 +258,24 @@ impl AppState {
                         }
                     }
 
-                    Ok(Ok(Ok(outputs)))
+                    Ok(DatabaseFunctionResult::Success(outputs))
                 })
                 .unwrap_or_else(|error| match error {
                     TransactionError::Abort(Either::A(error)) => {
                         tracing::warn!("Unable to apply database transaction: {}", error);
-                        Err(StatusCode::INTERNAL_SERVER_ERROR)
+                        DatabaseFunctionResult::BackendError
                     }
-                    TransactionError::Abort(Either::B(error)) => Ok(Err(error)),
+                    TransactionError::Abort(Either::B(error)) => {
+                        DatabaseFunctionResult::FunctionError(error)
+                    }
                     TransactionError::Storage(error) => {
                         tracing::warn!("Unable to apply database transaction: {}", error);
-                        Err(StatusCode::INTERNAL_SERVER_ERROR)
+                        DatabaseFunctionResult::BackendError
                     }
                 }),
             Err(error) => {
                 tracing::warn!("Unable to open \"{}\" table: {}", table, error);
-                Err(StatusCode::INTERNAL_SERVER_ERROR)
+                DatabaseFunctionResult::BackendError
             }
         }
     }
@@ -263,7 +286,7 @@ impl AppState {
         tables: (&str, &str),
         main_item: (&K, &V),
         related_items: &[(L, W)],
-    ) -> StatusCode
+    ) -> DatabaseActionResult
     where
         K: Serialize,
         L: Serialize,
@@ -274,7 +297,7 @@ impl AppState {
             Ok(tree) => tree,
             Err(error) => {
                 tracing::warn!("Unable to open \"{}\" table: {}", tables.0, error);
-                return StatusCode::INTERNAL_SERVER_ERROR;
+                return DatabaseActionResult::BackendError;
             }
         };
 
@@ -282,7 +305,7 @@ impl AppState {
             Ok(tree) => tree,
             Err(error) => {
                 tracing::warn!("Unable to open \"{}\" table: {}", tables.1, error);
-                return StatusCode::INTERNAL_SERVER_ERROR;
+                return DatabaseActionResult::BackendError;
             }
         };
 
@@ -315,41 +338,50 @@ impl AppState {
 
                 table_related.apply_batch(&batch)?;
 
-                Ok(StatusCode::OK)
+                Ok(DatabaseActionResult::Success)
             })
             .unwrap_or_else(|error| {
                 tracing::warn!("Unable to apply database transaction: {}", error);
-                StatusCode::INTERNAL_SERVER_ERROR
+                DatabaseActionResult::BackendError
             })
     }
 
     #[tracing::instrument(skip(self, key), level = "debug")]
-    pub(super) fn remove_item<K>(&self, table: &str, key: &K) -> StatusCode
+    pub(super) fn remove_item<K>(&self, table: &str, key: &K) -> DatabaseActionResult
     where
         K: Serialize,
     {
         match self.database.open_tree(table.as_bytes()) {
             Ok(tree) => tree
                 .transaction(|tree| {
-                    tree.remove(
-                        postcard::to_stdvec(key).map_err(ConflictableTransactionError::Abort)?,
-                    )?;
-
-                    Ok(StatusCode::OK)
+                    match tree
+                        .remove(
+                            postcard::to_stdvec(key)
+                                .map_err(ConflictableTransactionError::Abort)?,
+                        )?
+                        .is_some()
+                    {
+                        true => Ok(DatabaseActionResult::Success),
+                        false => Ok(DatabaseActionResult::NotFound),
+                    }
                 })
                 .unwrap_or_else(|error| {
                     tracing::warn!("Unable to apply database transaction: {}", error);
-                    StatusCode::INTERNAL_SERVER_ERROR
+                    DatabaseActionResult::BackendError
                 }),
             Err(error) => {
                 tracing::warn!("Unable to open \"{}\" table: {}", table, error);
-                StatusCode::INTERNAL_SERVER_ERROR
+                DatabaseActionResult::BackendError
             }
         }
     }
 
     #[tracing::instrument(skip(self, key), level = "debug")]
-    pub(super) fn remove_related_items<K, V>(&self, tables: (&str, &str), key: &K) -> StatusCode
+    pub(super) fn remove_related_items<K, V>(
+        &self,
+        tables: (&str, &str),
+        key: &K,
+    ) -> DatabaseActionResult
     where
         K: Serialize,
         V: Serialize + DeserializeOwned + RelatedToItemSet,
@@ -358,7 +390,7 @@ impl AppState {
             Ok(tree) => tree,
             Err(error) => {
                 tracing::warn!("Unable to open \"{}\" table: {}", tables.0, error);
-                return StatusCode::INTERNAL_SERVER_ERROR;
+                return DatabaseActionResult::BackendError;
             }
         };
 
@@ -366,7 +398,7 @@ impl AppState {
             Ok(tree) => tree,
             Err(error) => {
                 tracing::warn!("Unable to open \"{}\" table: {}", tables.1, error);
-                return StatusCode::INTERNAL_SERVER_ERROR;
+                return DatabaseActionResult::BackendError;
             }
         };
 
@@ -388,14 +420,14 @@ impl AppState {
                         }
                         table_related.apply_batch(&batch)?;
 
-                        Ok(StatusCode::OK)
+                        Ok(DatabaseActionResult::Success)
                     }
-                    None => Ok(StatusCode::NOT_FOUND),
+                    None => Ok(DatabaseActionResult::NotFound),
                 }
             })
             .unwrap_or_else(|error| {
                 tracing::warn!("Unable to apply database transaction: {}", error);
-                StatusCode::INTERNAL_SERVER_ERROR
+                DatabaseActionResult::BackendError
             })
     }
 }
