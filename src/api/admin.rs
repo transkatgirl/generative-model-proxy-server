@@ -50,7 +50,7 @@ pub fn admin_router() -> Router<AppState> {
             get(get_quota).patch(update_quota).delete(delete_quota),
         )
         .fallback(StatusCode::NOT_FOUND)
-        .route_layer(middleware::from_fn(super::authenticate_admin))
+        .layer(middleware::from_fn(super::authenticate_admin))
 }
 
 impl From<DatabaseActionResult> for StatusCode {

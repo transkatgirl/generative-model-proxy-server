@@ -45,6 +45,11 @@ pub(super) enum DatabaseFunctionResult<T, E> {
 
 impl AppState {
     #[tracing::instrument(skip(self), level = "debug")]
+    pub(super) fn is_database_empty(&self) -> bool {
+        self.database.tree_names().len() < 2
+    }
+
+    #[tracing::instrument(skip(self), level = "debug")]
     pub(super) fn get_table<V>(&self, table: &str) -> DatabaseValueResult<Vec<V>>
     where
         V: DeserializeOwned,

@@ -12,7 +12,7 @@ use axum::{
 
 use fast32::base64::RFC4648;
 use http::{
-    header::{AUTHORIZATION, CONTENT_TYPE},
+    header::{AUTHORIZATION, CONTENT_TYPE, WWW_AUTHENTICATE},
     Method,
 };
 use serde::{Deserialize, Serialize};
@@ -28,7 +28,7 @@ use state::{RelatedToItem, RelatedToItemSet};
 
 use crate::limiter::{self, LimiterResult};
 
-use self::state::{DatabaseFunctionResult, DatabaseValueResult};
+use self::state::{DatabaseActionResult, DatabaseFunctionResult, DatabaseValueResult};
 
 use super::{
     limiter::Limit,
@@ -100,12 +100,36 @@ struct Authenticated {
 
 #[tracing::instrument(level = "debug", skip(state))]
 pub fn api_router(state: AppState) -> Router {
+    if state.is_database_empty() {
+        let setup_user = User {
+            label: "setup-user".to_string(),
+            uuid: Uuid::new_v4(),
+            admin: true,
+            api_keys: vec![format!("{}", Uuid::new_v4())],
+            roles: Vec::new(),
+            models: Vec::new(),
+            quotas: Vec::new(),
+        };
+
+        if let DatabaseActionResult::Success = state.insert_related_items(
+            ("users", "api_keys"),
+            (&setup_user.uuid, &setup_user),
+            &[(setup_user.api_keys[0].clone(), setup_user.uuid)],
+        ) {
+            tracing::info!(
+                "Added administrator API key {}. Please use the /admin/ API to configure your proxy.",
+                setup_user.api_keys[0]
+            )
+        }
+    }
+
     Router::new()
         .fallback(model_request)
         .nest("/admin", admin::admin_router())
         .with_state(state.clone())
         .layer(DefaultBodyLimit::max(16_777_216))
-        .route_layer(middleware::from_fn_with_state(state, authenticate))
+        .layer(middleware::from_fn_with_state(state, authenticate))
+        .layer(middleware::map_response(modify_response))
         .layer(TraceLayer::new_for_http())
 }
 
@@ -123,10 +147,18 @@ async fn authenticate(
         .and_then(|header_value| {
             header_value.to_str().ok().and_then(|header_string| {
                 header_string
-                    .to_ascii_lowercase()
-                    .strip_prefix("basic ")
-                    .or(header_string.strip_prefix("bearer "))
-                    .map(|string| string.to_string())
+                    .strip_prefix("Bearer ")
+                    .map(|value| value.to_string())
+                    .or_else(|| {
+                        header_string
+                            .strip_prefix("Basic ")
+                            .and_then(|auth_encoded| RFC4648.decode_str(auth_encoded).ok())
+                            .and_then(|auth_decoded| {
+                                String::from_utf8(auth_decoded).ok().and_then(|value| {
+                                    value.strip_prefix(':').map(|value| value.to_string())
+                                })
+                            })
+                    })
             })
         }) {
         Some(api_key) => {
@@ -171,6 +203,19 @@ async fn authenticate_admin(
     }
 
     Err(ModelError::UnknownEndpoint)
+}
+
+async fn modify_response<B>(mut response: Response<B>) -> Response<B> {
+    if response.status() == StatusCode::UNAUTHORIZED {
+        response.headers_mut().insert(
+            WWW_AUTHENTICATE,
+            "Basic realm=\"Please enter your API key into the password field.\", charset=\"UTF-8\""
+                .parse()
+                .unwrap(),
+        );
+    }
+
+    response
 }
 
 #[tracing::instrument(level = "trace", skip(state), ret)]
