@@ -17,17 +17,16 @@
 	</p>
 	<p>You can add your first administrator user using the following <code>curl</code> command:</p>
 	<pre>
-<code id="line-1">curl http://127.0.0.1:8080/admin/users \</code>
-<code>	--header "Authorization: Bearer setup-key" \</code>
+<code id="line-1">curl "http://localhost:8080/admin/users" \</code>
+<code>	--oauth2-bearer "setup-key" \</code>
 <code>	--json \</code>
-<code>	'{</code>
-<code>		"label": "Administrator",</code>
-<code>		"api_keys": [</code>
-<code id="line-7">			"YOUR_API_KEY_GOES_HERE"</code>
-<code>		],</code>
-<code>		"admin": true</code>
-<code>	}'</code>
-	</pre>
+<code>'{</code>
+<code>	"label": "Administrator",</code>
+<code>	"api_keys": [</code>
+<code id="line-7">		"YOUR_API_KEY_GOES_HERE"</code>
+<code>	],</code>
+<code>	"admin": true</code>
+<code>}'</code></pre>
 	<p>
 		After running this command,
 		<strong>save your API key in a secure place</strong>.
@@ -36,7 +35,12 @@
 	</p>
 	<p id="key-reminder">After adding a user, reload this page to see the program's documentation.</p>
 	<script>
-		document.getElementById("line-1").innerText = "curl " + new URL("./users", new URL(window.location.pathname, window.location.origin).href) + " \\";
+		function get_curl_url(relative) {
+			let url = JSON.stringify(new URL(relative, new URL(window.location.pathname, window.location.origin).href));
+			return `curl ${url} \\`;
+		}
+
+		document.getElementById("line-1").innerText = get_curl_url("./users");
 
 		function dec2base32(dec) {
 			return dec.toString(32).padStart(2, "0");
@@ -49,7 +53,7 @@
 		}
 
 		var api_key = generateKey(32);
-		document.getElementById("line-7").innerText = "			\"" + api_key + "\"";
+		document.getElementById("line-7").innerText = "		\"" + api_key + "\"";
 		document.getElementById("key-reminder").innerHTML = "The API key of your added user will be <code>" + api_key + "</code>. " + document.getElementById("key-reminder").innerHTML;
 	</script>
 </body>

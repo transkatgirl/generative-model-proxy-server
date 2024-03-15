@@ -2,4 +2,4 @@
 .DS_Store
 /spec
 /testing
-/database.sled
+/database_v*.sled_v*

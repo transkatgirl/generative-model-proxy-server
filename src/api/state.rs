@@ -325,7 +325,6 @@ impl AppState {
 
         (&table_main, &table_related)
             .transaction(|(table_main, table_related)| {
-                let mut batch = Batch::default();
                 if let Some(payload) = table_main.insert(
                     postcard::to_stdvec(main_item.0)
                         .map_err(Either::A)
@@ -338,6 +337,7 @@ impl AppState {
                         .map_err(Either::A)
                         .map_err(ConflictableTransactionError::Abort)?;
 
+                    let mut batch = Batch::default();
                     for linked_key in deserialized.get_keys(tables.1) {
                         batch.remove(
                             postcard::to_stdvec(&linked_key)
@@ -345,8 +345,10 @@ impl AppState {
                                 .map_err(ConflictableTransactionError::Abort)?,
                         )
                     }
+                    table_related.apply_batch(&batch)?;
                 }
 
+                let mut batch = Batch::default();
                 for (key, value) in related_items {
                     let key = postcard::to_stdvec(key)
                         .map_err(Either::A)

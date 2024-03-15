@@ -24,8 +24,8 @@ struct Args {
     #[arg(short, long, default_value = "127.0.0.1:8080")]
     bind_to: SocketAddr,
 
-    #[arg(short, long, default_value = "database.sled")]
-    database_file: PathBuf,
+    #[arg(short, long, default_value = "database_v0.1.0.sled_v0.34.7")]
+    database_folder: PathBuf,
 
     #[arg(short, long)]
     opentelemetry_endpoint: Option<String>,
@@ -89,7 +89,7 @@ async fn main() -> Result<()> {
             .build()
             .context("Unable to initalize HTTP client")?,
         database: sled::Config::default()
-            .path(&args.database_file)
+            .path(&args.database_folder)
             .mode(Mode::HighThroughput)
             .open()
             .context("Unable to initalize database")?,
