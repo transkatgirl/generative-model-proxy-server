@@ -31,6 +31,12 @@ pub(super) enum DatabaseActionResult {
     BackendError,
 }
 
+pub(super) enum DatabaseLinkedInsertionResult {
+    Success,
+    Duplicate,
+    BackendError,
+}
+
 pub(super) enum DatabaseValueResult<T> {
     Success(T),
     NotFound,
@@ -45,8 +51,11 @@ pub(super) enum DatabaseFunctionResult<T, E> {
 
 impl AppState {
     #[tracing::instrument(skip(self), level = "debug")]
-    pub fn is_database_empty(&self) -> bool {
-        self.database.tree_names().len() < 2
+    pub fn is_table_empty(&self, table: &str) -> bool {
+        match self.database.open_tree(table.as_bytes()) {
+            Ok(tree) => tree.is_empty(),
+            Err(_) => false,
+        }
     }
 
     #[tracing::instrument(skip(self), level = "debug")]
@@ -291,7 +300,7 @@ impl AppState {
         tables: (&str, &str),
         main_item: (&K, &V),
         related_items: &[(L, W)],
-    ) -> DatabaseActionResult
+    ) -> DatabaseLinkedInsertionResult
     where
         K: Serialize,
         L: Serialize,
@@ -302,7 +311,7 @@ impl AppState {
             Ok(tree) => tree,
             Err(error) => {
                 tracing::warn!("Unable to open \"{}\" table: {}", tables.0, error);
-                return DatabaseActionResult::BackendError;
+                return DatabaseLinkedInsertionResult::BackendError;
             }
         };
 
@@ -310,7 +319,7 @@ impl AppState {
             Ok(tree) => tree,
             Err(error) => {
                 tracing::warn!("Unable to open \"{}\" table: {}", tables.1, error);
-                return DatabaseActionResult::BackendError;
+                return DatabaseLinkedInsertionResult::BackendError;
             }
         };
 
@@ -319,35 +328,58 @@ impl AppState {
                 let mut batch = Batch::default();
                 if let Some(payload) = table_main.insert(
                     postcard::to_stdvec(main_item.0)
+                        .map_err(Either::A)
                         .map_err(ConflictableTransactionError::Abort)?,
                     postcard::to_stdvec(main_item.1)
+                        .map_err(Either::A)
                         .map_err(ConflictableTransactionError::Abort)?,
                 )? {
                     let deserialized: V = postcard::from_bytes(&payload)
+                        .map_err(Either::A)
                         .map_err(ConflictableTransactionError::Abort)?;
 
                     for linked_key in deserialized.get_keys(tables.1) {
                         batch.remove(
                             postcard::to_stdvec(&linked_key)
+                                .map_err(Either::A)
                                 .map_err(ConflictableTransactionError::Abort)?,
                         )
                     }
                 }
 
                 for (key, value) in related_items {
+                    let key = postcard::to_stdvec(key)
+                        .map_err(Either::A)
+                        .map_err(ConflictableTransactionError::Abort)?;
+
+                    if let Ok(Some(_)) = table_related.get(key.clone()) {
+                        return Err(ConflictableTransactionError::Abort(Either::B(
+                            DatabaseLinkedInsertionResult::Duplicate,
+                        )));
+                    }
+
                     batch.insert(
-                        postcard::to_stdvec(key).map_err(ConflictableTransactionError::Abort)?,
-                        postcard::to_stdvec(value).map_err(ConflictableTransactionError::Abort)?,
+                        key,
+                        postcard::to_stdvec(value)
+                            .map_err(Either::A)
+                            .map_err(ConflictableTransactionError::Abort)?,
                     )
                 }
 
                 table_related.apply_batch(&batch)?;
 
-                Ok(DatabaseActionResult::Success)
+                Ok(DatabaseLinkedInsertionResult::Success)
             })
-            .unwrap_or_else(|error| {
-                tracing::warn!("Unable to apply database transaction: {}", error);
-                DatabaseActionResult::BackendError
+            .unwrap_or_else(|error| match error {
+                TransactionError::Abort(Either::A(error)) => {
+                    tracing::warn!("Unable to apply database transaction: {}", error);
+                    DatabaseLinkedInsertionResult::BackendError
+                }
+                TransactionError::Abort(Either::B(error)) => error,
+                TransactionError::Storage(error) => {
+                    tracing::warn!("Unable to apply database transaction: {}", error);
+                    DatabaseLinkedInsertionResult::BackendError
+                }
             })
     }
 

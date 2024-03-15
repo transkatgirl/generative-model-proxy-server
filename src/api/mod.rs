@@ -1,4 +1,4 @@
-use std::{clone::Clone, fmt::Debug, iter, time::Instant};
+use std::{clone::Clone, collections::HashSet, fmt::Debug, iter, time::Instant};
 
 use axum::{
     async_trait,
@@ -47,11 +47,11 @@ struct User {
 
     admin: bool,
 
-    api_keys: Vec<String>,
-    roles: Vec<Uuid>,
+    api_keys: HashSet<String>,
+    roles: HashSet<Uuid>,
 
-    models: Vec<Uuid>,
-    quotas: Vec<Uuid>,
+    models: HashSet<Uuid>,
+    quotas: HashSet<Uuid>,
 }
 
 #[derive(Default, Serialize, Deserialize, Debug, Clone)]
@@ -62,8 +62,8 @@ struct Role {
 
     admin: bool,
 
-    models: Vec<Uuid>,
-    quotas: Vec<Uuid>,
+    models: HashSet<Uuid>,
+    quotas: HashSet<Uuid>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -74,21 +74,22 @@ struct Model {
     #[serde(default)]
     uuid: Uuid,
 
+    #[serde(default)]
     name: String,
-    types: Vec<RequestType>,
+
+    #[serde(default)]
+    types: HashSet<RequestType>,
 
     api: ModelBackend,
 
     #[serde(default)]
-    quotas: Vec<Uuid>,
+    quotas: HashSet<Uuid>,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Default, Serialize, Deserialize, Debug, Clone)]
+#[serde(default)]
 struct Quota {
-    #[serde(default)]
     label: String,
-
-    #[serde(default)]
     uuid: Uuid,
 
     limits: Vec<Limit>,
@@ -146,7 +147,7 @@ async fn authenticate(
             })
         }) {
         Some(api_key) => {
-            if state.is_database_empty() && api_key == "setup-key" {
+            if state.is_table_empty("users") && api_key == "setup-key" {
                 request.extensions_mut().insert(Authenticated {
                     timestamp,
                     admin: true,
@@ -159,7 +160,8 @@ async fn authenticate(
 
             match state.get_related_item::<_, Uuid, User>(("api_keys", "users"), &api_key) {
                 DatabaseValueResult::Success(user) => {
-                    match state.get_items_skip_missing::<_, Role>("roles", &user.roles) {
+                    let roles: Vec<Uuid> = user.roles.iter().copied().collect();
+                    match state.get_items_skip_missing::<_, Role>("roles", &roles) {
                         DatabaseValueResult::Success(roles) => {
                             let mut admin = user.admin;
 
@@ -227,26 +229,18 @@ async fn model_request(
         Err(error) => return Err(error),
     };
 
-    let model_name = match request.get_model() {
-        Some(model_name) => model_name,
-        None => return Err(ModelError::UnspecifiedModel),
-    };
+    let models_result = state.get_items_skip_missing::<_, Model>(
+        "models",
+        &auth
+            .user
+            .models
+            .iter()
+            .chain(auth.roles.iter().flat_map(|role| role.models.iter()))
+            .cloned()
+            .collect::<Vec<_>>(),
+    );
 
-    let models_result = if auth.admin {
-        state.get_table("models")
-    } else {
-        state.get_items_skip_missing::<_, Model>(
-            "models",
-            &auth
-                .user
-                .models
-                .iter()
-                .chain(auth.roles.iter().flat_map(|role| role.models.iter()))
-                .cloned()
-                .collect::<Vec<_>>(),
-        )
-    };
-
+    let model_name = request.get_model().unwrap_or_default();
     let model = match models_result {
         DatabaseValueResult::Success(models) => match models
             .iter()
@@ -263,7 +257,7 @@ async fn model_request(
         return Err(ModelError::UserRateLimit);
     }
 
-    let quotas: Vec<Uuid> = auth
+    let quotas: HashSet<Uuid> = auth
         .user
         .quotas
         .iter()
@@ -271,6 +265,7 @@ async fn model_request(
         .chain(model.quotas.iter())
         .copied()
         .collect();
+    let quotas: Vec<Uuid> = quotas.iter().copied().collect();
 
     request.tags = iter::once(auth.user.uuid)
         .chain(auth.roles.iter().map(|role| role.uuid))
@@ -289,8 +284,7 @@ async fn model_request(
                     .map(|request_max_tokens| request_max_tokens.min(max_tokens))
                     .unwrap_or(max_tokens)
             })
-            .unwrap_or(1)
-            .min(u32::MAX as u64) as u32,
+            .unwrap_or(1),
     };
 
     let limit_request = |quota: &mut Quota| {
@@ -322,7 +316,7 @@ async fn model_request(
     if let Some(usage) = &response.usage {
         let limiter_response = limiter::Response {
             request: limiter_request,
-            actual_tokens: usage.total.min(u32::MAX as u64) as u32,
+            actual_tokens: usage.total,
         };
 
         let limit_response = |quota: &mut Quota| {

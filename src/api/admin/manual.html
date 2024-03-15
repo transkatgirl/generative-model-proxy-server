@@ -8,380 +8,397 @@
 
 <body>
 	<h1>Generative Model Proxy Server</h1>
-	<h2>Request Routing Overview</h2>
-	<p>Requests are routed to the following endpoints, in order of priority:</p>
-	<ul>
-		<li>/admin/ - <code>admin_router</code> endpoints
+	<nav id="table-of-contents">
+		<h2>Table of Contents</h2>
+		<ol>
+			<li><a href="#overview">Request Routing Overview</a></li>
+			<li><a href="#objects">Internal Objects</a>
+				<ol>
+					<li><a href="#user">User</a></li>
+					<li><a href="#role">Role</a></li>
+					<li><a href="#model">Model</a></li>
+					<li><a href="#quota">Quota</a></li>
+					<li><a href="#datatypes">Datatypes</a>
+						<ol>
+							<li><a href="#positive-whole-number">PositiveWholeNumber</a></li>
+							<li><a href="#uuid">Uuid</a></li>
+						</ol>
+					</li>
+				</ol>
+			</li>
+			<li>API Examples
+				<ol>
+					<li>Admin API</li>
+					<li>Model API</li>
+				</ol>
+			</li>
+			<li>Model Request Routing</li>
+			<li>Additional Configuration</li>
+		</ol>
+	</nav>
+	<section id="overview">
+		<h2>Request Routing Overview</h2>
+		<p>Requests are routed to the following endpoints, in order of priority:</p>
+		<ul>
+			<li>/admin/ - <code>admin_router</code> endpoints
+				<ul>
+					<li>/{<a href="./users">users</a>|<a href="./roles">roles</a>|<a href="./models">models</a>|<a
+							href="./quotas">quotas</a>}
+						<ul>
+							<li>GET /</li>
+							<li>POST / - JSON body required. Cannot be used to create an object with a specific UUID.
+							</li>
+							<li>PUT / - JSON body required. Object must contain a valid UUID.</li>
+							<li>GET /:uuid</li>
+							<li>PUT /:uuid - JSON body required. Cannot be used to change the object's UUID.</li>
+							<li>DELETE /:uuid</li>
+						</ul>
+					</li>
+					<li>GET <a href="./help">/help</a>
+						<ul>
+							<li>If the database has at least one user, the embedded <code>manual.html</code> page (this
+								page) will be returned.</li>
+							<li>If the database does not contain any users, the embedded
+								<code>setup-instructions.html</code> page will be returned.
+							</li>
+						</ul>
+					</li>
+				</ul>
+			</li>
+			<li>/ - <code>model_request</code> endpoints (see <a href="#model">Model</a> object for available
+				endpoints)
+				<ul>
+					<li>GET {endpoint}</li>
+					<li>POST {endpoint} - JSON body or HTML Form data required</li>
+				</ul>
+			</li>
+		</ul>
+	</section>
+	<section id="objects">
+		<h2>Internal Objects</h2>
+		<p>Object fields are mandatory unless otherwise specified.</p>
+		<p>The following types of objects can be modified using the /admin/ API:</p>
+		<ul>
+			<li id="user">User
+				<ul>
+					<li>(optional) label: String
+						<ul>
+							<li>A human-readable label for the object. Multiple objects may have the same label.</li>
+						</ul>
+					</li>
+					<li>(optional*) uuid: Uuid
+						<ul>
+							<li>Used as a reference to the object in logs, API calls, and from other objects (if
+								applicable).</li>
+							<li>A cryptographically hashed copy of the user's Uuid may be forwarded to model backends.
+							</li>
+						</ul>
+					</li>
+					<li>(optional) admin: Boolean
+						<ul>
+							<li>Allows giving administrative access to the user. This allows
+								<strong>unrestricted
+									access</strong> to the /admin/ API, but does not otherwise change how requests are
+								handled.
+							</li>
+						</ul>
+					</li>
+					<li>(optional) api_keys: []String
+						<ul>
+							<li>A list of API keys that the user can authenticate with.</li>
+							<li>The /admin/ API will not allow multiple users to have the same API key.</li>
+						</ul>
+					</li>
+					<li>(optional) roles: []Uuid
+						<ul>
+							<li>A list of roles that the user should inherit models, quotas, and administrative status
+								(if
+								applicable) from.
+							</li>
+						</ul>
+					</li>
+					<li>(optional) models: []Uuid
+						<ul>
+							<li>A list of models that the user should be able to access.</li>
+						</ul>
+					</li>
+					<li>(optional) quotas: []Uuid
+						<ul>
+							<li>A list of rate limiters that the user should be subject to.</li>
+						</ul>
+					</li>
+				</ul>
+			</li>
+			<li id="role">Role
+				<ul>
+					<li>(optional) label: String
+						<ul>
+							<li>A human-readable label for the object. Multiple objects may have the same label.</li>
+						</ul>
+					</li>
+					<li>(optional*) uuid: Uuid
+						<ul>
+							<li>Used as a reference to the object in logs, API calls, and from other objects (if
+								applicable).</li>
+						</ul>
+					</li>
+					<li>(optional) admin: Boolean
+						<ul>
+							<li>Allows giving administrative access to all users with this role. This allows
+								<strong>unrestricted
+									access</strong> to the /admin/ API, but does not otherwise change how requests are
+								handled.
+							</li>
+						</ul>
+					</li>
+					<li>(optional) models: []Uuid
+						<ul>
+							<li>A list of models that all users with this role should be able to access.</li>
+						</ul>
+					</li>
+					<li>(optional) quotas: []Uuid
+						<ul>
+							<li>A list of rate limiters that all users with this role should be subject to.</li>
+						</ul>
+					</li>
+				</ul>
+			</li>
+			<li id="model">Model
+				<ul>
+					<li>(optional) label: String
+						<ul>
+							<li>A human-readable label for the object. Multiple objects may have the same label.</li>
+						</ul>
+					</li>
+					<li>(optional*) uuid: Uuid
+						<ul>
+							<li>Used as a reference to the object in logs, API calls, and from other objects (if
+								applicable).</li>
+						</ul>
+					</li>
+					<li>(optional) name: String
+						<ul>
+							<li>Used to refer to the model in API calls.</li>
+							<li>Model names should be carefully managed by the administrator. Having the same name +
+								ModelType refer to multiple models that a user/role can access will lead to inconsistent
+								behavior.</li>
+						</ul>
+					</li>
+					<li>api: Object or String
+						<ul>
+							<li>(Key) String
+								<ul>
+									<li>The backend type used to handle requests to this model, represented as a String.
+									</li>
+								</ul>
+							</li>
+							<li>(Value) Object
+								<ul>
+									<li>An object containing backend-specific configuration options.</li>
+									<li>If a backend has no configuration options, model.api should be represented
+										by a String instead.</li>
+								</ul>
+							</li>
+							<li>The following backends are currently supported:
+								<ul>
+									<li>OpenAI
+										<ul>
+											<li>model_string: String</li>
+											<li>(optional) model_context_len: PositiveWholeNumber</li>
+											<li>openai_api_base: String</li>
+											<li>openai_api_key: String</li>
+											<li>(optional) openai_organization: String</li>
+										</ul>
+									</li>
+									<li>Loopback
+										<ul>
+											<li>This backend has no configuration options.</li>
+										</ul>
+									</li>
+								</ul>
+							</li>
+							<li>Additional backends may be added in future releases.</li>
+						</ul>
+					</li>
+					<li>(optional) types: []String
+						<ul>
+							<li>A list of endpoint types that this model should respond to requests from.</li>
+							<li>The following types are currently supported:
+								<ul>
+									<li>TextChat
+										<ul>
+											<li>/v1/chat/completions (OpenAI)</li>
+										</ul>
+									</li>
+									<li>TextCompletion
+										<ul>
+											<li>/v1/completions (OpenAI)</li>
+										</ul>
+									</li>
+									<li>TextEdit
+										<ul>
+											<li>/v1/edits (OpenAI)</li>
+										</ul>
+									</li>
+									<li>TextEmbedding
+										<ul>
+											<li>/v1/embeddings (OpenAI)</li>
+										</ul>
+									</li>
+									<li>TextModeration
+										<ul>
+											<li>/v1/moderations (OpenAI)</li>
+										</ul>
+									</li>
+									<li>ImageGeneration
+										<ul>
+											<li>/v1/images/generations (OpenAI)</li>
+										</ul>
+									</li>
+									<li>ImageEdit
+										<ul>
+											<li>/v1/images/edits (OpenAI)</li>
+										</ul>
+									</li>
+									<li>ImageVariation
+										<ul>
+											<li>/v1/images/variations (OpenAI)</li>
+										</ul>
+									</li>
+									<li>AudioTTS
+										<ul>
+											<li>/v1/audio/speech (OpenAI)</li>
+										</ul>
+									</li>
+									<li>AudioTranscription
+										<ul>
+											<li>/v1/audio/transcriptions (OpenAI)</li>
+										</ul>
+									</li>
+									<li>AudioTranslation
+										<ul>
+											<li>/v1/audio/translations (OpenAI)</li>
+										</ul>
+									</li>
+								</ul>
+							</li>
+							<li>Additional types may be added in future releases.</li>
+						</ul>
+					</li>
+					<li>(optional) quotas: []Uuid
+						<ul>
+							<li>A list of rate limiters that all requests to this model should be subject to.</li>
+							<li>Note: Some model backends may perform rate limiting independently of this option, using
+								information like HTTP headers from the backend.</li>
+						</ul>
+					</li>
+				</ul>
+			</li>
+			<li id="quota">Quota
+				<ul>
+					<li>(optional) label: String
+						<ul>
+							<li>A human-readable label for the object. Multiple objects may have the same label.</li>
+						</ul>
+					</li>
+					<li>(optional*) uuid: Uuid
+						<ul>
+							<li>Used as a reference to the object in logs, API calls, and from other objects (if
+								applicable).</li>
+						</ul>
+					</li>
+					<li>(optional) limits: []Object
+						<ul>
+							<li>A list of rate limits that this rate limiter contains.</li>
+							<li>count: PositiveWholeNumber
+								<ul>
+									<li>The maximum number of items per period.</li>
+								</ul>
+							</li>
+							<li>type: String
+								<ul>
+									<li>The type of item that this limiter should limit.</li>
+									<li>The following item types are supported:
+										<ul>
+											<li>Request</li>
+											<li>Token</li>
+										</ul>
+									</li>
+								</ul>
+							</li>
+							<li>period: PositiveWholeNumber
+								<ul>
+									<li>The period of time that this limit covers (ex. per-hour, per-minute, etc), in
+										seconds.
+									</li>
+								</ul>
+							</li>
+							<li>(optional) state: Object
+								<ul>
+									<li>An object storing the state of a Limit.</li>
+									<li>If not specified when updating an existing Limit (such as when updating a
+										Quota), the
+										state of
+										the
+										Limit will be reset.
+										<ul>
+											<li>This behavior may change in a future release.</li>
+										</ul>
+									</li>
+									<li>This object's format may change between releases, and should not be relied upon.
+									</li>
+								</ul>
+							</li>
+						</ul>
+					</li>
+				</ul>
+			</li>
+			<li>* - UUIDs are mandatory when creating an object using the PUT method.</li>
+		</ul>
+		<section id="datatypes">
+			<h3>Datatype JSON Representations</h3>
+			<p>The following datatypes have non-trivial JSON representations:</p>
 			<ul>
-				<li>/{<a href="./users">users</a>|<a href="./roles">roles</a>|<a href="./models">models</a>|<a
-						href="./quotas">quotas</a>}
+				<li id="positive-whole-number">PositiveWholeNumber (number)
 					<ul>
-						<li>GET /</li>
-						<li>POST / - JSON body required</li>
-						<li>PUT / - JSON body required</li>
-						<li>GET /:uuid</li>
-						<li>PUT /:uuid - JSON body required. Cannot be used to change the object's UUID.</li>
-						<li>DELETE /:uuid</li>
+						<li>A whole number greater than or equal to zero.</li>
+						<li>Cannot be greater than (2^64)-1.</li>
 					</ul>
 				</li>
-				<li>GET <a href="./manual">/manual</a></li>
-				<li>GET <a href="./setup-instructions">/setup-instructions</a></li>
-			</ul>
-		</li>
-		<li>/ - <code>model_request</code> endpoints (details omitted for brevity, see relevant section)
-			<ul>
-				<li>GET {endpoint}</li>
-				<li>POST {endpoint} - JSON body or HTML Form data required</li>
-			</ul>
-		</li>
-	</ul>
-	<h2>Internal Objects</h2>
-	<p>The following types of objects can be modified using the /admin/ API:</p>
-	<ul>
-		<li>User
-			<ul>
-				<li>label: String
+				<li id="uuid">Uuid (String)
 					<ul>
-						<li>A human-readable label for the object. Multiple objects may have the same label.</li>
-						<li>default = ""</li>
-					</ul>
-				</li>
-				<li>uuid: Uuid
-					<ul>
-						<li>Used as a reference to the object in logs, API calls, and from other objects (if
-							applicable).</li>
-						<li>A cryptographically hashed copy of the user's Uuid may be forwarded to model backends.</li>
-						<li>default = Uuid::random()
-							<ul>
-								<li>Must be specified when creating an object via the PUT method</li>
-							</ul>
+						<li>A unique 128-bit identifier, represented in hyphenated hexadecimal form as a lowercase
+							String.
 						</li>
-					</ul>
-				</li>
-				<li>admin: Boolean
-					<ul>
-						<li>Allows giving administrative access to the user. This allows <strong></strong>unrestricted
-							access</strong> to the /admin/ API, along with giving access to all models.
+						<li>An example of a Uuid is <code>"67e55044-10b1-426f-9247-bb680e5fe0c8"</code>.</li>
+						<li>A Uuid of all zeros is referred to as the null Uuid. Objects with a null Uuid cannot be
+							created,
+							retrieved, modified, or deleted via the /admin/ API.
 						</li>
-						<li>default = false</li>
-					</ul>
-				</li>
-				<li>api_keys - []String
-					<ul>
-						<li>A list of API keys that the user can authenticate with.</li>
-						<li>API keys should be randomly generated by the administrator. Having the same API key refer to
-							multiple users will lead to inconsistent behavior.
-							<ul>
-								<li>This behavior may change in a future release.</li>
-							</ul>
-						</li>
-						<li>default = []</li>
-					</ul>
-				</li>
-				<li>roles - []Uuid
-					<ul>
-						<li>A list of roles that the user should inherit models, quotas, and administrative status (if
-							applicable) from.
-						</li>
-						<li>default = []</li>
-					</ul>
-				</li>
-				<li>models - []Uuid
-					<ul>
-						<li>A list of models that the user should be able to access.</li>
-						<li>default = []</li>
-					</ul>
-				</li>
-				<li>quotas - []Uuid
-					<ul>
-						<li>A list of rate limiters that the user should be subject to.</li>
-						<li>Rate limiters should be carefully managed by the administrator. Having a request subject to
-							the same rate limiter multiple times (for example: specifying it twice in a User, or once in
-							a User and once in a Role that User has) will lead to the request incrementing the rate
-							limiter multiple times.</li>
-						<li>default = []</li>
 					</ul>
 				</li>
 			</ul>
-		</li>
-		<li>Role
-			<ul>
-				<li>label: String
-					<ul>
-						<li>A human-readable label for the object. Multiple objects may have the same label.</li>
-						<li>default = ""</li>
-					</ul>
-				</li>
-				<li>uuid: Uuid
-					<ul>
-						<li>Used as a reference to the object in logs, API calls, and from other objects (if
-							applicable).</li>
-						<li>default = Uuid::random()
-							<ul>
-								<li>Must be specified when creating an object via the PUT method</li>
-							</ul>
-						</li>
-					</ul>
-				</li>
-				<li>admin: Boolean
-					<ul>
-						<li>Allows giving administrative access to all users with this role. This allows
-							<strong></strong>unrestricted
-							access</strong> to the /admin/ API, along with giving access to all models.
-						</li>
-						<li>default = false</li>
-					</ul>
-				</li>
-				<li>models - []Uuid
-					<ul>
-						<li>A list of models that all users with this role should be able to access.</li>
-						<li>default = []</li>
-					</ul>
-				</li>
-				<li>quotas - []Uuid
-					<ul>
-						<li>A list of rate limiters that all users with this role should be subject to.</li>
-						<li>Rate limiters should be carefully managed by the administrator. Having a request subject to
-							the same rate limiter multiple times (for example: specifying it twice in a User, or once in
-							a User and once in a Role that User has) will lead to the request incrementing the rate
-							limiter multiple times.</li>
-						<li>default = []</li>
-					</ul>
-				</li>
-			</ul>
-		</li>
-		<li>Model
-			<ul>
-				<li>label: String
-					<ul>
-						<li>A human-readable label for the object. Multiple objects may have the same label.</li>
-						<li>default = ""</li>
-					</ul>
-				</li>
-				<li>uuid: Uuid
-					<ul>
-						<li>Used as a reference to the object in logs, API calls, and from other objects (if
-							applicable).</li>
-						<li>default = Uuid::random()
-							<ul>
-								<li>Must be specified when creating an object via the PUT method</li>
-							</ul>
-						</li>
-					</ul>
-				</li>
-				<li>name: String
-					<ul>
-						<li>Used to refer to the model in API calls.</li>
-						<li>Model names should be carefully managed by the administrator. Having the same name +
-							ModelType refer to multiple models that a user/role can access will lead to inconsistent
-							behavior.</li>
-						<li>required</li>
-					</ul>
-				</li>
-				<li>api: ModelBackend
-					<ul>
-						<li>The backend used to handle requests to this model. See the ModelBackend
-							datatype for more
-							information.</li>
-						<li>required</li>
-					</ul>
-				</li>
-				<li>types: []ModelType
-					<ul>
-						<li>A list of endpoint types that this model should respond to requests from. See the ModelType
-							datatype for more
-							information.</li>
-						<li>required</li>
-					</ul>
-				</li>
-				<li>quotas - []Uuid
-					<ul>
-						<li>A list of rate limiters that all requests to this model should be subject to.</li>
-						<li>Rate limiters should be carefully managed by the administrator. Having a request subject to
-							the same rate limiter multiple times (for example: specifying it twice in a User, or once in
-							a User and once in a Role that User has) will lead to the request incrementing the rate
-							limiter multiple times.
-							<ul>
-								<li>This behavior may change in a future release.</li>
-							</ul>
-						</li>
-						<li>Note: Some model backends may perform rate limiting independently of this option, using
-							information like HTTP headers from the backend.</li>
-						<li>default = []</li>
-					</ul>
-				</li>
-			</ul>
-		</li>
-		<li>Quota
-			<ul>
-				<li>label: String
-					<ul>
-						<li>A human-readable label for the object. Multiple objects may have the same label.</li>
-						<li>default = ""</li>
-					</ul>
-				</li>
-				<li>uuid: Uuid
-					<ul>
-						<li>Used as a reference to the object in logs, API calls, and from other objects (if
-							applicable).</li>
-						<li>default = Uuid::random()
-							<ul>
-								<li>Must be specified when creating an object via the PUT method</li>
-							</ul>
-						</li>
-					</ul>
-				</li>
-				<li>limits: []Limit
-					<ul>
-						<li>A list of rate limits that this rate limiter contains. See the Limit datatype for more
-							information.</li>
-						<li>required</li>
-					</ul>
-				</li>
-			</ul>
-		</li>
-	</ul>
-	<h3>Datatype JSON Representations</h3>
-	<ul>
-		<li>Uuid (String)
-			<ul>
-				<li>A unique 128-bit identifier, represented in hyphenated hexadecimal form as a lowercase String.</li>
-				<li>An example of a Uuid is <code>"00000000-0000-0000-0000-000000000000"</code>.</li>
-			</ul>
-		</li>
-		<li>ModelType (String)
-			<ul>
-				<li>A type of API endpoint, represented as a String.</li>
-				<li>The following types (and the endpoints they correspond with) are currently supported:
-					<ul>
-						<li>TextChat
-							<ul>
-								<li>/v1/chat/completions (OpenAI)</li>
-							</ul>
-						</li>
-						<li>TextCompletion
-							<ul>
-								<li>/v1/completions (OpenAI)</li>
-							</ul>
-						</li>
-						<li>TextEdit
-							<ul>
-								<li>/v1/edits (OpenAI)</li>
-							</ul>
-						</li>
-						<li>TextEmbedding
-							<ul>
-								<li>/v1/embeddings (OpenAI)</li>
-							</ul>
-						</li>
-						<li>TextModeration
-							<ul>
-								<li>/v1/moderations (OpenAI)</li>
-							</ul>
-						</li>
-						<li>ImageGeneration
-							<ul>
-								<li>/v1/images/generations (OpenAI)</li>
-							</ul>
-						</li>
-						<li>ImageEdit
-							<ul>
-								<li>/v1/images/edits (OpenAI)</li>
-							</ul>
-						</li>
-						<li>ImageVariation
-							<ul>
-								<li>/v1/images/variations (OpenAI)</li>
-							</ul>
-						</li>
-						<li>AudioTTS
-							<ul>
-								<li>/v1/audio/speech (OpenAI)</li>
-							</ul>
-						</li>
-						<li>AudioTranscription
-							<ul>
-								<li>/v1/audio/transcriptions (OpenAI)</li>
-							</ul>
-						</li>
-						<li>AudioTranslation
-							<ul>
-								<li>/v1/audio/translations (OpenAI)</li>
-							</ul>
-						</li>
-					</ul>
-				</li>
-				<li>Additional types may be added in future releases.</li>
-			</ul>
-		</li>
-		<li>ModelBackend (Object or String)
-			<ul>
-				<li>BackendType: String
-					<ul>
-						<li>The backend type, represented as a String.</li>
-						<li>The following types are currently supported:
-							<ul>
-								<li>OpenAI</li>
-								<li>Loopback</li>
-							</ul>
-						</li>
-						<li>Additional types may be added in future releases.</li>
-					</ul>
-				</li>
-				<li>BackendConfig: Object
-					<ul>
-						<li>Available configuration options will vary between backends.</li>
-						<li>The following backends are currently supported:
-							<ul>
-								<li>OpenAI
-									<ul>
-										<li></li>
-									</ul>
-								</li>
-								<li>Loopback
-									<ul>
-										<li>This backend has no configuration options.</li>
-									</ul>
-								</li>
-							</ul>
-						</li>
-						<li>If a backend has no configuration options, ModelBackend should be represented
-							by a String containing the BackendType instead.</li>
-					</ul>
-				</li>
-			</ul>
-		</li>
-		<li>Limit (Object)
-			<ul>
-				<li></li>
-			</ul>
-		</li>
-		<li>LimiterState (Object)
-			<ul>
-				<li>An object storing the state of a Limit.</li>
-				<li>If not specified when updating an existing Limit (such as when updating a Quota), the state of the
-					Limit will be reset.
-					<ul>
-						<li>This behavior may change in a future release.</li>
-					</ul>
-				</li>
-				<li>This object's format may change between releases, and should not be relied upon.</li>
-			</ul>
-		</li>
-	</ul>
-	<h4>Trivial Datatypes</h4>
-	<p>The following datatypes have trivial JSON representations.</p>
-	<ul>
-		<li>Boolean</li>
-		<li>String</li>
-		<li>numbers
-			<ul>
-				<li>PositiveWholeNumber</li>
-				<li>WholeNumber</li>
-				<li>FloatingPoint</li>
-			</ul>
-		</li>
-	</ul>
-	<p>Sizes of trivial datatypes should not be relied upon.</p>
-	<h3>Design Limitations</h3>
+		</section>
+	</section>
+	<section id="api-examples">
+		<h2>API Examples</h2>
+		<section id="admin-api-examples">
+			<h3>Admin API Examples</h3>
+		</section>
+		<section id="model-api-examples">
+			<h3>Model API Examples</h3>
+		</section>
+	</section>
+	<section id="model-request-routing">
+		<h2>Model Request Routing</h2>
+	</section>
+	<section id="additional-configuration">
+		<h2>Additional Configuration</h2>
+	</section>
+	<footer>
+		<hr />
+		<p><a href="https://github.com/transkatgirl/generative-model-proxy-server">Generative Model Proxy Server</a> by
+			<a href="https://github.com/transkatgirl">transkatgirl</a>
+		</p>
+	</footer>
 </body>

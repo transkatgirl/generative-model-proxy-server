@@ -1,4 +1,4 @@
-use std::{sync::Arc, time::Duration};
+use std::{net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -7,7 +7,7 @@ use opentelemetry::KeyValue;
 use opentelemetry_otlp::WithExportConfig;
 use opentelemetry_sdk::{trace, Resource};
 use reqwest::{Client, ClientBuilder};
-use sled::Db; // sled should probably be replaced with a proper database at some point. will need to write manual migrations when that time comes.
+use sled::{Db, Mode}; // sled should probably be replaced with a proper database at some point. will need to write manual migrations when that time comes.
 use tokio::{net::TcpListener, signal};
 use tracing::Level;
 use tracing_subscriber::{filter, layer::SubscriberExt, util::SubscriberInitExt};
@@ -22,10 +22,10 @@ use limiter::LimiterClock;
 #[command(author, version, about)]
 struct Args {
     #[arg(short, long, default_value = "127.0.0.1:8080")]
-    bind_to: String,
+    bind_to: SocketAddr,
 
     #[arg(short, long, default_value = "database.sled")]
-    database_file: String,
+    database_file: PathBuf,
 
     #[arg(short, long)]
     opentelemetry_endpoint: Option<String>,
@@ -79,8 +79,6 @@ async fn main() -> Result<()> {
         None => registry.init(),
     }
 
-    let database = sled::open(&args.database_file).context("Unable to initalize database")?;
-
     let state = AppState {
         http: ClientBuilder::new()
             .user_agent("language-model-proxy-server")
@@ -90,7 +88,11 @@ async fn main() -> Result<()> {
             .http2_keep_alive_while_idle(true)
             .build()
             .context("Unable to initalize HTTP client")?,
-        database: database.clone(),
+        database: sled::Config::default()
+            .path(&args.database_file)
+            .mode(Mode::HighThroughput)
+            .open()
+            .context("Unable to initalize database")?,
         clock: Arc::new(LimiterClock::new()),
     };
 
@@ -98,21 +100,22 @@ async fn main() -> Result<()> {
         .await
         .with_context(|| format!("Failed to bind HTTP server to {}", &args.bind_to))?;
 
-    if state.is_database_empty() {
+    if state.is_table_empty("users") {
+        let addr = listener.local_addr().unwrap_or(args.bind_to);
         let mut parts = Parts::default();
         parts.scheme = Some(Scheme::HTTP);
-        parts.authority = Authority::try_from(args.bind_to.clone()).ok();
-        parts.path_and_query = Some(PathAndQuery::from_static("/admin/setup-instructions"));
+        parts.authority = Authority::try_from(format!("{}", addr)).ok();
+        parts.path_and_query = Some(PathAndQuery::from_static("/admin/help"));
 
         let uri = match Uri::from_parts(parts) {
             Ok(uri) => format!("{}", uri),
-            Err(_) => "/admin/setup-instructions".to_string(),
+            Err(_) => "/admin/help".to_string(),
         };
 
-        tracing::warn!("It looks like your database is empty. Please see {} (login with a blank username and \"setup-key\" as the password) for more information.", uri)
+        tracing::warn!("It looks like you don't have any users added to your database. Please see {} (login with a blank username and \"setup-key\" as the password) for more information.", uri)
     }
 
-    axum::serve(listener, api::api_router(state))
+    axum::serve(listener, api::api_router(state.clone()))
         .with_graceful_shutdown(async move {
             if let Err(error) = signal::ctrl_c().await {
                 tracing::error!("Unable to run signal handler task: {}", error)
@@ -122,7 +125,7 @@ async fn main() -> Result<()> {
         .context("Failed to start HTTP server")?;
 
     tracing::debug!("flushing database to disk");
-    if let Err(error) = database.flush_async().await {
+    if let Err(error) = state.database.flush_async().await {
         tracing::error!("Unable to flush database to disk: {}", error)
     }
 

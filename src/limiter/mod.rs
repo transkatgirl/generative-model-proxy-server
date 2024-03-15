@@ -17,9 +17,9 @@ pub(super) enum LimitItem {
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub(super) struct Limit {
-    pub(super) count: u32,
+    pub(super) count: u64,
     pub(super) r#type: LimitItem,
-    pub(super) per: Duration,
+    pub(super) period: u64,
     state: Option<LimiterState>,
 }
 
@@ -80,13 +80,13 @@ impl LimiterState {
 #[derive(Debug)]
 pub(super) struct Request {
     pub(super) arrived_at: Instant,
-    pub(super) estimated_tokens: u32,
+    pub(super) estimated_tokens: u64,
 }
 
 #[derive(Debug)]
 pub(super) struct Response {
     pub(super) request: Request,
-    pub(super) actual_tokens: u32,
+    pub(super) actual_tokens: u64,
 }
 
 #[derive(Debug)]
@@ -102,10 +102,13 @@ impl Limit {
         let mut state = GcraState {
             tat: self.state.map(|state| state.to_monotonic(clock)),
         };
-        let rate_limit = RateLimit::new(self.count, self.per);
+        let rate_limit = RateLimit::new(
+            self.count.max(u32::MAX as u64) as u32,
+            Duration::from_secs(self.period),
+        );
         let cost = match self.r#type {
             LimitItem::Request => 1,
-            LimitItem::Token => request.estimated_tokens,
+            LimitItem::Token => request.estimated_tokens.max(u32::MAX as u64) as u32,
         };
 
         let result = match state.check_and_modify_at(&rate_limit, request.arrived_at, cost) {
@@ -137,7 +140,10 @@ impl Limit {
         let mut state = GcraState {
             tat: self.state.map(|state| state.to_monotonic(clock)),
         };
-        let rate_limit = RateLimit::new(self.count, self.per);
+        let rate_limit = RateLimit::new(
+            self.count.max(u32::MAX as u64) as u32,
+            Duration::from_secs(self.period),
+        );
 
         let result = match response
             .request
@@ -145,11 +151,9 @@ impl Limit {
             .cmp(&response.actual_tokens)
         {
             Ordering::Greater => {
-                let _ = state.revert_at(
-                    &rate_limit,
-                    response.request.arrived_at,
-                    response.request.estimated_tokens - response.actual_tokens,
-                );
+                let extra = (response.request.estimated_tokens - response.actual_tokens)
+                    .max(u32::MAX as u64) as u32;
+                let _ = state.revert_at(&rate_limit, response.request.arrived_at, extra);
 
                 LimiterResult::Ready
             }
@@ -161,7 +165,8 @@ impl Limit {
                     response.actual_tokens,
                     response.request.estimated_tokens
                 );
-                let cost = response.actual_tokens - response.request.estimated_tokens;
+                let cost = (response.actual_tokens - response.request.estimated_tokens)
+                    .max(u32::MAX as u64) as u32;
 
                 match state.check_and_modify_at(&rate_limit, response.request.arrived_at, cost) {
                     Ok(_) => LimiterResult::Ready,

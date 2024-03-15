@@ -77,7 +77,7 @@ pub(super) struct TaggedModelRequest {
     request: Value,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(super) enum RequestType {
     TextChat,
     TextCompletion,
@@ -242,16 +242,10 @@ impl From<ModelError> for ModelResponse {
                 "code": Value::Null,
             }),
             ModelError::UnknownModel => json!({
-                "message": "The requested model does not exist.  Contact the proxy's administrator for more information.",
+                "message": "The requested model does not exist. Contact the proxy's administrator for more information.",
                 "type": "invalid_request_error",
                 "param": Value::Null,
                 "code": "model_not_found",
-            }),
-            ModelError::UnspecifiedModel => json!({
-                "message": "You must provide a model parameter. Contact the proxy's administrator for more information.",
-                "type": "invalid_request_error",
-                "param": Value::Null,
-                "code": Value::Null,
             }),
             ModelError::InternalError => json!({
                 "message": "The proxy server had an error processing your request. Sorry about that! You can retry your request, or contact the proxy's administrator if the error persists.",
@@ -276,7 +270,6 @@ impl From<ModelError> for ModelResponse {
             ModelError::UnknownEndpoint => StatusCode::NOT_FOUND,
             ModelError::BadEndpointMethod => StatusCode::METHOD_NOT_ALLOWED,
             ModelError::UnknownModel => StatusCode::NOT_FOUND,
-            ModelError::UnspecifiedModel => StatusCode::BAD_REQUEST,
             ModelError::InternalError => StatusCode::INTERNAL_SERVER_ERROR,
             ModelError::BackendError => StatusCode::BAD_GATEWAY,
         };
@@ -307,7 +300,6 @@ pub(super) enum ModelError {
     UnknownEndpoint,
     BadEndpointMethod,
     UnknownModel,
-    UnspecifiedModel,
     InternalError,
     BackendError,
 }

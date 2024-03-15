@@ -13,7 +13,7 @@
 		<code>/admin/</code>
 		API. The first-time setup API key will be
 		<strong>immediately</strong>
-		disabled once any items have been added to the database.
+		disabled once any users have been added to the database.
 	</p>
 	<p>You can add your first administrator user using the following <code>curl</code> command:</p>
 	<pre>
@@ -34,8 +34,7 @@
 		After leaving or refereshing this page,
 		<strong>you will not be able to easily recover it without resetting the database</strong>.
 	</p>
-	<p id="key-reminder">After adding a user, please see <a href="./manual">the proxy's documentation</a> for
-		more information regarding setup.</p>
+	<p id="key-reminder">After adding a user, reload this page to see the program's documentation.</p>
 	<script>
 		document.getElementById("line-1").innerText = "curl " + new URL("./users", new URL(window.location.pathname, window.location.origin).href) + " \\";
 
