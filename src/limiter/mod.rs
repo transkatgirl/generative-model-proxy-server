@@ -1,13 +1,15 @@
 use std::{
     cmp::Ordering,
-    ops::Add,
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime},
 };
 
 use gcra::{GcraError, GcraState, RateLimit};
 use serde::{Deserialize, Serialize};
 use tracing::{event, Level};
 use uuid::Uuid;
+
+#[cfg(test)]
+mod tests;
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy)]
 pub(super) enum LimitItem {
@@ -40,8 +42,8 @@ impl LimiterClock {
 #[derive(Serialize, Deserialize, Debug, Clone, Copy)]
 struct LimiterState {
     uuid: Uuid,
-    wallclock: Option<Duration>,
-    monotonic: Option<Duration>,
+    epoch: Option<SystemTime>,
+    elasped: Option<Duration>,
 }
 
 impl LimiterState {
@@ -49,31 +51,27 @@ impl LimiterState {
     fn from_monotonic(clock: &LimiterClock, timestamp: Instant) -> LimiterState {
         LimiterState {
             uuid: clock.uuid,
-            wallclock: SystemTime::now().duration_since(UNIX_EPOCH).ok(),
-            monotonic: timestamp.checked_duration_since(clock.epoch),
+            epoch: SystemTime::now().checked_sub(clock.epoch.elapsed()),
+            elasped: timestamp.checked_duration_since(clock.epoch),
         }
     }
 
     #[tracing::instrument(skip(clock), level = "trace", ret)]
-    fn to_monotonic(&self, clock: &LimiterClock) -> Instant {
-        match self.uuid == clock.uuid {
-            true => match self.monotonic {
-                Some(monotonic) => clock.epoch.add(monotonic),
-                None => Instant::now(),
-            },
-            false => {
-                match self
-                    .wallclock
-                    .and_then(|duration| UNIX_EPOCH.checked_add(duration))
-                    .and_then(|timestamp| timestamp.elapsed().ok())
-                {
-                    Some(elapsed) => Instant::now()
-                        .checked_sub(elapsed)
-                        .unwrap_or(Instant::now()),
-                    None => Instant::now(),
-                }
-            }
-        }
+    fn to_monotonic(&self, clock: &LimiterClock) -> Option<Instant> {
+        self.elasped
+            .and_then(|elapsed| match self.uuid == clock.uuid {
+                true => clock.epoch.checked_add(elapsed),
+                false => self.epoch.and_then(|epoch| {
+                    epoch
+                        .checked_add(elapsed)
+                        .and_then(|absolute| match absolute.elapsed() {
+                            Ok(duration) => Instant::now().checked_sub(duration),
+                            Err(future_duration) => {
+                                Instant::now().checked_add(future_duration.duration())
+                            }
+                        })
+                }),
+            })
     }
 }
 
@@ -100,7 +98,7 @@ impl Limit {
     #[tracing::instrument(skip(clock), level = "debug", ret)]
     pub(super) fn request(&mut self, clock: &LimiterClock, request: &Request) -> LimiterResult {
         let mut state = GcraState {
-            tat: self.state.map(|state| state.to_monotonic(clock)),
+            tat: self.state.and_then(|state| state.to_monotonic(clock)),
         };
         let rate_limit = RateLimit::new(
             self.count.max(u32::MAX as u64) as u32,
@@ -138,7 +136,7 @@ impl Limit {
         }
 
         let mut state = GcraState {
-            tat: self.state.map(|state| state.to_monotonic(clock)),
+            tat: self.state.and_then(|state| state.to_monotonic(clock)),
         };
         let rate_limit = RateLimit::new(
             self.count.max(u32::MAX as u64) as u32,
