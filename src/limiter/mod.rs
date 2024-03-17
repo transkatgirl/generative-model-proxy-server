@@ -106,7 +106,7 @@ impl Limit {
         );
         let cost = match self.r#type {
             LimitItem::Request => 1,
-            LimitItem::Token => request.estimated_tokens.max(u32::MAX as u64) as u32,
+            LimitItem::Token => request.estimated_tokens.min(u32::MAX as u64) as u32,
         };
 
         let result = match state.check_and_modify_at(&rate_limit, request.arrived_at, cost) {
