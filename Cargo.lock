@@ -741,6 +741,7 @@ dependencies = [
  "opentelemetry-otlp",
  "opentelemetry_sdk",
  "postcard",
+ "rand",
  "reqwest",
  "ring",
  "serde",
