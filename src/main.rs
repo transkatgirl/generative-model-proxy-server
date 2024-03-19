@@ -8,7 +8,7 @@ use opentelemetry_otlp::WithExportConfig;
 use opentelemetry_sdk::{trace, Resource};
 use reqwest::{Client, ClientBuilder};
 use sled::{Db, Mode}; // sled should probably be replaced with a proper database at some point. will need to write manual migrations when that time comes.
-use tokio::{net::TcpListener, signal};
+use tokio::{fs, net::TcpListener, signal};
 use tracing::Level;
 use tracing_subscriber::{filter, layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -24,7 +24,7 @@ struct Args {
     #[arg(short, long, default_value = "127.0.0.1:8080")]
     bind_to: SocketAddr,
 
-    #[arg(short, long, default_value = "database_v0.1.0.sled_v0.34.7")]
+    #[arg(short, long, default_value = "database")]
     database_folder: PathBuf,
 
     #[arg(short, long)]
@@ -38,6 +38,11 @@ struct AppState {
     clock: Arc<LimiterClock>,
 }
 
+// TODO: Implement a system for handling database migrations
+//const PAST_DATABASE_STRING: &str = "version-0";
+//const FUTURE_DATABASE_STRING: &str = "version-2"; // ? How will we handle version rollbacks?
+const CURRENT_DATABASE_STRING: &str = "version-1";
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
@@ -47,6 +52,9 @@ async fn main() -> Result<()> {
             filter::Targets::new()
                 .with_default(Level::TRACE)
                 .with_targets(vec![
+                    ("rustls", Level::INFO),
+                    ("trust_dns_proto", Level::INFO),
+                    ("trust_dns_resolver", Level::INFO),
                     ("h2", Level::INFO),
                     ("hyper", Level::INFO),
                     ("tower", Level::INFO),
@@ -79,6 +87,14 @@ async fn main() -> Result<()> {
         None => registry.init(),
     }
 
+    fs::create_dir_all(&args.database_folder)
+        .await
+        .context("Unable to create database directory!")?;
+
+    let database_location = args
+        .database_folder
+        .join(PathBuf::from(CURRENT_DATABASE_STRING));
+
     let state = AppState {
         http: ClientBuilder::new()
             .user_agent("language-model-proxy-server")
@@ -89,7 +105,7 @@ async fn main() -> Result<()> {
             .build()
             .context("Unable to initalize HTTP client")?,
         database: sled::Config::default()
-            .path(&args.database_folder)
+            .path(&database_location)
             .mode(Mode::HighThroughput)
             .open()
             .context("Unable to initalize database")?,

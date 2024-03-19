@@ -5,7 +5,7 @@ use http::{status::StatusCode, Uri};
 use reqwest::{Client, ClientBuilder, Url};
 use ring::digest;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, value::Value};
+use serde_json::{value::Value, Map};
 use tracing::instrument;
 use uuid::Uuid;
 
@@ -31,28 +31,24 @@ fn get_prompt_count(prompt: &Value) -> usize {
 }
 
 #[instrument(level = "trace", ret)]
-fn get_usage(response: &Value) -> Option<TokenUsage> {
-    if let Value::Object(data) = response {
-        if let Some(Value::Object(usage)) = data.get("usage") {
-            let input_tokens = usage.get("prompt_tokens").and_then(|num| num.as_u64());
-            let output_tokens = usage.get("completion_tokens").and_then(|num| num.as_u64());
+fn get_usage(response: &Map<String, Value>) -> Option<TokenUsage> {
+    if let Some(Value::Object(usage)) = response.get("usage") {
+        let input_tokens = usage.get("prompt_tokens").and_then(|num| num.as_u64());
+        let output_tokens = usage.get("completion_tokens").and_then(|num| num.as_u64());
 
-            usage
-                .get("total_tokens")
-                .and_then(|num| num.as_u64())
-                .or(input_tokens
-                    .and_then(|input_tokens| {
-                        output_tokens.map(|output_tokens| input_tokens + output_tokens)
-                    })
-                    .or(output_tokens))
-                .map(|total| TokenUsage {
-                    total,
-                    input: input_tokens,
-                    output: output_tokens,
+        usage
+            .get("total_tokens")
+            .and_then(|num| num.as_u64())
+            .or(input_tokens
+                .and_then(|input_tokens| {
+                    output_tokens.map(|output_tokens| input_tokens + output_tokens)
                 })
-        } else {
-            None
-        }
+                .or(output_tokens))
+            .map(|total| TokenUsage {
+                total,
+                input: input_tokens,
+                output: output_tokens,
+            })
     } else {
         None
     }
@@ -74,7 +70,7 @@ pub(super) struct TaggedModelRequest {
     pub(super) tags: Vec<Uuid>,
     pub(super) r#type: RequestType,
 
-    request: Value,
+    request: Map<String, Value>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -118,21 +114,19 @@ impl TaggedModelRequest {
     pub(super) fn new(
         tags: Vec<Uuid>,
         r#type: RequestType,
-        mut request: Value,
+        mut request: Map<String, Value>,
     ) -> TaggedModelRequest {
-        if let Some(request) = request.as_object_mut() {
-            match tags.first() {
-                Some(user) => request.insert(
-                    "user".to_string(),
-                    Value::String(
-                        CROCKFORD.encode(digest::digest(&digest::SHA256, user.as_bytes()).as_ref()),
-                    ),
+        match tags.first() {
+            Some(user) => request.insert(
+                "user".to_string(),
+                Value::String(
+                    CROCKFORD.encode(digest::digest(&digest::SHA256, user.as_bytes()).as_ref()),
                 ),
-                None => request.remove("user"),
-            };
+            ),
+            None => request.remove("user"),
+        };
 
-            request.remove("stream");
-        }
+        request.remove("stream");
 
         TaggedModelRequest {
             tags,
@@ -143,49 +137,41 @@ impl TaggedModelRequest {
 
     #[instrument(level = "trace", ret)]
     pub(super) fn get_model(&self) -> Option<&str> {
-        self.request
-            .as_object()
-            .and_then(|request| request.get("model").and_then(|value| value.as_str()))
+        self.request.get("model").and_then(|value| value.as_str())
     }
 
     #[instrument(level = "trace", ret)]
     pub(super) fn get_count(&self) -> usize {
-        match &self.request {
-            Value::Object(request) => {
-                request
-                    .get("best_of")
-                    .and_then(|value| {
-                        value
-                            .as_u64()
-                            .map(|int| int.clamp(1, usize::MAX as u64) as usize)
-                    })
-                    .unwrap_or(1)
-                    * request
-                        .get("n")
-                        .and_then(|value| {
-                            value
-                                .as_u64()
-                                .map(|int| int.clamp(1, usize::MAX as u64) as usize)
-                        })
-                        .unwrap_or(1)
-                    * request.get("prompt").map(get_prompt_count).unwrap_or(1)
-                    * request.get("input").map(get_prompt_count).unwrap_or(1)
-            }
-            Value::Array(array) => array.len(),
-            Value::Null => 0,
-            _ => 1,
-        }
+        self.request
+            .get("best_of")
+            .and_then(|value| {
+                value
+                    .as_u64()
+                    .map(|int| int.clamp(1, usize::MAX as u64) as usize)
+            })
+            .unwrap_or(1)
+            * self
+                .request
+                .get("n")
+                .and_then(|value| {
+                    value
+                        .as_u64()
+                        .map(|int| int.clamp(1, usize::MAX as u64) as usize)
+                })
+                .unwrap_or(1)
+            * self
+                .request
+                .get("prompt")
+                .map(get_prompt_count)
+                .unwrap_or(1)
+            * self.request.get("input").map(get_prompt_count).unwrap_or(1)
     }
 
     #[instrument(level = "trace", ret)]
     pub(super) fn get_max_tokens(&self) -> Option<u64> {
-        if let Value::Object(request) = &self.request {
-            request
-                .get("max_tokens")
-                .and_then(|value| value.as_u64().map(|int| int.max(1)))
-        } else {
-            None
-        }
+        self.request
+            .get("max_tokens")
+            .and_then(|value| value.as_u64().map(|int| int.max(1)))
     }
 }
 
@@ -193,73 +179,54 @@ impl TaggedModelRequest {
 pub(super) struct ModelResponse {
     pub(super) status: StatusCode,
     pub(super) usage: Option<TokenUsage>,
-    pub(super) response: Value,
+    pub(super) response: Map<String, Value>,
 }
 
 impl From<ModelError> for ModelResponse {
     fn from(value: ModelError) -> Self {
-        let response = match value {
-            ModelError::BadRequest => json!({
-                "message": "We could not parse the JSON body of your request. (HINT: This likely means you aren't using your HTTP library correctly. The API expects a JSON payload, but what was sent was not valid JSON. If you have trouble figuring out how to fix this, contact the proxy's administrator.)",
-                "type": "invalid_request_error",
-                "param": Value::Null,
-                "code": Value::Null,
-            }),
-            ModelError::AuthMissing => json!({
-                "message": "You didn't provide an API key. You need to provide your API key in an Authorization header using Bearer auth (i.e. Authorization: Bearer YOUR_KEY), or as the password field (with blank username) if you're accessing the API from your browser and are prompted for a username and password. You can obtain an API key from the proxy's administrator.",
-                "type": "invalid_request_error",
-                "param": Value::Null,
-                "code": Value::Null,
-            }),
-            ModelError::AuthInvalid => json!({
-                "message": "Incorrect API key provided. You can obtain an API key from the proxy's administrator.",
-                "type": "invalid_request_error",
-                "param": Value::Null,
-                "code": "invalid_api_key",
-            }),
-            ModelError::UserRateLimit => json!({
-                "message": "You exceeded your current quota, please check your API key's rate limits. For more information on this error, contact the proxy's administrator.",
-                "type": "insufficient_quota",
-                "param": Value::Null,
-                "code": "insufficient_quota",
-            }),
-            ModelError::ModelRateLimit => json!({
-                "message": "That model is currently overloaded with other requests. You can retry your request, or contact the proxy's administrator if the error persists.",
-                "type": "server_error",
-                "param": Value::Null,
-                "code": Value::Null,
-            }),
-            ModelError::UnknownEndpoint => json!({
-                "message": "Unknown request URL. Please check the URL for typos, or contact the proxy's administrator for information regarding available endpoints.",
-                "type": "invalid_request_error",
-                "param": Value::Null,
-                "code": "unknown_url",
-            }),
-            ModelError::BadEndpointMethod => json!({
-                "message": "Invalid request method. Please check the URL for typos, or contact the proxy's administrator for information regarding available endpoints.",
-                "type": "invalid_request_error",
-                "param": Value::Null,
-                "code": Value::Null,
-            }),
-            ModelError::UnknownModel => json!({
-                "message": "The requested model does not exist. Contact the proxy's administrator for more information.",
-                "type": "invalid_request_error",
-                "param": Value::Null,
-                "code": "model_not_found",
-            }),
-            ModelError::InternalError => json!({
-                "message": "The proxy server had an error processing your request. Sorry about that! You can retry your request, or contact the proxy's administrator if the error persists.",
-                "type": "server_error",
-                "param": Value::Null,
-                "code": Value::Null,
-            }),
-            ModelError::BackendError => json!({
-                "message": "The model had an error processing your request. Sorry about that! Contact the proxy's administrator for more information.",
-                "type": "server_error",
-                "param": Value::Null,
-                "code": Value::Null,
-            }),
+        let mut response = Map::new();
+
+        let message = match value {
+            ModelError::BadRequest => "We could not parse the JSON body of your request. (HINT: This likely means you aren't using your HTTP library correctly. The API expects a JSON payload, but what was sent was not valid JSON. If you have trouble figuring out how to fix this, contact the proxy's administrator.)",
+            ModelError::AuthMissing => "You didn't provide an API key. You need to provide your API key in an Authorization header using Bearer auth (i.e. Authorization: Bearer YOUR_KEY), or as the password field (with blank username) if you're accessing the API from your browser and are prompted for a username and password. You can obtain an API key from the proxy's administrator.",
+            ModelError::AuthInvalid => "Incorrect API key provided. You can obtain an API key from the proxy's administrator.",
+            ModelError::UserRateLimit => "You exceeded your current quota, please check your API key's rate limits. For more information on this error, contact the proxy's administrator.",
+            ModelError::ModelRateLimit => "That model is currently overloaded with other requests. You can retry your request, or contact the proxy's administrator if the error persists.",
+            ModelError::UnknownEndpoint => "Unknown request URL. Please check the URL for typos, or contact the proxy's administrator for information regarding available endpoints.",
+            ModelError::BadEndpointMethod => "Invalid request method. Please check the URL for typos, or contact the proxy's administrator for information regarding available endpoints.",
+            ModelError::UnknownModel => "The requested model does not exist. Contact the proxy's administrator for more information.",
+            ModelError::InternalError => "The proxy server had an error processing your request. Sorry about that! You can retry your request, or contact the proxy's administrator if the error persists.",
+            ModelError::BackendError => "The model had an error processing your request. Sorry about that! Contact the proxy's administrator for more information.",
         };
+        let error_type = match value {
+            ModelError::BadRequest => "invalid_request_error",
+            ModelError::AuthMissing => "invalid_request_error",
+            ModelError::AuthInvalid => "invalid_request_error",
+            ModelError::UserRateLimit => "insufficient_quota",
+            ModelError::ModelRateLimit => "server_error",
+            ModelError::UnknownEndpoint => "invalid_request_error",
+            ModelError::BadEndpointMethod => "invalid_request_error",
+            ModelError::UnknownModel => "invalid_request_error",
+            ModelError::InternalError => "server_error",
+            ModelError::BackendError => "server_error",
+        };
+        let error_code = match value {
+            ModelError::BadRequest => Value::Null,
+            ModelError::AuthMissing => Value::Null,
+            ModelError::AuthInvalid => Value::String("invalid_api_key".to_string()),
+            ModelError::UserRateLimit => Value::String("insufficient_quota".to_string()),
+            ModelError::ModelRateLimit => Value::Null,
+            ModelError::UnknownEndpoint => Value::String("unknown_url".to_string()),
+            ModelError::BadEndpointMethod => Value::Null,
+            ModelError::UnknownModel => Value::String("model_not_found".to_string()),
+            ModelError::InternalError => Value::Null,
+            ModelError::BackendError => Value::Null,
+        };
+
+        response.insert("message".to_string(), Value::String(message.to_string()));
+        response.insert("type".to_string(), Value::String(error_type.to_string()));
+        response.insert("param".to_string(), Value::Null);
+        response.insert("code".to_string(), error_code);
 
         let status = match value {
             ModelError::BadRequest => StatusCode::BAD_REQUEST,
@@ -346,46 +313,72 @@ impl ModelBackend {
 
         match &self {
             Self::OpenAI(config) => {
-                if let Some(request) = tagged_request.request.as_object_mut() {
-                    request.insert(
-                        "model".to_string(),
-                        Value::String(config.model_string.clone()),
-                    );
+                tagged_request.request.insert(
+                    "model".to_string(),
+                    Value::String(config.model_string.clone()),
+                );
 
-                    let url = Url::parse(&config.openai_api_base).and_then(|base_url| {
-                        base_url.join(match tagged_request.r#type {
-                            RequestType::TextChat => "/v1/chat/completions",
-                            RequestType::TextCompletion => "/v1/completions",
-                            RequestType::TextEdit => "/v1/edits",
-                            RequestType::TextEmbedding => "/v1/embeddings",
-                            RequestType::TextModeration => "/v1/moderations",
-                            RequestType::ImageGeneration => "/v1/images/generations",
-                            RequestType::ImageEdit => "/v1/images/edits",
-                            RequestType::ImageVariation => "/v1/images/variations",
-                            RequestType::AudioTTS => "/v1/audio/speech",
-                            RequestType::AudioTranscription => "/v1/audio/transcriptions",
-                            RequestType::AudioTranslation => "/v1/audio/translations",
-                        })
-                    });
+                let url = Url::parse(&config.openai_api_base).and_then(|base_url| {
+                    base_url.join(match tagged_request.r#type {
+                        RequestType::TextChat => "/v1/chat/completions",
+                        RequestType::TextCompletion => "/v1/completions",
+                        RequestType::TextEdit => "/v1/edits",
+                        RequestType::TextEmbedding => "/v1/embeddings",
+                        RequestType::TextModeration => "/v1/moderations",
+                        RequestType::ImageGeneration => "/v1/images/generations",
+                        RequestType::ImageEdit => "/v1/images/edits",
+                        RequestType::ImageVariation => "/v1/images/variations",
+                        RequestType::AudioTTS => "/v1/audio/speech",
+                        RequestType::AudioTranscription => "/v1/audio/transcriptions",
+                        RequestType::AudioTranslation => "/v1/audio/translations",
+                    })
+                });
 
-                    match url {
-                        Ok(url) => {
-                            let mut builder =
-                                http_client.post(url).bearer_auth(&config.openai_api_key);
+                match url {
+                    Ok(url) => {
+                        let mut builder = http_client.post(url).bearer_auth(&config.openai_api_key);
 
-                            if let Some(organization) = &config.openai_organization {
-                                builder = builder.header("OpenAI-Organization", organization);
-                            }
+                        if let Some(organization) = &config.openai_organization {
+                            builder = builder.header("OpenAI-Organization", organization);
+                        }
 
-                            builder = builder.json(request);
+                        builder = builder.json(&tagged_request.request);
 
-                            match builder.send().await {
-                                Ok(response) => {
-                                    let status =
-                                        StatusCode::from_u16(response.status().as_u16()).unwrap();
-                                    let body = response.text().await;
+                        match builder.send().await {
+                            Ok(response) => {
+                                let status =
+                                    StatusCode::from_u16(response.status().as_u16()).unwrap();
+                                let body = response.text().await;
 
-                                    if status.is_server_error() {
+                                if status.is_server_error() {
+                                    tracing::warn!("Backend returned {} error: {:?}", status, body);
+                                    return ModelResponse::from(ModelError::BackendError);
+                                }
+
+                                if status.is_client_error() {
+                                    if status == StatusCode::UNAUTHORIZED
+                                        || status == StatusCode::FORBIDDEN
+                                        || status == StatusCode::PROXY_AUTHENTICATION_REQUIRED
+                                    {
+                                        tracing::warn!(
+                                            "Failed to authenticate with backend: {:?}",
+                                            body
+                                        );
+                                        return ModelResponse::from(ModelError::BackendError);
+                                    }
+
+                                    if status == StatusCode::NOT_FOUND
+                                        || status == StatusCode::METHOD_NOT_ALLOWED
+                                        || status == StatusCode::NOT_ACCEPTABLE
+                                        || status == StatusCode::REQUEST_TIMEOUT
+                                        || status == StatusCode::GONE
+                                        || status == StatusCode::LENGTH_REQUIRED
+                                        || status == StatusCode::URI_TOO_LONG
+                                        || status == StatusCode::EXPECTATION_FAILED
+                                        || status == StatusCode::MISDIRECTED_REQUEST
+                                        || status == StatusCode::UPGRADE_REQUIRED
+                                        || status == StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE
+                                    {
                                         tracing::warn!(
                                             "Backend returned {} error: {:?}",
                                             status,
@@ -394,60 +387,27 @@ impl ModelBackend {
                                         return ModelResponse::from(ModelError::BackendError);
                                     }
 
-                                    if status.is_client_error() {
-                                        if status == StatusCode::UNAUTHORIZED
-                                            || status == StatusCode::FORBIDDEN
-                                            || status == StatusCode::PROXY_AUTHENTICATION_REQUIRED
-                                        {
-                                            tracing::warn!(
-                                                "Failed to authenticate with backend: {:?}",
-                                                body
-                                            );
-                                            return ModelResponse::from(ModelError::BackendError);
-                                        }
-
-                                        if status == StatusCode::NOT_FOUND
-                                            || status == StatusCode::METHOD_NOT_ALLOWED
-                                            || status == StatusCode::NOT_ACCEPTABLE
-                                            || status == StatusCode::REQUEST_TIMEOUT
-                                            || status == StatusCode::GONE
-                                            || status == StatusCode::LENGTH_REQUIRED
-                                            || status == StatusCode::URI_TOO_LONG
-                                            || status == StatusCode::EXPECTATION_FAILED
-                                            || status == StatusCode::MISDIRECTED_REQUEST
-                                            || status == StatusCode::UPGRADE_REQUIRED
-                                            || status == StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE
-                                        {
-                                            tracing::warn!(
-                                                "Backend returned {} error: {:?}",
-                                                status,
-                                                body
-                                            );
-                                            return ModelResponse::from(ModelError::BackendError);
-                                        }
-
-                                        if status == StatusCode::PAYMENT_REQUIRED
-                                            || status == StatusCode::TOO_MANY_REQUESTS
-                                        {
-                                            tracing::warn!(
-                                                "Request was rate-limited by backend: {:?}",
-                                                body
-                                            );
-                                            return ModelResponse::from(ModelError::ModelRateLimit);
-                                        }
+                                    if status == StatusCode::PAYMENT_REQUIRED
+                                        || status == StatusCode::TOO_MANY_REQUESTS
+                                    {
+                                        tracing::warn!(
+                                            "Request was rate-limited by backend: {:?}",
+                                            body
+                                        );
+                                        return ModelResponse::from(ModelError::ModelRateLimit);
                                     }
+                                }
 
-                                    match body {
-                                        Ok(body) => match serde_json::from_str::<Value>(&body) {
+                                match body {
+                                    Ok(body) => {
+                                        match serde_json::from_str::<Map<String, Value>>(&body) {
                                             Ok(mut json) => {
-                                                if let Some(json) = json.as_object_mut() {
-                                                    if let Some(value) = json.get_mut("model") {
-                                                        *value = label;
-                                                    }
+                                                if let Some(value) = json.get_mut("model") {
+                                                    *value = label;
+                                                }
 
-                                                    if let Some(value) = json.get_mut("id") {
-                                                        *value = request_id;
-                                                    }
+                                                if let Some(value) = json.get_mut("id") {
+                                                    *value = request_id;
                                                 }
 
                                                 ModelResponse {
@@ -463,37 +423,34 @@ impl ModelBackend {
                                                 );
                                                 ModelResponse::from(ModelError::BackendError)
                                             }
-                                        },
-                                        Err(error) => {
-                                            tracing::warn!("Error receiving response: {:?}", error);
-
-                                            ModelResponse::from(ModelError::BackendError)
                                         }
                                     }
-                                }
-                                Err(error) => {
-                                    tracing::warn!("Error sending request: {:?}", error);
+                                    Err(error) => {
+                                        tracing::warn!("Error receiving response: {:?}", error);
 
-                                    if error.is_connect() | error.is_redirect() | error.is_decode()
-                                    {
-                                        return ModelResponse::from(ModelError::BackendError);
+                                        ModelResponse::from(ModelError::BackendError)
                                     }
-
-                                    if error.is_timeout() {
-                                        return ModelResponse::from(ModelError::ModelRateLimit);
-                                    }
-
-                                    ModelResponse::from(ModelError::InternalError)
                                 }
                             }
-                        }
-                        Err(error) => {
-                            tracing::warn!("Unable to parse model URL: {:?}", error);
-                            ModelResponse::from(ModelError::InternalError)
+                            Err(error) => {
+                                tracing::warn!("Error sending request: {:?}", error);
+
+                                if error.is_connect() | error.is_redirect() | error.is_decode() {
+                                    return ModelResponse::from(ModelError::BackendError);
+                                }
+
+                                if error.is_timeout() {
+                                    return ModelResponse::from(ModelError::ModelRateLimit);
+                                }
+
+                                ModelResponse::from(ModelError::InternalError)
+                            }
                         }
                     }
-                } else {
-                    ModelResponse::from(ModelError::BadRequest)
+                    Err(error) => {
+                        tracing::warn!("Unable to parse model URL: {:?}", error);
+                        ModelResponse::from(ModelError::InternalError)
+                    }
                 }
             }
             Self::Loopback => ModelResponse {

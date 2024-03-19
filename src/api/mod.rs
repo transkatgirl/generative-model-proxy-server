@@ -363,8 +363,8 @@ where
         };
 
         if req.method() != Method::GET
-            || req.method() != Method::HEAD
-            || req.method() != Method::POST
+            && req.method() != Method::HEAD
+            && req.method() != Method::POST
         {
             return Err(ModelError::BadEndpointMethod);
         }
@@ -429,21 +429,24 @@ where
             }
         };
 
-        if request == Value::Null {
-            return Err(ModelError::BadRequest);
+        if let Value::Object(object) = request {
+            return Ok(TaggedModelRequest::new(Vec::new(), r#type, object));
         }
 
-        Ok(TaggedModelRequest::new(Vec::new(), r#type, request))
+        Err(ModelError::BadRequest)
     }
 }
 
 impl IntoResponse for ModelResponse {
     fn into_response(self) -> axum::response::Response {
         if self.status == StatusCode::OK {
-            if let Value::String(string) = &self.response {
-                if let Ok(data) = RFC4648.decode(string.as_bytes()) {
-                    return (self.status, data).into_response();
-                }
+            if let Some(data) = self
+                .response
+                .get("b64_json")
+                .and_then(|value| value.as_str())
+                .and_then(|string| RFC4648.decode(string.as_bytes()).ok())
+            {
+                return (self.status, data).into_response();
             }
         }
 
