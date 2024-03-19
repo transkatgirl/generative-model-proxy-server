@@ -102,7 +102,7 @@ async fn main() -> Result<()> {
 
     let state = AppState {
         http: ClientBuilder::new()
-            .user_agent("language-model-proxy-server")
+            .user_agent("generative-model-proxy-server")
             .connect_timeout(Duration::from_secs(5))
             .http2_keep_alive_interval(Some(Duration::from_secs(5)))
             .http2_keep_alive_timeout(Duration::from_secs(15))

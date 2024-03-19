@@ -11,12 +11,12 @@ use axum::{
 use http::{header::CONTENT_TYPE, Method};
 
 use super::{
-    ModelError, ModelFormFile, ModelFormItem, ModelRequestData, ModelResponse, ModelResponseData,
-    RequestType, TaggedModelRequest,
+    ModelError, ModelFormFile, ModelFormItem, ModelRequest, ModelRequestData, ModelResponse,
+    ModelResponseData, RequestType,
 };
 
 #[async_trait]
-impl<S> FromRequest<S> for TaggedModelRequest
+impl<S> FromRequest<S> for ModelRequest
 where
     Bytes: FromRequest<S>,
     S: Send + Sync,
@@ -52,7 +52,7 @@ where
                 .await
                 .map(|value| value.0)
                 .ok()
-                .map(|request| TaggedModelRequest::from_json(r#type, request)),
+                .map(|request| ModelRequest::from_json(r#type, request)),
             Some("multipart/form-data") => match Multipart::from_request(req, state).await {
                 Ok(mut multipart) => {
                     let mut form = HashMap::new();
@@ -93,7 +93,7 @@ where
                     }
 
                     if !form.is_empty() {
-                        Some(TaggedModelRequest {
+                        Some(ModelRequest {
                             tags: Vec::new(),
                             r#type,
                             request: ModelRequestData::Form(form),
@@ -108,12 +108,12 @@ where
                 .await
                 .map(|value| value.0)
                 .ok()
-                .map(|request| TaggedModelRequest::from_json(r#type, request)),
+                .map(|request| ModelRequest::from_json(r#type, request)),
             Some(_) => body::to_bytes(req.into_body(), usize::MAX)
                 .await
                 .ok()
                 .and_then(|body| Json::from_bytes(body.as_ref()).map(|value| value.0).ok())
-                .map(|request| TaggedModelRequest::from_json(r#type, request)),
+                .map(|request| ModelRequest::from_json(r#type, request)),
             None => if req.method() == Method::HEAD || req.method() == Method::GET {
                 Form::from_request(req, state)
                     .await
@@ -125,7 +125,7 @@ where
                     .ok()
                     .and_then(|body| Json::from_bytes(body.as_ref()).map(|value| value.0).ok())
             }
-            .map(|request| TaggedModelRequest::from_json(r#type, request)),
+            .map(|request| ModelRequest::from_json(r#type, request)),
         }
         .ok_or(ModelError::BadRequest)
     }

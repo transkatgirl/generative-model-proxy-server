@@ -1,10 +1,10 @@
-use std::{collections::HashMap, fmt::Debug, time::Duration};
+use std::{collections::HashMap, fmt::Debug};
 
 use fast32::base32::{CROCKFORD, RFC4648};
 use http::{status::StatusCode, Uri};
 use reqwest::{
     multipart::{Form, Part},
-    Client, ClientBuilder, RequestBuilder, Response, Url,
+    Client, RequestBuilder, Response, Url,
 };
 use ring::digest;
 use serde::{Deserialize, Serialize};
@@ -59,19 +59,8 @@ fn get_usage(response: &Map<String, Value>) -> Option<TokenUsage> {
     }
 }
 
-#[instrument(level = "trace")]
-pub(super) fn get_configured_client() -> reqwest::Result<Client> {
-    ClientBuilder::new()
-        .user_agent("language-model-proxy-server")
-        .connect_timeout(Duration::from_secs(5))
-        .http2_keep_alive_interval(Some(Duration::from_secs(5)))
-        .http2_keep_alive_timeout(Duration::from_secs(15))
-        .http2_keep_alive_while_idle(true)
-        .build()
-}
-
 #[derive(Debug)]
-pub(super) struct TaggedModelRequest {
+pub(super) struct ModelRequest {
     pub(super) tags: Vec<Uuid>,
     pub(super) r#type: RequestType,
 
@@ -133,12 +122,12 @@ impl TryFrom<&Uri> for RequestType {
     }
 }
 
-impl TaggedModelRequest {
+impl ModelRequest {
     #[instrument(level = "trace", ret)]
-    fn from_json(r#type: RequestType, mut request: Map<String, Value>) -> TaggedModelRequest {
+    fn from_json(r#type: RequestType, mut request: Map<String, Value>) -> ModelRequest {
         request.remove("stream");
 
-        TaggedModelRequest {
+        ModelRequest {
             tags: Vec::new(),
             r#type,
             request: ModelRequestData::Json(request),
@@ -321,8 +310,9 @@ enum ModelResponseData {
 }
 
 impl ModelResponse {
+    #[instrument(level = "trace", ret)]
     async fn from_http_response(
-        request: &TaggedModelRequest,
+        request: &ModelRequest,
         label: Value,
         response: Result<Response, reqwest::Error>,
     ) -> ModelResponse {
@@ -554,23 +544,23 @@ impl ModelBackend {
         }
     }
 
-    #[instrument(level = "debug", ret)]
+    #[instrument(skip(http_client), level = "debug", ret)]
     pub(super) async fn generate(
         &self,
         http_client: &Client,
-        mut tagged_request: TaggedModelRequest,
+        mut request: ModelRequest,
     ) -> ModelResponse {
-        let label = tagged_request
+        let label = request
             .get_model()
             .map(|string| Value::String(string.to_string()))
             .unwrap_or(Value::Null);
 
         match &self {
             Self::OpenAI(config) => {
-                tagged_request.update_model(config.model_string.clone());
+                request.update_model(config.model_string.clone());
 
                 let url = Url::parse(&config.openai_api_base).and_then(|base_url| {
-                    base_url.join(match tagged_request.r#type {
+                    base_url.join(match request.r#type {
                         RequestType::TextChat => "/v1/chat/completions",
                         RequestType::TextCompletion => "/v1/completions",
                         RequestType::TextEdit => "/v1/edits",
@@ -593,14 +583,10 @@ impl ModelBackend {
                             builder = builder.header("OpenAI-Organization", organization);
                         }
 
-                        builder = tagged_request.to_http_body(builder);
+                        builder = request.to_http_body(builder);
 
-                        ModelResponse::from_http_response(
-                            &tagged_request,
-                            label,
-                            builder.send().await,
-                        )
-                        .await
+                        ModelResponse::from_http_response(&request, label, builder.send().await)
+                            .await
                     }
                     Err(error) => {
                         tracing::warn!("Unable to parse model URL: {:?}", error);
@@ -611,7 +597,7 @@ impl ModelBackend {
             Self::Loopback => ModelResponse {
                 status: StatusCode::OK,
                 usage: None,
-                response: ModelResponseData::Json(tagged_request.to_json()),
+                response: ModelResponseData::Json(request.to_json()),
             },
         }
     }

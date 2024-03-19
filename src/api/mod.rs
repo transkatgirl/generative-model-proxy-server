@@ -27,7 +27,7 @@ use self::state::{DatabaseFunctionResult, DatabaseValueResult};
 
 use super::{
     limiter::Limit,
-    model::{ModelBackend, ModelError, ModelResponse, RequestType, TaggedModelRequest},
+    model::{ModelBackend, ModelError, ModelRequest, ModelResponse, RequestType},
     AppState,
 };
 
@@ -214,7 +214,7 @@ async fn modify_response<B>(mut response: Response<B>) -> Response<B> {
 async fn model_request(
     Extension(auth): Extension<Authenticated>,
     State(state): State<AppState>,
-    request: Result<TaggedModelRequest, ModelError>,
+    request: Result<ModelRequest, ModelError>,
 ) -> Result<ModelResponse, ModelError> {
     let mut request = match request {
         Ok(request) => request,
