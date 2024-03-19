@@ -442,7 +442,7 @@ impl IntoResponse for ModelResponse {
         if self.status == StatusCode::OK {
             if let Some(data) = self
                 .response
-                .get("b64_json")
+                .get("base64_response")
                 .and_then(|value| value.as_str())
                 .and_then(|string| RFC4648.decode(string.as_bytes()).ok())
             {

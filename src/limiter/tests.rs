@@ -5,7 +5,7 @@ use std::{
 
 use rand::rngs::SmallRng;
 use rand::{Rng, SeedableRng};
-use uuid::{timestamp, Uuid};
+use uuid::Uuid;
 
 use crate::limiter::Response;
 
@@ -43,13 +43,13 @@ fn limiter_state_monotonic_conversion() {
     test_limiter_state_monotonic(get_random_signed(-128, -2));
 }
 
-fn is_within_error(one: &Instant, two: &Instant) -> bool {
+fn is_within_error(one: Instant, two: Instant) -> bool {
     const MAX_WALL_CLOCK_ERROR: Duration = Duration::from_millis(100);
 
-    let offset = match one.cmp(two) {
+    let offset = match one.cmp(&two) {
         Ordering::Equal => Duration::from_secs(0),
-        Ordering::Greater => *one - *two,
-        Ordering::Less => *two - *one,
+        Ordering::Greater => one - two,
+        Ordering::Less => two - one,
     };
 
     offset < MAX_WALL_CLOCK_ERROR
@@ -83,7 +83,7 @@ fn test_limiter_state_wallclock(state_offset: i64, wallclock_offset: i64) {
             state.to_monotonic(&clock).unwrap()
                 + Duration::from_secs(wallclock_offset.unsigned_abs())
         };
-        assert!(is_within_error(&timestamp, &resolved_timestamp));
+        assert!(is_within_error(timestamp, resolved_timestamp));
     }
 }
 
@@ -103,26 +103,25 @@ fn limiter_state_wallclock_conversion() {
 fn test_limiter_request_tokenless(
     clock: &LimiterClock,
     limit: &mut Limit,
-    request_time: &Instant,
-    request_fail_count: u32,
+    arrived_at: Instant,
+    fail_count: u32,
 ) {
     let request = Request {
-        arrived_at: *request_time,
+        arrived_at,
         estimated_tokens: 1,
     };
 
     let response = Response {
         request: Request {
-            arrived_at: *request_time,
+            arrived_at,
             estimated_tokens: 1,
         },
         actual_tokens: 1,
     };
 
-    let expected_result = if request_fail_count > 0 {
+    let expected_result = if fail_count > 0 {
         LimiterResult::WaitUntil(
-            *request_time
-                + ((Duration::from_secs(limit.period) / limit.count as u32) * request_fail_count),
+            arrived_at + ((Duration::from_secs(limit.period) / limit.count as u32) * fail_count),
         )
     } else {
         LimiterResult::Ready
@@ -132,7 +131,58 @@ fn test_limiter_request_tokenless(
     assert_eq!(limit.response(clock, &response), LimiterResult::Ready);
 }
 
-fn test_limiter_request_with_tokens() {}
+fn test_limiter_request_with_tokens(
+    clock: &LimiterClock,
+    limit: &mut Limit,
+    tokens: (u64, u64),
+    arrived_at: Instant,
+    failed_tokens: (u32, u32),
+) {
+    let request = Request {
+        arrived_at,
+        estimated_tokens: tokens.0,
+    };
+
+    let response = Response {
+        request: Request {
+            arrived_at,
+            estimated_tokens: tokens.0,
+        },
+        actual_tokens: tokens.1,
+    };
+
+    let expected_first_result = if tokens.0 > limit.count {
+        LimiterResult::Oversized
+    } else if failed_tokens.0 > 0 {
+        LimiterResult::WaitUntil(
+            arrived_at
+                + ((Duration::from_secs(limit.period) / limit.count as u32) * failed_tokens.0),
+        )
+    } else {
+        LimiterResult::Ready
+    };
+
+    let expected_second_result = if tokens.0 >= tokens.1 {
+        LimiterResult::Ready
+    } else {
+        let excess_tokens = tokens.1 - tokens.0;
+
+        if excess_tokens > limit.count {
+            LimiterResult::Oversized
+        } else if failed_tokens.1 > 0 {
+            LimiterResult::WaitUntil(
+                arrived_at
+                    + ((Duration::from_secs(limit.period) / limit.count as u32)
+                        * (failed_tokens.0 + failed_tokens.1)),
+            )
+        } else {
+            LimiterResult::Ready
+        }
+    };
+
+    assert_eq!(limit.request(clock, &request), expected_first_result);
+    assert_eq!(limit.response(clock, &response), expected_second_result);
+}
 
 #[test]
 fn limit_requests_without_tokens() {
@@ -147,108 +197,121 @@ fn limit_requests_without_tokens() {
     };
 
     for _ in 0..limit.count {
-        test_limiter_request_tokenless(&clock, &mut limit, &request_time, 0);
+        test_limiter_request_tokenless(&clock, &mut limit, request_time, 0);
     }
     let to_fail = get_random_unsigned(2, limit.count - 1);
     let to_succeed = get_random_unsigned(2, limit.count - 1);
 
     for count in 1..(to_fail + 1) {
-        test_limiter_request_tokenless(&clock, &mut limit, &request_time, count as u32);
+        test_limiter_request_tokenless(&clock, &mut limit, request_time, count as u32);
     }
     request_time +=
         (Duration::from_secs(limit.period) / limit.count as u32) * (to_fail + to_succeed) as u32;
 
     for _ in 0..to_succeed {
-        test_limiter_request_tokenless(&clock, &mut limit, &request_time, 0);
+        test_limiter_request_tokenless(&clock, &mut limit, request_time, 0);
     }
-    test_limiter_request_tokenless(&clock, &mut limit, &request_time, 1);
+    test_limiter_request_tokenless(&clock, &mut limit, request_time, 1);
 
     request_time += Duration::from_secs(limit.period) / limit.count as u32;
 
     for _ in 0..get_random_unsigned(limit.count, limit.count * 2) {
         request_time += Duration::from_secs(limit.period) / limit.count as u32;
-        test_limiter_request_tokenless(&clock, &mut limit, &request_time, 0);
+        test_limiter_request_tokenless(&clock, &mut limit, request_time, 0);
     }
-    test_limiter_request_tokenless(&clock, &mut limit, &request_time, 1);
+    test_limiter_request_tokenless(&clock, &mut limit, request_time, 1);
 }
 
-/*#[test]
-fn limit_requests_with_tokens_single_pass() {
+#[test]
+fn limit_requests_with_tokens_equal_passes() {
     let clock = LimiterClock::new();
     let mut request_time = clock.epoch;
+    let count = get_random_unsigned(3, 128);
     let mut limit = Limit {
-        count: 128,
+        count,
         r#type: super::LimitItem::Token,
-        period: 8,
+        period: count * get_random_unsigned(3, 128),
         state: None,
     };
 
-    let limit_request =
-        |limit: &mut Limit, request_time: &Instant, estimated_tokens: u64| -> LimiterResult {
-            let request = Request {
-                arrived_at: *request_time,
-                estimated_tokens,
-            };
-
-            limit.request(&clock, &request)
+    let mut tokens_used = 0;
+    while limit.count > tokens_used {
+        let tokens_remaining = limit.count - tokens_used;
+        let tokens_to_use = if tokens_remaining == 1 {
+            1
+        } else {
+            get_random_unsigned(0, tokens_remaining)
         };
+        tokens_used += tokens_to_use;
 
-    for _ in 0..8 {
-        assert_eq!(
-            limit_request(&mut limit, &request_time, 16),
-            LimiterResult::Ready
+        test_limiter_request_with_tokens(
+            &clock,
+            &mut limit,
+            (tokens_to_use, tokens_to_use),
+            request_time,
+            (0, 0),
         );
     }
-    assert_eq!(
-        limit_request(&mut limit, &request_time, 16),
-        LimiterResult::WaitUntil(request_time + Duration::from_secs(1))
+    let tokens_to_use = get_random_unsigned(0, limit.count);
+    test_limiter_request_with_tokens(
+        &clock,
+        &mut limit,
+        (tokens_to_use, tokens_to_use),
+        request_time,
+        (tokens_to_use as u32, tokens_to_use as u32),
     );
-    request_time += Duration::from_secs(2);
-    assert_eq!(
-        limit_request(&mut limit, &request_time, 16),
-        LimiterResult::Ready
-    );
-    assert_eq!(
-        limit_request(&mut limit, &request_time, 16),
-        LimiterResult::WaitUntil(request_time + Duration::from_secs(1))
+    test_limiter_request_with_tokens(
+        &clock,
+        &mut limit,
+        (count + 1, count + 1),
+        request_time,
+        (0, 0),
     );
 
-    request_time += Duration::from_secs(2);
-    assert_eq!(
-        limit_request(&mut limit, &request_time, 8),
-        LimiterResult::Ready
-    );
-    assert_eq!(
-        limit_request(&mut limit, &request_time, 4),
-        LimiterResult::Ready
-    );
-    assert_eq!(
-        limit_request(&mut limit, &request_time, 5),
-        LimiterResult::WaitUntil(request_time + Duration::from_micros(62500))
-    );
-    assert_eq!(
-        limit_request(&mut limit, &request_time, 8),
-        LimiterResult::WaitUntil(request_time + Duration::from_micros(562500))
-    );
-    assert_eq!(
-        limit_request(&mut limit, &request_time, 129),
-        LimiterResult::Oversized
-    );
-    request_time += Duration::from_micros(562500);
+    let to_fail = get_random_unsigned(2, limit.count - 1);
+    let to_succeed = get_random_unsigned(2, limit.count - 1);
 
-    for _ in 0..3 {
-        request_time += Duration::from_millis(500);
-        assert_eq!(
-            limit_request(&mut limit, &request_time, 8),
-            LimiterResult::Ready
+    request_time += (Duration::from_secs(limit.period) / limit.count as u32)
+        * (tokens_to_use + to_succeed) as u32;
+
+    let mut tokens_used = 0;
+    while to_succeed > tokens_used {
+        let tokens_remaining = to_succeed - tokens_used;
+        let tokens_to_use = if tokens_remaining == 1 {
+            1
+        } else {
+            get_random_unsigned(0, tokens_remaining)
+        };
+        tokens_used += tokens_to_use;
+
+        test_limiter_request_with_tokens(
+            &clock,
+            &mut limit,
+            (tokens_to_use, tokens_to_use),
+            request_time,
+            (0, 0),
         );
     }
-    assert_eq!(
-        limit_request(&mut limit, &request_time, 8),
-        LimiterResult::WaitUntil(request_time + Duration::from_millis(500))
-    );
-}*/
 
+    let mut tokens_used = 0;
+    while to_fail > tokens_used {
+        let tokens_remaining = to_fail - tokens_used;
+        let tokens_to_use = if tokens_remaining == 1 {
+            1
+        } else {
+            get_random_unsigned(0, tokens_remaining)
+        };
+        tokens_used += tokens_to_use;
+
+        test_limiter_request_with_tokens(
+            &clock,
+            &mut limit,
+            (tokens_to_use, tokens_to_use),
+            request_time,
+            (tokens_used as u32, tokens_used as u32),
+        );
+    }
+}
 /*#[test]
 fn limit_requests_with_tokens_two_pass() {
     let clock = LimiterClock::new();
