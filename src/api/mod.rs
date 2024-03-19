@@ -249,6 +249,8 @@ async fn model_request(
         return Err(ModelError::UserRateLimit);
     }
 
+    request.set_user(auth.user.uuid);
+
     let quotas: HashSet<Uuid> = auth
         .user
         .quotas
@@ -263,6 +265,7 @@ async fn model_request(
         .chain(auth.roles.iter().map(|role| role.uuid))
         .chain(quotas.clone())
         .chain(iter::once(model.uuid))
+        .chain(iter::once(Uuid::new_v4()))
         .collect();
 
     let limiter_request = limiter::Request {

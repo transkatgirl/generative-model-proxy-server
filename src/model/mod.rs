@@ -4,7 +4,7 @@ use fast32::base32::{CROCKFORD, RFC4648};
 use http::{status::StatusCode, Uri};
 use reqwest::{
     multipart::{Form, Part},
-    Client, ClientBuilder, RequestBuilder, Url,
+    Client, ClientBuilder, RequestBuilder, Response, Url,
 };
 use ring::digest;
 use serde::{Deserialize, Serialize};
@@ -145,7 +145,46 @@ impl TaggedModelRequest {
         }
     }
 
-    #[instrument(level = "trace", ret)]
+    #[allow(clippy::wrong_self_convention)]
+    fn to_json(self) -> Map<String, Value> {
+        match self.request {
+            ModelRequestData::Json(json) => json,
+            ModelRequestData::Form(form) => {
+                let mut json = Map::new();
+
+                for (key, value) in form {
+                    match value {
+                        ModelFormItem::Text(text) => {
+                            json.insert(key, Value::String(text));
+                        }
+                        ModelFormItem::File(file) => {
+                            let mut file_json = Map::new();
+
+                            file_json.insert(
+                                "filename".to_string(),
+                                file.file_name.map(Value::String).unwrap_or(Value::Null),
+                            );
+                            file_json.insert(
+                                "content-type".to_string(),
+                                file.content_type.map(Value::String).unwrap_or(Value::Null),
+                            );
+
+                            file_json.insert(
+                                "data".to_string(),
+                                Value::String(RFC4648.encode(&file.data)),
+                            );
+
+                            json.insert(key, Value::Object(file_json));
+                        }
+                    }
+                }
+
+                json
+            }
+        }
+    }
+
+    #[instrument(level = "trace")]
     pub(super) fn set_user(&mut self, user: Uuid) {
         let user = CROCKFORD.encode(digest::digest(&digest::SHA256, user.as_bytes()).as_ref());
 
@@ -173,6 +212,7 @@ impl TaggedModelRequest {
         }
     }
 
+    #[instrument(level = "trace")]
     fn update_model(&mut self, model: String) {
         match &mut self.request {
             ModelRequestData::Json(json) => {
@@ -230,6 +270,7 @@ impl TaggedModelRequest {
         }
     }
 
+    #[instrument(skip(base), level = "trace")]
     fn to_http_body(&self, base: RequestBuilder) -> RequestBuilder {
         match &self.request {
             ModelRequestData::Json(json) => base.json(&json),
@@ -277,6 +318,124 @@ pub(super) struct ModelResponse {
 enum ModelResponseData {
     Json(Map<String, Value>),
     Binary(Vec<u8>),
+}
+
+impl ModelResponse {
+    async fn from_http_response(
+        request: &TaggedModelRequest,
+        response: Result<Response, reqwest::Error>,
+    ) -> ModelResponse {
+        match response {
+            Ok(response) => {
+                let status = StatusCode::from_u16(response.status().as_u16()).unwrap();
+                let body = response.bytes().await;
+
+                if status.is_server_error() {
+                    tracing::warn!("Backend returned {} error: {:?}", status, body);
+                    return ModelResponse::from(ModelError::BackendError);
+                }
+
+                if status.is_client_error() {
+                    if status == StatusCode::UNAUTHORIZED
+                        || status == StatusCode::FORBIDDEN
+                        || status == StatusCode::PROXY_AUTHENTICATION_REQUIRED
+                    {
+                        tracing::warn!("Failed to authenticate with backend: {:?}", body);
+                        return ModelResponse::from(ModelError::BackendError);
+                    }
+
+                    if status == StatusCode::NOT_FOUND
+                        || status == StatusCode::METHOD_NOT_ALLOWED
+                        || status == StatusCode::NOT_ACCEPTABLE
+                        || status == StatusCode::REQUEST_TIMEOUT
+                        || status == StatusCode::GONE
+                        || status == StatusCode::LENGTH_REQUIRED
+                        || status == StatusCode::URI_TOO_LONG
+                        || status == StatusCode::EXPECTATION_FAILED
+                        || status == StatusCode::MISDIRECTED_REQUEST
+                        || status == StatusCode::UPGRADE_REQUIRED
+                        || status == StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE
+                    {
+                        tracing::warn!("Backend returned {} error: {:?}", status, body);
+                        return ModelResponse::from(ModelError::BackendError);
+                    }
+
+                    if status == StatusCode::PAYMENT_REQUIRED
+                        || status == StatusCode::TOO_MANY_REQUESTS
+                    {
+                        tracing::warn!("Request was rate-limited by backend: {:?}", body);
+                        return ModelResponse::from(ModelError::ModelRateLimit);
+                    }
+                }
+
+                match body {
+                    Ok(body) => match serde_json::from_slice::<Map<String, Value>>(&body) {
+                        Ok(mut json) => {
+                            if let Some(value) = json.get_mut("model") {
+                                *value = request
+                                    .get_model()
+                                    .map(|label| Value::String(label.to_string()))
+                                    .unwrap_or(Value::Null);
+                            }
+
+                            if let Some(value) = json.get_mut("id") {
+                                *value = Value::String(format!(
+                                    "{}",
+                                    request.tags.last().unwrap_or(&Uuid::new_v4())
+                                ));
+                            }
+
+                            ModelResponse {
+                                status,
+                                usage: get_usage(&json).or_else(|| {
+                                    if status.is_client_error() {
+                                        Some(TokenUsage {
+                                            total: 0,
+                                            input: None,
+                                            output: None,
+                                        })
+                                    } else {
+                                        None
+                                    }
+                                }),
+                                response: ModelResponseData::Json(json),
+                            }
+                        }
+                        Err(error) => {
+                            if request.r#type == RequestType::AudioTTS {
+                                ModelResponse {
+                                    status,
+                                    usage: None,
+                                    response: ModelResponseData::Binary(body.to_vec()),
+                                }
+                            } else {
+                                tracing::warn!("Error parsing response: {:?}", error);
+                                ModelResponse::from(ModelError::BackendError)
+                            }
+                        }
+                    },
+                    Err(error) => {
+                        tracing::warn!("Error receiving response: {:?}", error);
+
+                        ModelResponse::from(ModelError::BackendError)
+                    }
+                }
+            }
+            Err(error) => {
+                tracing::warn!("Error sending request: {:?}", error);
+
+                if error.is_connect() | error.is_redirect() | error.is_decode() {
+                    return ModelResponse::from(ModelError::BackendError);
+                }
+
+                if error.is_timeout() {
+                    return ModelResponse::from(ModelError::ModelRateLimit);
+                }
+
+                ModelResponse::from(ModelError::InternalError)
+            }
+        }
+    }
 }
 
 impl From<ModelError> for ModelResponse {
@@ -403,15 +562,6 @@ impl ModelBackend {
         http_client: &Client,
         mut tagged_request: TaggedModelRequest,
     ) -> ModelResponse {
-        let label = tagged_request
-            .get_model()
-            .map(|label| Value::String(label.to_string()))
-            .unwrap_or(Value::Null);
-        let request_id = Value::String(format!(
-            "{}",
-            tagged_request.tags.last().unwrap_or(&Uuid::new_v4())
-        ));
-
         match &self {
             Self::OpenAI(config) => {
                 tagged_request.update_model(config.model_string.clone());
@@ -442,128 +592,8 @@ impl ModelBackend {
 
                         builder = tagged_request.to_http_body(builder);
 
-                        match builder.send().await {
-                            Ok(response) => {
-                                let status =
-                                    StatusCode::from_u16(response.status().as_u16()).unwrap();
-                                let body = response.bytes().await;
-
-                                if status.is_server_error() {
-                                    tracing::warn!("Backend returned {} error: {:?}", status, body);
-                                    return ModelResponse::from(ModelError::BackendError);
-                                }
-
-                                if status.is_client_error() {
-                                    if status == StatusCode::UNAUTHORIZED
-                                        || status == StatusCode::FORBIDDEN
-                                        || status == StatusCode::PROXY_AUTHENTICATION_REQUIRED
-                                    {
-                                        tracing::warn!(
-                                            "Failed to authenticate with backend: {:?}",
-                                            body
-                                        );
-                                        return ModelResponse::from(ModelError::BackendError);
-                                    }
-
-                                    if status == StatusCode::NOT_FOUND
-                                        || status == StatusCode::METHOD_NOT_ALLOWED
-                                        || status == StatusCode::NOT_ACCEPTABLE
-                                        || status == StatusCode::REQUEST_TIMEOUT
-                                        || status == StatusCode::GONE
-                                        || status == StatusCode::LENGTH_REQUIRED
-                                        || status == StatusCode::URI_TOO_LONG
-                                        || status == StatusCode::EXPECTATION_FAILED
-                                        || status == StatusCode::MISDIRECTED_REQUEST
-                                        || status == StatusCode::UPGRADE_REQUIRED
-                                        || status == StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE
-                                    {
-                                        tracing::warn!(
-                                            "Backend returned {} error: {:?}",
-                                            status,
-                                            body
-                                        );
-                                        return ModelResponse::from(ModelError::BackendError);
-                                    }
-
-                                    if status == StatusCode::PAYMENT_REQUIRED
-                                        || status == StatusCode::TOO_MANY_REQUESTS
-                                    {
-                                        tracing::warn!(
-                                            "Request was rate-limited by backend: {:?}",
-                                            body
-                                        );
-                                        return ModelResponse::from(ModelError::ModelRateLimit);
-                                    }
-                                }
-
-                                match body {
-                                    Ok(body) => {
-                                        match serde_json::from_slice::<Map<String, Value>>(&body) {
-                                            Ok(mut json) => {
-                                                if let Some(value) = json.get_mut("model") {
-                                                    *value = label;
-                                                }
-
-                                                if let Some(value) = json.get_mut("id") {
-                                                    *value = request_id;
-                                                }
-
-                                                ModelResponse {
-                                                    status,
-                                                    usage: get_usage(&json).or_else(|| {
-                                                        if status.is_client_error() {
-                                                            Some(TokenUsage {
-                                                                total: 0,
-                                                                input: None,
-                                                                output: None,
-                                                            })
-                                                        } else {
-                                                            None
-                                                        }
-                                                    }),
-                                                    response: ModelResponseData::Json(json),
-                                                }
-                                            }
-                                            Err(error) => {
-                                                if tagged_request.r#type == RequestType::AudioTTS {
-                                                    ModelResponse {
-                                                        status,
-                                                        usage: None,
-                                                        response: ModelResponseData::Binary(
-                                                            body.to_vec(),
-                                                        ),
-                                                    }
-                                                } else {
-                                                    tracing::warn!(
-                                                        "Error parsing response: {:?}",
-                                                        error
-                                                    );
-                                                    ModelResponse::from(ModelError::BackendError)
-                                                }
-                                            }
-                                        }
-                                    }
-                                    Err(error) => {
-                                        tracing::warn!("Error receiving response: {:?}", error);
-
-                                        ModelResponse::from(ModelError::BackendError)
-                                    }
-                                }
-                            }
-                            Err(error) => {
-                                tracing::warn!("Error sending request: {:?}", error);
-
-                                if error.is_connect() | error.is_redirect() | error.is_decode() {
-                                    return ModelResponse::from(ModelError::BackendError);
-                                }
-
-                                if error.is_timeout() {
-                                    return ModelResponse::from(ModelError::ModelRateLimit);
-                                }
-
-                                ModelResponse::from(ModelError::InternalError)
-                            }
-                        }
+                        ModelResponse::from_http_response(&tagged_request, builder.send().await)
+                            .await
                     }
                     Err(error) => {
                         tracing::warn!("Unable to parse model URL: {:?}", error);
@@ -574,41 +604,7 @@ impl ModelBackend {
             Self::Loopback => ModelResponse {
                 status: StatusCode::OK,
                 usage: None,
-                response: match tagged_request.request {
-                    ModelRequestData::Json(json) => ModelResponseData::Json(json),
-                    ModelRequestData::Form(form) => {
-                        let mut json = Map::new();
-
-                        for (key, value) in form {
-                            match value {
-                                ModelFormItem::Text(text) => {
-                                    json.insert(key, Value::String(text));
-                                }
-                                ModelFormItem::File(file) => {
-                                    let mut file_json = Map::new();
-
-                                    file_json.insert(
-                                        "filename".to_string(),
-                                        file.file_name.map(Value::String).unwrap_or(Value::Null),
-                                    );
-                                    file_json.insert(
-                                        "content-type".to_string(),
-                                        file.content_type.map(Value::String).unwrap_or(Value::Null),
-                                    );
-
-                                    file_json.insert(
-                                        "data".to_string(),
-                                        Value::String(RFC4648.encode(&file.data)),
-                                    );
-
-                                    json.insert(key, Value::Object(file_json));
-                                }
-                            }
-                        }
-
-                        ModelResponseData::Json(json)
-                    }
-                },
+                response: ModelResponseData::Json(tagged_request.to_json()),
             },
         }
     }
