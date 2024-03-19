@@ -6,8 +6,6 @@ use sled::{
 
 use super::AppState;
 
-// TODO: Review https://serde.rs/lifetimes.html and fix deserializer lifetimes (if applicable)
-
 pub(super) trait RelatedToItem {
     type Key: Serialize;
 
