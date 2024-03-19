@@ -9,7 +9,10 @@ Compile with `cargo build --release` (binary will be located in `./target/releas
 The server can be started by running the compiled binary with no arguments. A message containing first-time setup instructions should appear.
 
 ```
-WARN generative_model_proxy_server: It looks like you don't have any users added to your database. Please see http://127.0.0.1:8080/admin/help (login with a blank username and "setup-key" as the password) for more information.
+WARN generative_model_proxy_server:
+  It looks like you don't have any users added to your database.
+  Please see http://127.0.0.1:8080/admin/help (login with a blank
+  username and "setup-key" as the password) for more information.
 ```
 
 After first-time setup has been completed, HTML documentation regarding available API endpoints will be available at the `/admin/help` endpoint.

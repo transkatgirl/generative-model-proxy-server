@@ -18,15 +18,20 @@ mod model;
 
 use limiter::LimiterClock;
 
+/// A multi-user proxy server for major generative model APIs
 #[derive(Parser, Debug)]
 #[command(author, version, about)]
 struct Args {
+    /// The internet socket address that the HTTP server will be available on.
     #[arg(short, long, default_value = "127.0.0.1:8080")]
     bind_to: SocketAddr,
 
+    /// The location of the folder used to store the proxy's database.
     #[arg(short, long, default_value = "database")]
     database_folder: PathBuf,
 
+    /// The OpenTelemetry-compatible collector used for logging.
+    /// Signals sent to the collector may contain sensitive information.
     #[arg(short, long)]
     opentelemetry_endpoint: Option<String>,
 }
