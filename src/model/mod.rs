@@ -1,15 +1,20 @@
-use std::{fmt::Debug, time::Duration};
+use std::{collections::HashMap, fmt::Debug, time::Duration};
 
-use fast32::base32::CROCKFORD;
+use fast32::base32::{CROCKFORD, RFC4648};
 use http::{status::StatusCode, Uri};
-use reqwest::{Client, ClientBuilder, Url};
+use reqwest::{
+    multipart::{Form, Part},
+    Client, ClientBuilder, RequestBuilder, Url,
+};
 use ring::digest;
 use serde::{Deserialize, Serialize};
 use serde_json::{value::Value, Map};
 use tracing::instrument;
 use uuid::Uuid;
 
-// TODO: Perform rate-limiting based on headers, support Audio models
+mod interface;
+
+// TODO: Perform rate-limiting based on headers
 
 #[instrument(level = "trace", ret)]
 fn get_prompt_count(prompt: &Value) -> usize {
@@ -70,7 +75,26 @@ pub(super) struct TaggedModelRequest {
     pub(super) tags: Vec<Uuid>,
     pub(super) r#type: RequestType,
 
-    request: Map<String, Value>,
+    request: ModelRequestData,
+}
+
+#[derive(Debug)]
+enum ModelRequestData {
+    Json(Map<String, Value>),
+    Form(HashMap<String, ModelFormItem>),
+}
+
+#[derive(Debug)]
+enum ModelFormItem {
+    Text(String),
+    File(ModelFormFile),
+}
+
+#[derive(Debug)]
+struct ModelFormFile {
+    file_name: Option<String>,
+    content_type: Option<String>,
+    data: Vec<u8>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -111,67 +135,134 @@ impl TryFrom<&Uri> for RequestType {
 
 impl TaggedModelRequest {
     #[instrument(level = "trace", ret)]
-    pub(super) fn new(
-        tags: Vec<Uuid>,
-        r#type: RequestType,
-        mut request: Map<String, Value>,
-    ) -> TaggedModelRequest {
-        match tags.first() {
-            Some(user) => request.insert(
-                "user".to_string(),
-                Value::String(
-                    CROCKFORD.encode(digest::digest(&digest::SHA256, user.as_bytes()).as_ref()),
-                ),
-            ),
-            None => request.remove("user"),
-        };
-
+    fn from_json(r#type: RequestType, mut request: Map<String, Value>) -> TaggedModelRequest {
         request.remove("stream");
 
         TaggedModelRequest {
-            tags,
+            tags: Vec::new(),
             r#type,
-            request,
+            request: ModelRequestData::Json(request),
+        }
+    }
+
+    #[instrument(level = "trace", ret)]
+    pub(super) fn set_user(&mut self, user: Uuid) {
+        let user = CROCKFORD.encode(digest::digest(&digest::SHA256, user.as_bytes()).as_ref());
+
+        match &mut self.request {
+            ModelRequestData::Json(json) => {
+                json.insert("user".to_string(), Value::String(user));
+            }
+            ModelRequestData::Form(form) => {
+                form.insert("user".to_string(), ModelFormItem::Text(user));
+            }
         }
     }
 
     #[instrument(level = "trace", ret)]
     pub(super) fn get_model(&self) -> Option<&str> {
-        self.request.get("model").and_then(|value| value.as_str())
+        match &self.request {
+            ModelRequestData::Json(json) => json.get("model").and_then(|value| value.as_str()),
+            ModelRequestData::Form(form) => {
+                if let Some(ModelFormItem::Text(model)) = form.get("model") {
+                    Some(model)
+                } else {
+                    None
+                }
+            }
+        }
+    }
+
+    fn update_model(&mut self, model: String) {
+        match &mut self.request {
+            ModelRequestData::Json(json) => {
+                json.insert("model".to_string(), Value::String(model));
+            }
+            ModelRequestData::Form(form) => {
+                form.insert("model".to_string(), ModelFormItem::Text(model));
+            }
+        }
     }
 
     #[instrument(level = "trace", ret)]
     pub(super) fn get_count(&self) -> usize {
-        self.request
-            .get("best_of")
-            .and_then(|value| {
-                value
-                    .as_u64()
-                    .map(|int| int.clamp(1, usize::MAX as u64) as usize)
-            })
-            .unwrap_or(1)
-            * self
-                .request
+        match &self.request {
+            ModelRequestData::Json(json) => {
+                json.get("best_of")
+                    .and_then(|value| {
+                        value
+                            .as_u64()
+                            .map(|int| int.clamp(1, usize::MAX as u64) as usize)
+                    })
+                    .unwrap_or(1)
+                    * json
+                        .get("n")
+                        .and_then(|value| {
+                            value
+                                .as_u64()
+                                .map(|int| int.clamp(1, usize::MAX as u64) as usize)
+                        })
+                        .unwrap_or(1)
+                    * json.get("prompt").map(get_prompt_count).unwrap_or(1)
+                    * json.get("input").map(get_prompt_count).unwrap_or(1)
+            }
+            ModelRequestData::Form(form) => form
                 .get("n")
                 .and_then(|value| {
-                    value
-                        .as_u64()
-                        .map(|int| int.clamp(1, usize::MAX as u64) as usize)
+                    if let ModelFormItem::Text(string) = value {
+                        Some(string)
+                    } else {
+                        None
+                    }
                 })
-                .unwrap_or(1)
-            * self
-                .request
-                .get("prompt")
-                .map(get_prompt_count)
-                .unwrap_or(1)
-            * self.request.get("input").map(get_prompt_count).unwrap_or(1)
+                .and_then(|string| string.parse().ok())
+                .unwrap_or(1),
+        }
     }
 
     #[instrument(level = "trace", ret)]
     pub(super) fn get_max_tokens(&self) -> Option<u64> {
-        self.request
-            .get("max_tokens")
-            .and_then(|value| value.as_u64().map(|int| int.max(1)))
+        match &self.request {
+            ModelRequestData::Json(json) => json
+                .get("max_tokens")
+                .and_then(|value| value.as_u64().map(|int| int.max(1))),
+            ModelRequestData::Form(_) => None,
+        }
+    }
+
+    fn to_http_body(&self, base: RequestBuilder) -> RequestBuilder {
+        match &self.request {
+            ModelRequestData::Json(json) => base.json(&json),
+            ModelRequestData::Form(formdata) => {
+                let mut form = Form::new();
+
+                for (key, value) in formdata {
+                    let key = key.clone();
+
+                    form = match value {
+                        ModelFormItem::Text(text) => form.text(key, text.clone()),
+                        ModelFormItem::File(file) => {
+                            let mut part = Part::bytes(file.data.clone());
+
+                            if let Some(content_type) = &file.content_type {
+                                part = match part.mime_str(content_type) {
+                                    Ok(updated_part) => updated_part,
+                                    Err(_) => Part::bytes(file.data.clone()),
+                                };
+                            }
+
+                            if let Some(filename) = &file.file_name {
+                                part = part.file_name(filename.clone());
+                            }
+
+                            form.part(key, part)
+                        }
+                    };
+                }
+
+                base.multipart(form)
+            }
+        }
     }
 }
 
@@ -179,11 +270,11 @@ impl TaggedModelRequest {
 pub(super) struct ModelResponse {
     pub(super) status: StatusCode,
     pub(super) usage: Option<TokenUsage>,
-    pub(super) response: ModelResponseData,
+    response: ModelResponseData,
 }
 
 #[derive(Debug)]
-pub(super) enum ModelResponseData {
+enum ModelResponseData {
     Json(Map<String, Value>),
     Binary(Vec<u8>),
 }
@@ -323,10 +414,7 @@ impl ModelBackend {
 
         match &self {
             Self::OpenAI(config) => {
-                tagged_request.request.insert(
-                    "model".to_string(),
-                    Value::String(config.model_string.clone()),
-                );
+                tagged_request.update_model(config.model_string.clone());
 
                 let url = Url::parse(&config.openai_api_base).and_then(|base_url| {
                     base_url.join(match tagged_request.r#type {
@@ -352,7 +440,7 @@ impl ModelBackend {
                             builder = builder.header("OpenAI-Organization", organization);
                         }
 
-                        builder = builder.json(&tagged_request.request);
+                        builder = tagged_request.to_http_body(builder);
 
                         match builder.send().await {
                             Ok(response) => {
@@ -486,7 +574,41 @@ impl ModelBackend {
             Self::Loopback => ModelResponse {
                 status: StatusCode::OK,
                 usage: None,
-                response: ModelResponseData::Json(tagged_request.request),
+                response: match tagged_request.request {
+                    ModelRequestData::Json(json) => ModelResponseData::Json(json),
+                    ModelRequestData::Form(form) => {
+                        let mut json = Map::new();
+
+                        for (key, value) in form {
+                            match value {
+                                ModelFormItem::Text(text) => {
+                                    json.insert(key, Value::String(text));
+                                }
+                                ModelFormItem::File(file) => {
+                                    let mut file_json = Map::new();
+
+                                    file_json.insert(
+                                        "filename".to_string(),
+                                        file.file_name.map(Value::String).unwrap_or(Value::Null),
+                                    );
+                                    file_json.insert(
+                                        "content-type".to_string(),
+                                        file.content_type.map(Value::String).unwrap_or(Value::Null),
+                                    );
+
+                                    file_json.insert(
+                                        "data".to_string(),
+                                        Value::String(RFC4648.encode(&file.data)),
+                                    );
+
+                                    json.insert(key, Value::Object(file_json));
+                                }
+                            }
+                        }
+
+                        ModelResponseData::Json(json)
+                    }
+                },
             },
         }
     }

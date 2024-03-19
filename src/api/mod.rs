@@ -1,22 +1,16 @@
 use std::{clone::Clone, collections::HashSet, fmt::Debug, iter, time::Instant};
 
 use axum::{
-    async_trait,
-    body::{self, Bytes},
-    extract::{DefaultBodyLimit, Extension, FromRequest, Multipart, Request, State},
+    extract::{DefaultBodyLimit, Extension, Request, State},
     http::StatusCode,
     middleware::{self, Next},
-    response::{IntoResponse, Response},
-    Form, Json, Router,
+    response::Response,
+    Router,
 };
 
 use fast32::base64::RFC4648;
-use http::{
-    header::{AUTHORIZATION, CONTENT_TYPE, WWW_AUTHENTICATE},
-    Method,
-};
+use http::header::{AUTHORIZATION, WWW_AUTHENTICATE};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Map, Value};
 use tokio::time;
 use tower::ServiceBuilder;
 use tower_http::trace::TraceLayer;
@@ -27,10 +21,7 @@ mod state;
 
 use state::{RelatedToItem, RelatedToItemSet};
 
-use crate::{
-    limiter::{self, LimiterResult},
-    model::ModelResponseData,
-};
+use crate::limiter::{self, LimiterResult};
 
 use self::state::{DatabaseFunctionResult, DatabaseValueResult};
 
@@ -346,111 +337,6 @@ async fn model_request(
     }
 
     Ok(response)
-}
-
-#[async_trait]
-impl<S> FromRequest<S> for TaggedModelRequest
-where
-    Bytes: FromRequest<S>,
-    S: Send + Sync,
-{
-    type Rejection = ModelError;
-
-    #[tracing::instrument(level = "trace", skip(state), ret)]
-    async fn from_request(req: Request, state: &S) -> Result<Self, Self::Rejection> {
-        let r#type = match RequestType::try_from(req.uri()) {
-            Ok(r#type) => r#type,
-            Err(_) => return Err(ModelError::UnknownEndpoint),
-        };
-
-        if req.method() != Method::GET
-            && req.method() != Method::HEAD
-            && req.method() != Method::POST
-        {
-            return Err(ModelError::BadEndpointMethod);
-        }
-
-        let request = match req
-            .headers()
-            .get(CONTENT_TYPE)
-            .and_then(|header_value| {
-                header_value
-                    .to_str()
-                    .map(|header_string| header_string.to_ascii_lowercase())
-                    .ok()
-            })
-            .as_deref()
-        {
-            Some("application/x-www-form-urlencoded") => Form::from_request(req, state)
-                .await
-                .map(|value| value.0)
-                .ok(),
-            Some("multipart/form-data") => match Multipart::from_request(req, state).await {
-                Ok(mut multipart) => {
-                    let mut json_fields = Vec::new();
-
-                    while let Ok(Some(field)) = multipart.next_field().await {
-                        json_fields.push(json!({
-                            "name": field.name(),
-                            "file_name": field.file_name(),
-                            "content_type": field.content_type(),
-                            "headers": field.headers().iter().filter_map(|(key, value)| {
-                                value.to_str().ok().map(|value| (key.as_str(), Value::String(value.to_string())))
-                            }).collect::<Vec<(_, Value)>>(),
-                            "content": field.bytes().await.ok().map(|bytes| RFC4648.encode(bytes.as_ref())),
-                        }))
-                    }
-
-                    let mut json = Map::with_capacity(1);
-                    json.insert("form-data".to_string(), Value::Array(json_fields));
-                    Some(json)
-                }
-                Err(_) => None,
-            },
-            Some("application/json") => Json::from_request(req, state)
-                .await
-                .map(|value| value.0)
-                .ok(),
-            Some(_) => body::to_bytes(req.into_body(), usize::MAX)
-                .await
-                .ok()
-                .and_then(|body| Json::from_bytes(body.as_ref()).map(|value| value.0).ok()),
-            None => {
-                if req.method() == Method::HEAD || req.method() == Method::GET {
-                    Form::from_request(req, state)
-                        .await
-                        .map(|value| value.0)
-                        .ok()
-                } else {
-                    body::to_bytes(req.into_body(), usize::MAX)
-                        .await
-                        .ok()
-                        .and_then(|body| Json::from_bytes(body.as_ref()).map(|value| value.0).ok())
-                }
-            }
-        };
-
-        if let Some(object) = request {
-            return Ok(TaggedModelRequest::new(Vec::new(), r#type, object));
-        }
-
-        Err(ModelError::BadRequest)
-    }
-}
-
-impl IntoResponse for ModelResponse {
-    fn into_response(self) -> axum::response::Response {
-        match self.response {
-            ModelResponseData::Json(json) => (self.status, Json(json)).into_response(),
-            ModelResponseData::Binary(binary) => (self.status, binary).into_response(),
-        }
-    }
-}
-
-impl IntoResponse for ModelError {
-    fn into_response(self) -> axum::response::Response {
-        ModelResponse::from(self).into_response()
-    }
 }
 
 #[derive(Serialize, Deserialize)]
