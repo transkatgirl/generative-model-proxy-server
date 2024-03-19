@@ -16,7 +16,7 @@ use http::{
     Method,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use tokio::time;
 use tower::ServiceBuilder;
 use tower_http::trace::TraceLayer;
@@ -27,7 +27,10 @@ mod state;
 
 use state::{RelatedToItem, RelatedToItemSet};
 
-use crate::limiter::{self, LimiterResult};
+use crate::{
+    limiter::{self, LimiterResult},
+    model::ModelResponseData,
+};
 
 use self::state::{DatabaseFunctionResult, DatabaseValueResult};
 
@@ -381,53 +384,53 @@ where
             Some("application/x-www-form-urlencoded") => Form::from_request(req, state)
                 .await
                 .map(|value| value.0)
-                .unwrap_or(Value::Null),
+                .ok(),
             Some("multipart/form-data") => match Multipart::from_request(req, state).await {
                 Ok(mut multipart) => {
                     let mut json_fields = Vec::new();
 
-                    while let Some(field) = multipart.next_field().await.unwrap() {
+                    while let Ok(Some(field)) = multipart.next_field().await {
                         json_fields.push(json!({
                             "name": field.name(),
                             "file_name": field.file_name(),
                             "content_type": field.content_type(),
-                            "headers": field.headers().iter().map(|(key, value)| {
-                                (key.as_str(), value.to_str().map(|value| Value::String(value.to_string())).unwrap_or(Value::String(RFC4648.encode(value.as_bytes()))))
+                            "headers": field.headers().iter().filter_map(|(key, value)| {
+                                value.to_str().ok().map(|value| (key.as_str(), Value::String(value.to_string())))
                             }).collect::<Vec<(_, Value)>>(),
                             "content": field.bytes().await.ok().map(|bytes| RFC4648.encode(bytes.as_ref())),
                         }))
                     }
 
-                    Value::Array(json_fields)
+                    let mut json = Map::with_capacity(1);
+                    json.insert("form-data".to_string(), Value::Array(json_fields));
+                    Some(json)
                 }
-                Err(_) => Value::Null,
+                Err(_) => None,
             },
             Some("application/json") => Json::from_request(req, state)
                 .await
                 .map(|value| value.0)
-                .unwrap_or(Value::Null),
+                .ok(),
             Some(_) => body::to_bytes(req.into_body(), usize::MAX)
                 .await
                 .ok()
-                .and_then(|body| Json::from_bytes(body.as_ref()).map(|value| value.0).ok())
-                .unwrap_or(Value::Null),
+                .and_then(|body| Json::from_bytes(body.as_ref()).map(|value| value.0).ok()),
             None => {
                 if req.method() == Method::HEAD || req.method() == Method::GET {
                     Form::from_request(req, state)
                         .await
                         .map(|value| value.0)
-                        .unwrap_or(Value::Null)
+                        .ok()
                 } else {
                     body::to_bytes(req.into_body(), usize::MAX)
                         .await
                         .ok()
                         .and_then(|body| Json::from_bytes(body.as_ref()).map(|value| value.0).ok())
-                        .unwrap_or(Value::Null)
                 }
             }
         };
 
-        if let Value::Object(object) = request {
+        if let Some(object) = request {
             return Ok(TaggedModelRequest::new(Vec::new(), r#type, object));
         }
 
@@ -437,18 +440,10 @@ where
 
 impl IntoResponse for ModelResponse {
     fn into_response(self) -> axum::response::Response {
-        if self.status == StatusCode::OK {
-            if let Some(data) = self
-                .response
-                .get("base64_response")
-                .and_then(|value| value.as_str())
-                .and_then(|string| RFC4648.decode(string.as_bytes()).ok())
-            {
-                return (self.status, data).into_response();
-            }
+        match self.response {
+            ModelResponseData::Json(json) => (self.status, Json(json)).into_response(),
+            ModelResponseData::Binary(binary) => (self.status, binary).into_response(),
         }
-
-        (self.status, Json(self.response)).into_response()
     }
 }
 

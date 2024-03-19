@@ -179,12 +179,18 @@ impl TaggedModelRequest {
 pub(super) struct ModelResponse {
     pub(super) status: StatusCode,
     pub(super) usage: Option<TokenUsage>,
-    pub(super) response: Map<String, Value>,
+    pub(super) response: ModelResponseData,
+}
+
+#[derive(Debug)]
+pub(super) enum ModelResponseData {
+    Json(Map<String, Value>),
+    Binary(Vec<u8>),
 }
 
 impl From<ModelError> for ModelResponse {
     fn from(value: ModelError) -> Self {
-        let mut response = Map::new();
+        let mut json = Map::new();
 
         let message = match value {
             ModelError::BadRequest => "We could not parse the JSON body of your request. (HINT: This likely means you aren't using your HTTP library correctly. The API expects a JSON payload, but what was sent was not valid JSON. If you have trouble figuring out how to fix this, contact the proxy's administrator.)",
@@ -223,10 +229,10 @@ impl From<ModelError> for ModelResponse {
             ModelError::BackendError => Value::Null,
         };
 
-        response.insert("message".to_string(), Value::String(message.to_string()));
-        response.insert("type".to_string(), Value::String(error_type.to_string()));
-        response.insert("param".to_string(), Value::Null);
-        response.insert("code".to_string(), error_code);
+        json.insert("message".to_string(), Value::String(message.to_string()));
+        json.insert("type".to_string(), Value::String(error_type.to_string()));
+        json.insert("param".to_string(), Value::Null);
+        json.insert("code".to_string(), error_code);
 
         let status = match value {
             ModelError::BadRequest => StatusCode::BAD_REQUEST,
@@ -248,7 +254,7 @@ impl From<ModelError> for ModelResponse {
                 output: None,
             }),
             status,
-            response,
+            response: ModelResponseData::Json(json),
         }
     }
 }
@@ -352,7 +358,7 @@ impl ModelBackend {
                             Ok(response) => {
                                 let status =
                                     StatusCode::from_u16(response.status().as_u16()).unwrap();
-                                let body = response.text().await;
+                                let body = response.bytes().await;
 
                                 if status.is_server_error() {
                                     tracing::warn!("Backend returned {} error: {:?}", status, body);
@@ -404,7 +410,7 @@ impl ModelBackend {
 
                                 match body {
                                     Ok(body) => {
-                                        match serde_json::from_str::<Map<String, Value>>(&body) {
+                                        match serde_json::from_slice::<Map<String, Value>>(&body) {
                                             Ok(mut json) => {
                                                 if let Some(value) = json.get_mut("model") {
                                                     *value = label;
@@ -427,15 +433,25 @@ impl ModelBackend {
                                                             None
                                                         }
                                                     }),
-                                                    response: json,
+                                                    response: ModelResponseData::Json(json),
                                                 }
                                             }
                                             Err(error) => {
-                                                tracing::warn!(
-                                                    "Error parsing response: {:?}",
-                                                    error
-                                                );
-                                                ModelResponse::from(ModelError::BackendError)
+                                                if tagged_request.r#type == RequestType::AudioTTS {
+                                                    ModelResponse {
+                                                        status,
+                                                        usage: None,
+                                                        response: ModelResponseData::Binary(
+                                                            body.to_vec(),
+                                                        ),
+                                                    }
+                                                } else {
+                                                    tracing::warn!(
+                                                        "Error parsing response: {:?}",
+                                                        error
+                                                    );
+                                                    ModelResponse::from(ModelError::BackendError)
+                                                }
                                             }
                                         }
                                     }
@@ -470,7 +486,7 @@ impl ModelBackend {
             Self::Loopback => ModelResponse {
                 status: StatusCode::OK,
                 usage: None,
-                response: tagged_request.request,
+                response: ModelResponseData::Json(tagged_request.request),
             },
         }
     }
