@@ -27,7 +27,7 @@ struct Args {
     bind_to: SocketAddr,
 
     /// The location of the folder used to store the proxy's database.
-    #[arg(short, long, default_value = "database")]
+    #[arg(short, long, default_value = "./database")]
     database_folder: PathBuf,
 
     /// The OpenTelemetry-compatible collector used for logging.

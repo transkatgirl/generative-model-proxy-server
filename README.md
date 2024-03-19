@@ -25,15 +25,22 @@ You can run the binary with the `-h` or `--help` arguments for a full list of av
 
 ```bash
 > ./generative-model-proxy-server --help
+A multi-user proxy server for major generative model APIs
+
 Usage: generative-model-proxy-server [OPTIONS]
 
 Options:
-  -b, --bind-to <BIND_TO>                                [default: 127.0.0.1:8080]
-  -d, --database-folder <DATABASE_FOLDER>                [default: database]
+  -b, --bind-to <BIND_TO>
+          The internet socket address that the HTTP server will be available on [default: 127.0.0.1:8080]
+  -d, --database-folder <DATABASE_FOLDER>
+          The location of the folder used to store the proxy's database [default: ./database]
   -o, --opentelemetry-endpoint <OPENTELEMETRY_ENDPOINT>
-  -h, --help                                             Print help
-  -V, --version                                          Print version
-
+          The OpenTelemetry-compatible collector used for logging. Signals sent to the collector may contain sensitive
+          information
+  -h, --help
+          Print help
+  -V, --version
+          Print version
 ```
 
 #### Monitoring
