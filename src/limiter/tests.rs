@@ -312,48 +312,9 @@ fn limit_requests_with_tokens_equal_passes() {
         );
     }
 }
-/*#[test]
-fn limit_requests_with_tokens_two_pass() {
-    let clock = LimiterClock::new();
-    let mut request_time = clock.epoch;
-    let mut limit = Limit {
-        count: 128,
-        r#type: super::LimitItem::Token,
-        period: 8,
-        state: None,
-    };
 
-    let limit_request = |limit: &mut Limit,
-                                  request_time: &Instant,
-                                  estimated_tokens: u64,
-                                  actual_tokens: u64|
-     -> (LimiterResult, LimiterResult) {
-        let request = Request {
-            arrived_at: *request_time,
-            estimated_tokens,
-        };
-        let response = Response {
-            request: Request {
-                arrived_at: *request_time,
-                estimated_tokens,
-            },
-            actual_tokens,
-        };
+#[test]
+fn limit_requests_with_tokens_greater_first_pass() {}
 
-        (
-            limit.request(&clock, &request),
-            limit.response(&clock, &response),
-        )
-    };
-
-    for _ in 0..8 {
-        assert_eq!(
-            limit_request(&mut limit, &request_time, 16),
-            LimiterResult::Ready
-        );
-    }
-    assert_eq!(
-        limit_request(&mut limit, &request_time, 16),
-        LimiterResult::WaitUntil(request_time + Duration::from_secs(1))
-    );
-}*/
+#[test]
+fn limit_requests_with_tokens_greater_second_pass() {}

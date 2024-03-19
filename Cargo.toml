@@ -74,3 +74,8 @@ postcard = { versiion = "1.0", features = [
 
 [dev-dependencies]
 rand = "0.8.5"
+
+[profile.release]
+lto           = 'fat'
+codegen-units = 1
+panic         = 'abort'
