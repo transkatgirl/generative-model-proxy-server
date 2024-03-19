@@ -242,7 +242,11 @@ impl From<ModelError> for ModelResponse {
         };
 
         ModelResponse {
-            usage: None,
+            usage: Some(TokenUsage {
+                total: 0,
+                input: None,
+                output: None,
+            }),
             status,
             response,
         }
@@ -412,7 +416,17 @@ impl ModelBackend {
 
                                                 ModelResponse {
                                                     status,
-                                                    usage: get_usage(&json),
+                                                    usage: get_usage(&json).or_else(|| {
+                                                        if status.is_client_error() {
+                                                            Some(TokenUsage {
+                                                                total: 0,
+                                                                input: None,
+                                                                output: None,
+                                                            })
+                                                        } else {
+                                                            None
+                                                        }
+                                                    }),
                                                     response: json,
                                                 }
                                             }

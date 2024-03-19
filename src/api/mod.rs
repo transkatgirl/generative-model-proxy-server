@@ -37,8 +37,6 @@ use super::{
     AppState,
 };
 
-// TODO: Add API documentation
-
 #[derive(Default, Serialize, Deserialize, Debug, Clone)]
 #[serde(default)]
 struct User {

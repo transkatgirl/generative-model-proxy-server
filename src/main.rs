@@ -76,7 +76,7 @@ async fn main() -> Result<()> {
                         .with_endpoint(endpoint),
                 )
                 .with_trace_config(trace::config().with_resource(Resource::new(vec![
-                    KeyValue::new("service.name", "language-model-proxy-server"),
+                    KeyValue::new("service.name", "generative-model-proxy-server"),
                 ])))
                 .install_batch(opentelemetry_sdk::runtime::Tokio)
                 .context("Failed to start OpenTelemetry")?;
