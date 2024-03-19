@@ -35,7 +35,7 @@
 					</li>
 				</ol>
 			</li>
-			<li>Model Request Routing</li>
+			<li><a href="#request-handling">Request Handling Flow</a></li>
 			<li><a href="#command-line-flags">Additional Configuration</a></li>
 		</ol>
 	</nav>
@@ -385,8 +385,50 @@
 			</ul>
 		</section>
 	</section>
-	<section id="model-request-routing">
-		<h2>Model Request Routing</h2>
+	<section id="request-handling">
+		<h2>Request Handling Flow</h2>
+		<p>A rough overview of the request handling flow is below:</p>
+		<ol>
+			<li>HTTP authentication is attempted. If successful, the User object, along with all Roles that the User
+				has, are retrieved from the database.</li>
+			<li>If the request is to the /admin/ API, the authenticated User (along with all Roles said User has) will
+				be checked for administrative permissions.
+				<ol>
+					<li>If the user has administrative permissions, then the request
+						will be passed to the <code>admin_router</code>, which will send the request to the correct
+						request
+						handler.</li>
+				</ol>
+			</li>
+			<li>If the request is not to a /admin/ endpoint, it is assumed it is a Model request.
+				<ol>
+					<li>The request handler
+						attempts to parse the HTTP request's body into a <code>ModelRequest</code> object.</li>
+					<li>If parsing is successful, all Models that the User & User's Roles can access will be retrieved
+						from the
+						database. Then, the list of Models will be searched for one which matches the request
+						parameters.</li>
+					<li>If a matching Model is found, all Quotas that the request will be subjected to (those of the
+						User, the
+						User's Roles, and the Model) will be retrieved from the database. A list of Tags (all object
+						UUIDs
+						associated with the request, along with a unique UUID specific to the request itself) will be
+						constructed for logging purposes.</li>
+					<li>The request will be run against the Quotas, using the maximum possible number of tokens (the
+						minimum of
+						the
+						request's <code>max_tokens</code> and the Model's token maximum) for rate limiting purposes.
+					</li>
+					<li>The request will then be sent to the Model's backend, which will generate a
+						<code>ModelResponse</code>
+						object.
+					</li>
+					<li>All of the request's Quotas will be readjusted based on the actual number of tokens used. The
+						<code>ModelResponse</code> will then be converted into an HTTP response.
+					</li>
+				</ol>
+			</li>
+		</ol>
 	</section>
 	<section id="command-line-flags">
 		<h2>Additional Configuration</h2>
