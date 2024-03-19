@@ -45,7 +45,7 @@ Options:
 
 #### Monitoring
 
-The server supports sending logs to an [OpenTelemetry](https://opentelemetry.io) compatible collector. This feature is a work in progress, and the output format will likely change in future releases.
+The server supports sending logs to an [OpenTelemetry](https://opentelemetry.io) compatible collector.
 
 ## Roadmap
 
@@ -59,8 +59,8 @@ The server supports sending logs to an [OpenTelemetry](https://opentelemetry.io)
         - [ ] Model API
 - [ ] Adding import functionality from https://github.com/cosmicoptima/openai-cd2-proxy
 - [ ] Model rate limiting based on backend responses (such as HTTP headers)
-- [ ] Logging (half implemented)
-- [ ] Metrics
+- [X] Logging
+        - [ ] Metrics
 - [ ] Support more APIs
         - [ ] Chapter2
         - [ ] Anthropic
