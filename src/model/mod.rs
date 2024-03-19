@@ -123,7 +123,6 @@ impl TryFrom<&Uri> for RequestType {
 }
 
 impl ModelRequest {
-    #[instrument(level = "trace", ret)]
     fn from_json(r#type: RequestType, mut request: Map<String, Value>) -> ModelRequest {
         request.remove("stream");
 

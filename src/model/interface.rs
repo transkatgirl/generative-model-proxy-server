@@ -132,6 +132,7 @@ where
 }
 
 impl IntoResponse for ModelResponse {
+    #[tracing::instrument(level = "trace", ret)]
     fn into_response(self) -> axum::response::Response {
         match self.response {
             ModelResponseData::Json(json) => (self.status, Json(json)).into_response(),

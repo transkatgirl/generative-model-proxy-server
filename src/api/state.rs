@@ -48,7 +48,7 @@ pub(super) enum DatabaseFunctionResult<T, E> {
 }
 
 impl AppState {
-    #[tracing::instrument(skip(self), level = "debug")]
+    #[tracing::instrument(skip(self), level = "trace")]
     pub fn is_table_empty(&self, table: &str) -> bool {
         match self.database.open_tree(table.as_bytes()) {
             Ok(tree) => tree.is_empty(),

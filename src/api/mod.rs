@@ -110,7 +110,7 @@ pub fn api_router(state: AppState) -> Router {
         )
 }
 
-#[tracing::instrument(level = "trace", skip(state), ret)]
+#[tracing::instrument(level = "debug", skip(state, next), ret)]
 async fn authenticate(
     State(state): State<AppState>,
     mut request: Request,
@@ -184,7 +184,7 @@ async fn authenticate(
     }
 }
 
-#[tracing::instrument(level = "trace", skip(auth), ret)]
+#[tracing::instrument(level = "debug", skip(next), ret)]
 async fn authenticate_admin(
     Extension(auth): Extension<Authenticated>,
     request: Request,
