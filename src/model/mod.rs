@@ -323,6 +323,7 @@ enum ModelResponseData {
 impl ModelResponse {
     async fn from_http_response(
         request: &TaggedModelRequest,
+        label: Value,
         response: Result<Response, reqwest::Error>,
     ) -> ModelResponse {
         match response {
@@ -372,10 +373,7 @@ impl ModelResponse {
                     Ok(body) => match serde_json::from_slice::<Map<String, Value>>(&body) {
                         Ok(mut json) => {
                             if let Some(value) = json.get_mut("model") {
-                                *value = request
-                                    .get_model()
-                                    .map(|label| Value::String(label.to_string()))
-                                    .unwrap_or(Value::Null);
+                                *value = label;
                             }
 
                             if let Some(value) = json.get_mut("id") {
@@ -562,6 +560,11 @@ impl ModelBackend {
         http_client: &Client,
         mut tagged_request: TaggedModelRequest,
     ) -> ModelResponse {
+        let label = tagged_request
+            .get_model()
+            .map(|string| Value::String(string.to_string()))
+            .unwrap_or(Value::Null);
+
         match &self {
             Self::OpenAI(config) => {
                 tagged_request.update_model(config.model_string.clone());
@@ -592,8 +595,12 @@ impl ModelBackend {
 
                         builder = tagged_request.to_http_body(builder);
 
-                        ModelResponse::from_http_response(&tagged_request, builder.send().await)
-                            .await
+                        ModelResponse::from_http_response(
+                            &tagged_request,
+                            label,
+                            builder.send().await,
+                        )
+                        .await
                     }
                     Err(error) => {
                         tracing::warn!("Unable to parse model URL: {:?}", error);
