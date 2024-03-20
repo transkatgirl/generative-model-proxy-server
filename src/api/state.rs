@@ -71,7 +71,7 @@ impl AppState {
                     .collect(),
             ),
             Err(error) => {
-                tracing::warn!("Unable to open \"{}\" table: {}", table, error);
+                tracing::error!("Unable to open \"{}\" table: {}", table, error);
                 DatabaseValueResult::BackendError
             }
         }
@@ -97,11 +97,11 @@ impl AppState {
                     }
                 })
                 .unwrap_or_else(|error| {
-                    tracing::warn!("Unable to apply database transaction: {}", error);
+                    tracing::error!("Unable to apply database transaction: {}", error);
                     DatabaseValueResult::BackendError
                 }),
             Err(error) => {
-                tracing::warn!("Unable to open \"{}\" table: {}", table, error);
+                tracing::error!("Unable to open \"{}\" table: {}", table, error);
                 DatabaseValueResult::BackendError
             }
         }
@@ -137,11 +137,11 @@ impl AppState {
                     Ok(DatabaseValueResult::Success(values))
                 })
                 .unwrap_or_else(|error| {
-                    tracing::warn!("Unable to apply database transaction: {}", error);
+                    tracing::error!("Unable to apply database transaction: {}", error);
                     DatabaseValueResult::BackendError
                 }),
             Err(error) => {
-                tracing::warn!("Unable to open \"{}\" table: {}", table, error);
+                tracing::error!("Unable to open \"{}\" table: {}", table, error);
                 DatabaseValueResult::BackendError
             }
         }
@@ -161,7 +161,7 @@ impl AppState {
         let table_main = match self.database.open_tree(tables.0.as_bytes()) {
             Ok(tree) => tree,
             Err(error) => {
-                tracing::warn!("Unable to open \"{}\" table: {}", tables.0, error);
+                tracing::error!("Unable to open \"{}\" table: {}", tables.0, error);
                 return DatabaseValueResult::BackendError;
             }
         };
@@ -169,7 +169,7 @@ impl AppState {
         let table_related = match self.database.open_tree(tables.1.as_bytes()) {
             Ok(tree) => tree,
             Err(error) => {
-                tracing::warn!("Unable to open \"{}\" table: {}", tables.1, error);
+                tracing::error!("Unable to open \"{}\" table: {}", tables.1, error);
                 return DatabaseValueResult::BackendError;
             }
         };
@@ -196,7 +196,7 @@ impl AppState {
                 Ok(DatabaseValueResult::NotFound)
             })
             .unwrap_or_else(|error| {
-                tracing::warn!("Unable to apply database transaction: {}", error);
+                tracing::error!("Unable to apply database transaction: {}", error);
                 DatabaseValueResult::BackendError
             })
     }
@@ -218,11 +218,11 @@ impl AppState {
                     Ok(DatabaseActionResult::Success)
                 })
                 .unwrap_or_else(|error| {
-                    tracing::warn!("Unable to apply database transaction: {}", error);
+                    tracing::error!("Unable to apply database transaction: {}", error);
                     DatabaseActionResult::BackendError
                 }),
             Err(error) => {
-                tracing::warn!("Unable to open \"{}\" table: {}", table, error);
+                tracing::error!("Unable to open \"{}\" table: {}", table, error);
                 DatabaseActionResult::BackendError
             }
         }
@@ -274,19 +274,19 @@ impl AppState {
                 })
                 .unwrap_or_else(|error| match error {
                     TransactionError::Abort(Either::A(error)) => {
-                        tracing::warn!("Unable to apply database transaction: {}", error);
+                        tracing::error!("Unable to apply database transaction: {}", error);
                         DatabaseFunctionResult::BackendError
                     }
                     TransactionError::Abort(Either::B(error)) => {
                         DatabaseFunctionResult::FunctionError(error)
                     }
                     TransactionError::Storage(error) => {
-                        tracing::warn!("Unable to apply database transaction: {}", error);
+                        tracing::error!("Unable to apply database transaction: {}", error);
                         DatabaseFunctionResult::BackendError
                     }
                 }),
             Err(error) => {
-                tracing::warn!("Unable to open \"{}\" table: {}", table, error);
+                tracing::error!("Unable to open \"{}\" table: {}", table, error);
                 DatabaseFunctionResult::BackendError
             }
         }
@@ -308,7 +308,7 @@ impl AppState {
         let table_main = match self.database.open_tree(tables.0.as_bytes()) {
             Ok(tree) => tree,
             Err(error) => {
-                tracing::warn!("Unable to open \"{}\" table: {}", tables.0, error);
+                tracing::error!("Unable to open \"{}\" table: {}", tables.0, error);
                 return DatabaseLinkedInsertionResult::BackendError;
             }
         };
@@ -316,7 +316,7 @@ impl AppState {
         let table_related = match self.database.open_tree(tables.1.as_bytes()) {
             Ok(tree) => tree,
             Err(error) => {
-                tracing::warn!("Unable to open \"{}\" table: {}", tables.1, error);
+                tracing::error!("Unable to open \"{}\" table: {}", tables.1, error);
                 return DatabaseLinkedInsertionResult::BackendError;
             }
         };
@@ -372,12 +372,12 @@ impl AppState {
             })
             .unwrap_or_else(|error| match error {
                 TransactionError::Abort(Either::A(error)) => {
-                    tracing::warn!("Unable to apply database transaction: {}", error);
+                    tracing::error!("Unable to apply database transaction: {}", error);
                     DatabaseLinkedInsertionResult::BackendError
                 }
                 TransactionError::Abort(Either::B(error)) => error,
                 TransactionError::Storage(error) => {
-                    tracing::warn!("Unable to apply database transaction: {}", error);
+                    tracing::error!("Unable to apply database transaction: {}", error);
                     DatabaseLinkedInsertionResult::BackendError
                 }
             })
@@ -403,11 +403,11 @@ impl AppState {
                     }
                 })
                 .unwrap_or_else(|error| {
-                    tracing::warn!("Unable to apply database transaction: {}", error);
+                    tracing::error!("Unable to apply database transaction: {}", error);
                     DatabaseActionResult::BackendError
                 }),
             Err(error) => {
-                tracing::warn!("Unable to open \"{}\" table: {}", table, error);
+                tracing::error!("Unable to open \"{}\" table: {}", table, error);
                 DatabaseActionResult::BackendError
             }
         }
@@ -426,7 +426,7 @@ impl AppState {
         let table_main = match self.database.open_tree(tables.0.as_bytes()) {
             Ok(tree) => tree,
             Err(error) => {
-                tracing::warn!("Unable to open \"{}\" table: {}", tables.0, error);
+                tracing::error!("Unable to open \"{}\" table: {}", tables.0, error);
                 return DatabaseActionResult::BackendError;
             }
         };
@@ -434,7 +434,7 @@ impl AppState {
         let table_related = match self.database.open_tree(tables.1.as_bytes()) {
             Ok(tree) => tree,
             Err(error) => {
-                tracing::warn!("Unable to open \"{}\" table: {}", tables.1, error);
+                tracing::error!("Unable to open \"{}\" table: {}", tables.1, error);
                 return DatabaseActionResult::BackendError;
             }
         };
@@ -463,7 +463,7 @@ impl AppState {
                 }
             })
             .unwrap_or_else(|error| {
-                tracing::warn!("Unable to apply database transaction: {}", error);
+                tracing::error!("Unable to apply database transaction: {}", error);
                 DatabaseActionResult::BackendError
             })
     }

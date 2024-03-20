@@ -105,7 +105,7 @@ struct Authenticated {
 
 pub fn api_router(state: AppState) -> Router {
     Router::new()
-        .fallback(model_request)
+        .fallback(handle_model_request)
         .nest("/admin", admin::admin_router())
         .with_state(state.clone())
         .layer(
@@ -216,6 +216,7 @@ async fn authenticate(
     }
 }
 
+#[tracing::instrument(name = "handle_admin_request", level = "debug", skip_all)]
 async fn authenticate_admin(
     Extension(auth): Extension<Authenticated>,
     request: Request,
@@ -241,8 +242,8 @@ async fn modify_response<B>(mut response: Response<B>) -> Response<B> {
     response
 }
 
-#[tracing::instrument(level = "trace", skip(state), ret)]
-async fn model_request(
+#[tracing::instrument(level = "debug", skip(state), ret)]
+async fn handle_model_request(
     Extension(auth): Extension<Authenticated>,
     State(state): State<AppState>,
     request: Result<ModelRequest, ModelError>,
