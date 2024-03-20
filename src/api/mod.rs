@@ -110,12 +110,13 @@ pub fn api_router(state: AppState) -> Router {
         )
 }
 
-#[tracing::instrument(level = "debug", skip(state, next), ret)]
 async fn authenticate(
     State(state): State<AppState>,
     mut request: Request,
     next: Next,
 ) -> Result<Response, ModelError> {
+    let span = tracing::debug_span!("authenticate").entered();
+
     let timestamp = Instant::now();
 
     match request
@@ -147,6 +148,8 @@ async fn authenticate(
                     roles: Vec::new(),
                 });
 
+                span.exit();
+
                 return Ok(next.run(request).await);
             }
 
@@ -174,6 +177,8 @@ async fn authenticate(
                         DatabaseValueResult::BackendError => return Err(ModelError::InternalError),
                     };
 
+                    span.exit();
+
                     Ok(next.run(request).await)
                 }
                 DatabaseValueResult::NotFound => Err(ModelError::AuthInvalid),
@@ -184,7 +189,6 @@ async fn authenticate(
     }
 }
 
-#[tracing::instrument(level = "debug", skip(next), ret)]
 async fn authenticate_admin(
     Extension(auth): Extension<Authenticated>,
     request: Request,
