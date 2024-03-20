@@ -23,7 +23,7 @@ where
 {
     type Rejection = ModelError;
 
-    #[tracing::instrument(level = "trace", skip(state), ret)]
+    #[tracing::instrument(level = "debug", skip(state), ret)]
     async fn from_request(req: Request, state: &S) -> Result<Self, Self::Rejection> {
         let r#type = match RequestType::try_from(req.uri()) {
             Ok(r#type) => r#type,
@@ -132,7 +132,7 @@ where
 }
 
 impl IntoResponse for ModelResponse {
-    #[tracing::instrument(level = "trace", ret)]
+    #[tracing::instrument(level = "debug", ret)]
     fn into_response(self) -> axum::response::Response {
         match self.response {
             ModelResponseData::Json(json) => (self.status, Json(json)).into_response(),

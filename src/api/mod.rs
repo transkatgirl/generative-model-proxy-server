@@ -1,4 +1,10 @@
-use std::{clone::Clone, collections::HashSet, fmt::Debug, iter, time::Instant};
+use std::{
+    clone::Clone,
+    collections::HashSet,
+    fmt::Debug,
+    iter,
+    time::{Duration, Instant},
+};
 
 use axum::{
     extract::{DefaultBodyLimit, Extension, Request, State},
@@ -10,10 +16,12 @@ use axum::{
 
 use fast32::base64::RFC4648;
 use http::header::{AUTHORIZATION, WWW_AUTHENTICATE};
+use opentelemetry::trace::SpanKind;
 use serde::{Deserialize, Serialize};
 use tokio::time;
 use tower::ServiceBuilder;
 use tower_http::trace::TraceLayer;
+use tracing::Span;
 use uuid::Uuid;
 
 mod admin;
@@ -95,7 +103,6 @@ struct Authenticated {
     roles: Vec<Role>,
 }
 
-#[tracing::instrument(level = "debug", skip(state))]
 pub fn api_router(state: AppState) -> Router {
     Router::new()
         .fallback(model_request)
@@ -104,7 +111,20 @@ pub fn api_router(state: AppState) -> Router {
         .layer(
             ServiceBuilder::new()
                 .layer(DefaultBodyLimit::max(16_777_216))
-                .layer(TraceLayer::new_for_http())
+                .layer(
+                    TraceLayer::new_for_http().make_span_with(|request: &Request<_>| {
+                        tracing::debug_span!(
+                            "request",
+                            "otel.name" = request.uri().path(),
+                            "otel.kind" = "Server",
+                        )
+                    }), /*.on_request(|request: &Request<_>, _span: &Span| {
+                            tracing::debug!("started {} {}", request.method(), request.uri().path())
+                        })
+                        .on_response(|response: &Response<_>, latency: Duration, _span: &Span| {
+                            tracing::debug!("response generated in {:?}", latency)
+                        })*/
+                )
                 .layer(middleware::map_response(modify_response))
                 .layer(middleware::from_fn_with_state(state, authenticate)),
         )
@@ -141,12 +161,16 @@ async fn authenticate(
         }) {
         Some(api_key) => {
             if state.is_table_empty("users") && api_key == "setup-key" {
+                tracing::warn!("authenticating as first-time-setup user");
+
                 request.extensions_mut().insert(Authenticated {
                     timestamp,
                     admin: true,
                     user: User::default(),
                     roles: Vec::new(),
                 });
+
+                tracing::debug!(user = ?User::default(), roles = ?Vec::<Role>::new(), admin = true);
 
                 span.exit();
 
@@ -156,6 +180,7 @@ async fn authenticate(
             match state.get_related_item::<_, Uuid, User>(("api_keys", "users"), &api_key) {
                 DatabaseValueResult::Success(user) => {
                     let roles: Vec<Uuid> = user.roles.iter().copied().collect();
+
                     match state.get_items_skip_missing::<_, Role>("roles", &roles) {
                         DatabaseValueResult::Success(roles) => {
                             let mut admin = user.admin;
@@ -165,6 +190,8 @@ async fn authenticate(
                                     admin = true;
                                 }
                             }
+
+                            tracing::debug!(user = ?&user, roles = ?&roles, admin = admin);
 
                             request.extensions_mut().insert(Authenticated {
                                 timestamp,

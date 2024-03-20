@@ -59,8 +59,8 @@ The server supports sending logs to an [OpenTelemetry](https://opentelemetry.io)
         - [ ] Model API
 - [ ] Adding import functionality from https://github.com/cosmicoptima/openai-cd2-proxy
 - [ ] Model rate limiting based on backend responses (such as HTTP headers)
-- [X] Logging
-        - [ ] Metrics
+- [X] Logging (via OpenTelemetry)
+        - [ ] Metrics (besides those that can be inferred from Spans)
 - [ ] Support more APIs
         - [ ] Chapter2
         - [ ] Anthropic

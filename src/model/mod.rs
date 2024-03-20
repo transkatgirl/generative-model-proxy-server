@@ -543,7 +543,7 @@ impl ModelBackend {
         }
     }
 
-    #[instrument(skip(http_client), level = "debug", ret)]
+    #[instrument(skip(http_client), level = "debug", fields(otel.kind = "Client"), ret)]
     pub(super) async fn generate(
         &self,
         http_client: &Client,
