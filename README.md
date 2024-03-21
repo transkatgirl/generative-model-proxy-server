@@ -23,7 +23,7 @@ By default, the server will bind to `127.0.0.1:8080`, and will save the database
 
 You can run the binary with the `-h` or `--help` arguments for a full list of available CLI arguments.
 
-```bash
+```
 > ./generative-model-proxy-server --help
 A multi-user proxy server for major generative model APIs
 
@@ -35,8 +35,7 @@ Options:
   -d, --database-folder <DATABASE_FOLDER>
           The location of the folder used to store the proxy's database [default: ./database]
   -o, --opentelemetry-endpoint <OPENTELEMETRY_ENDPOINT>
-          The OpenTelemetry-compatible collector used for logging. Signals sent to the collector may contain sensitive
-          information
+          The OpenTelemetry-compatible collector used for logging
   -h, --help
           Print help
   -V, --version

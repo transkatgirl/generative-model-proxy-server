@@ -28,6 +28,12 @@ See:
   - https://docs.rs/tracing-opentelemetry/latest/tracing_opentelemetry/index.html
 - https://opentelemetry.io/docs/specs/semconv/http/http-metrics/#http-client
   - https://docs.rs/tracing-opentelemetry/latest/tracing_opentelemetry/struct.MetricsLayer.html
+
+ModelRequest / ModelResponse specific attributes worth logging:
+- usage
+- request_count
+- max_tokens
+
 */
 
 // TODO: Perform rate-limiting based on headers
