@@ -2,11 +2,11 @@ use std::{
     clone::Clone,
     collections::HashSet,
     fmt::Debug,
-    iter,
     time::{Duration, Instant},
 };
 
 use axum::{
+    body::Body,
     extract::{DefaultBodyLimit, Extension, Request, State},
     http::StatusCode,
     middleware::{self, Next},
@@ -15,13 +15,19 @@ use axum::{
 };
 
 use fast32::base64::RFC4648;
-use http::header::{AUTHORIZATION, WWW_AUTHENTICATE};
-use opentelemetry::trace::SpanKind;
+use http::{
+    header::{AUTHORIZATION, USER_AGENT, WWW_AUTHENTICATE},
+    Version,
+};
+use http::{
+    header::{CONTENT_LENGTH, CONTENT_TYPE},
+    uri::Scheme,
+};
 use serde::{Deserialize, Serialize};
 use tokio::time;
 use tower::ServiceBuilder;
-use tower_http::trace::TraceLayer;
-use tracing::Span;
+use tower_http::{classify::ServerErrorsFailureClass, trace::TraceLayer};
+use tracing::{field::Empty, Span};
 use uuid::Uuid;
 
 mod admin;
@@ -112,18 +118,95 @@ pub fn api_router(state: AppState) -> Router {
             ServiceBuilder::new()
                 .layer(DefaultBodyLimit::max(16_777_216))
                 .layer(
-                    TraceLayer::new_for_http().make_span_with(|request: &Request<_>| {
-                        tracing::debug_span!(
-                            "request",
-                            "otel.name" = request.uri().path(),
-                            "otel.kind" = "Server",
-                        )
-                    }), /*.on_request(|request: &Request<_>, _span: &Span| {
-                            tracing::debug!("started {} {}", request.method(), request.uri().path())
+                    TraceLayer::new_for_http()
+                        .make_span_with(|request: &Request<Body>| {
+                            tracing::debug_span!(
+                                "request",
+                                otel.name =
+                                    format!("{} {}", request.method(), request.uri().path()),
+                                otel.kind = "Server",
+                                url.scheme =
+                                    request.uri().scheme().unwrap_or(&Scheme::HTTP).as_str(),
+                                http.request.method = request.method().as_str(),
+                                "http.request.header.content-type" = request
+                                    .headers()
+                                    .get(CONTENT_TYPE)
+                                    .and_then(|value| value.to_str().ok()),
+                                server.address = request.uri().host(),
+                                server.port = request.uri().port().map(|port| port.to_string()),
+                                url.path = request.uri().path(),
+                                url.query = request.uri().query(),
+                                http.response.status_code = Empty,
+                                "http.response.header.content-type" = Empty,
+                                network.protocol.name = "http",
+                                network.protocol.version = match request.version() {
+                                    Version::HTTP_09 => Some("0.9"),
+                                    Version::HTTP_10 => Some("1.0"),
+                                    Version::HTTP_11 => Some("1.1"),
+                                    Version::HTTP_2 => Some("2"),
+                                    Version::HTTP_3 => Some("3"),
+                                    _ => None,
+                                },
+                                user_agent.original = request
+                                    .headers()
+                                    .get(USER_AGENT)
+                                    .and_then(|value| value.to_str().ok()),
+                                "error.type" = Empty,
+                            )
                         })
-                        .on_response(|response: &Response<_>, latency: Duration, _span: &Span| {
-                            tracing::debug!("response generated in {:?}", latency)
-                        })*/
+                        .on_request(|request: &Request<Body>, _span: &Span| {
+                            if let Some(length) = request
+                                .headers()
+                                .get(CONTENT_LENGTH)
+                                .and_then(|value| value.to_str().ok())
+                                .map(|value| value.parse::<u64>().ok())
+                            {
+                                tracing::debug!(
+                                    http.server.request.body.size = length,
+                                    unit = "By"
+                                );
+                            }
+                        })
+                        .on_response(
+                            |response: &Response<Body>, latency: Duration, span: &Span| {
+                                span.record(
+                                    "http.response.status_code",
+                                    response.status().as_u16(),
+                                );
+
+                                if let Some(length) = response
+                                    .headers()
+                                    .get(CONTENT_LENGTH)
+                                    .and_then(|value| value.to_str().ok())
+                                    .map(|value| value.parse::<u64>().ok())
+                                {
+                                    tracing::debug!(
+                                        http.server.response.body.size = length,
+                                        unit = "By"
+                                    );
+                                }
+
+                                if let Some(content_type) = response
+                                    .headers()
+                                    .get(CONTENT_TYPE)
+                                    .and_then(|value| value.to_str().ok())
+                                {
+                                    span.record("http.response.header.content-type", content_type);
+                                }
+
+                                tracing::debug!(
+                                    histogram.http.server.request.duration = latency.as_secs_f64(),
+                                    unit = "s"
+                                );
+                            },
+                        )
+                        .on_failure(
+                            |error: ServerErrorsFailureClass, _latency: Duration, span: &Span| {
+                                span.record("error.type", format!("{}", error));
+
+                                tracing::error!(target: "on_error", ?error);
+                            },
+                        ),
                 )
                 .layer(middleware::map_response(modify_response))
                 .layer(middleware::from_fn_with_state(state, authenticate)),
@@ -161,8 +244,6 @@ async fn authenticate(
         }) {
         Some(api_key) => {
             if state.is_table_empty("users") && api_key == "setup-key" {
-                tracing::warn!("authenticating as first-time-setup user");
-
                 request.extensions_mut().insert(Authenticated {
                     timestamp,
                     admin: true,
@@ -170,7 +251,7 @@ async fn authenticate(
                     roles: Vec::new(),
                 });
 
-                tracing::debug!(user = ?User::default(), roles = ?Vec::<Role>::new(), admin = true);
+                tracing::warn!(user = "first-time-setup");
 
                 span.exit();
 
@@ -179,6 +260,8 @@ async fn authenticate(
 
             match state.get_related_item::<_, Uuid, User>(("api_keys", "users"), &api_key) {
                 DatabaseValueResult::Success(user) => {
+                    tracing::debug!(user = ?user.uuid);
+
                     let roles: Vec<Uuid> = user.roles.iter().copied().collect();
 
                     match state.get_items_skip_missing::<_, Role>("roles", &roles) {
@@ -191,7 +274,7 @@ async fn authenticate(
                                 }
                             }
 
-                            tracing::debug!(user = ?&user, roles = ?&roles, admin = admin);
+                            tracing::debug!(roles = ?roles.iter().map(|role| role.uuid).collect::<Vec<Uuid>>());
 
                             request.extensions_mut().insert(Authenticated {
                                 timestamp,
@@ -222,6 +305,8 @@ async fn authenticate_admin(
     request: Request,
     next: Next,
 ) -> Result<Response, ModelError> {
+    tracing::debug!(admin = auth.admin);
+
     if auth.admin {
         return Ok(next.run(request).await);
     }
@@ -242,7 +327,7 @@ async fn modify_response<B>(mut response: Response<B>) -> Response<B> {
     response
 }
 
-#[tracing::instrument(level = "debug", skip(state), ret)]
+#[tracing::instrument(level = "debug", skip_all, ret)]
 async fn handle_model_request(
     Extension(auth): Extension<Authenticated>,
     State(state): State<AppState>,
@@ -277,11 +362,13 @@ async fn handle_model_request(
         DatabaseValueResult::BackendError => return Err(ModelError::InternalError),
     };
 
-    if request.get_max_tokens().unwrap_or(1) > model.api.get_max_tokens().unwrap_or(1) {
+    tracing::debug!(model = ?model.uuid);
+
+    let model_max_tokens = model.api.get_max_tokens().unwrap_or(1);
+    let estimated_tokens = request.get_max_tokens().unwrap_or(model_max_tokens);
+    if estimated_tokens > model_max_tokens {
         return Err(ModelError::UserRateLimit);
     }
-
-    request.set_user(auth.user.uuid);
 
     let quotas: HashSet<Uuid> = auth
         .user
@@ -293,25 +380,13 @@ async fn handle_model_request(
         .collect();
     let quotas: Vec<Uuid> = quotas.iter().copied().collect();
 
-    request.tags = iter::once(auth.user.uuid)
-        .chain(auth.roles.iter().map(|role| role.uuid))
-        .chain(quotas.clone())
-        .chain(iter::once(model.uuid))
-        .chain(iter::once(Uuid::new_v4()))
-        .collect();
+    tracing::debug!(quotas = ?quotas);
+
+    request.user = Some(auth.user.uuid);
 
     let limiter_request = limiter::Request {
         arrived_at: auth.timestamp,
-        estimated_tokens: model
-            .api
-            .get_max_tokens()
-            .map(|max_tokens| {
-                request
-                    .get_max_tokens()
-                    .map(|request_max_tokens| request_max_tokens.min(max_tokens))
-                    .unwrap_or(max_tokens)
-            })
-            .unwrap_or(1),
+        estimated_tokens,
     };
 
     let limit_request = |quota: &mut Quota| {

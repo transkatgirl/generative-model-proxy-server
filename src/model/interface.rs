@@ -7,7 +7,6 @@ use axum::{
     response::IntoResponse,
     Form, Json,
 };
-
 use http::{header::CONTENT_TYPE, Method};
 
 use super::{
@@ -23,7 +22,7 @@ where
 {
     type Rejection = ModelError;
 
-    #[tracing::instrument(name = "deserialize_model_request", level = "debug", skip(state), ret)]
+    #[tracing::instrument(name = "deserialize_model_request", level = "debug", skip_all)]
     async fn from_request(req: Request, state: &S) -> Result<Self, Self::Rejection> {
         let r#type = match RequestType::try_from(req.uri()) {
             Ok(r#type) => r#type,
@@ -52,7 +51,7 @@ where
                 .await
                 .map(|value| value.0)
                 .ok()
-                .map(|request| ModelRequest::from_json(r#type, request)),
+                .map(ModelRequestData::Json),
             Some("multipart/form-data") => match Multipart::from_request(req, state).await {
                 Ok(mut multipart) => {
                     let mut form = HashMap::new();
@@ -93,11 +92,7 @@ where
                     }
 
                     if !form.is_empty() {
-                        Some(ModelRequest {
-                            tags: Vec::new(),
-                            r#type,
-                            request: ModelRequestData::Form(form),
-                        })
+                        Some(ModelRequestData::Form(form))
                     } else {
                         None
                     }
@@ -108,12 +103,12 @@ where
                 .await
                 .map(|value| value.0)
                 .ok()
-                .map(|request| ModelRequest::from_json(r#type, request)),
+                .map(ModelRequestData::Json),
             Some(_) => body::to_bytes(req.into_body(), usize::MAX)
                 .await
                 .ok()
                 .and_then(|body| Json::from_bytes(body.as_ref()).map(|value| value.0).ok())
-                .map(|request| ModelRequest::from_json(r#type, request)),
+                .map(ModelRequestData::Json),
             None => if req.method() == Method::HEAD || req.method() == Method::GET {
                 Form::from_request(req, state)
                     .await
@@ -125,14 +120,19 @@ where
                     .ok()
                     .and_then(|body| Json::from_bytes(body.as_ref()).map(|value| value.0).ok())
             }
-            .map(|request| ModelRequest::from_json(r#type, request)),
+            .map(ModelRequestData::Json),
         }
+        .map(|request| ModelRequest {
+            user: None,
+            r#type,
+            request,
+        })
         .ok_or(ModelError::BadRequest)
     }
 }
 
 impl IntoResponse for ModelResponse {
-    #[tracing::instrument(name = "serialize_model_response", level = "debug", ret)]
+    #[tracing::instrument(name = "serialize_model_response", level = "debug", skip_all)]
     fn into_response(self) -> axum::response::Response {
         match self.response {
             ModelResponseData::Json(json) => (self.status, Json(json)).into_response(),

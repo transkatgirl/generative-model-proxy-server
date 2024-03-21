@@ -61,7 +61,7 @@ fn get_usage(response: &Map<String, Value>) -> Option<TokenUsage> {
 
 #[derive(Debug)]
 pub(super) struct ModelRequest {
-    pub(super) tags: Vec<Uuid>,
+    pub(super) user: Option<Uuid>,
     pub(super) r#type: RequestType,
 
     request: ModelRequestData,
@@ -123,16 +123,6 @@ impl TryFrom<&Uri> for RequestType {
 }
 
 impl ModelRequest {
-    fn from_json(r#type: RequestType, mut request: Map<String, Value>) -> ModelRequest {
-        request.remove("stream");
-
-        ModelRequest {
-            tags: Vec::new(),
-            r#type,
-            request: ModelRequestData::Json(request),
-        }
-    }
-
     #[allow(clippy::wrong_self_convention)]
     fn to_json(self) -> Map<String, Value> {
         match self.request {
@@ -168,20 +158,6 @@ impl ModelRequest {
                 }
 
                 json
-            }
-        }
-    }
-
-    #[instrument(level = "trace")]
-    pub(super) fn set_user(&mut self, user: Uuid) {
-        let user = CROCKFORD.encode(digest::digest(&digest::SHA256, user.as_bytes()).as_ref());
-
-        match &mut self.request {
-            ModelRequestData::Json(json) => {
-                json.insert("user".to_string(), Value::String(user));
-            }
-            ModelRequestData::Form(form) => {
-                form.insert("user".to_string(), ModelFormItem::Text(user));
             }
         }
     }
@@ -259,12 +235,36 @@ impl ModelRequest {
     }
 
     #[instrument(skip(base), level = "trace")]
-    fn to_http_body(&self, base: RequestBuilder) -> RequestBuilder {
-        match &self.request {
-            ModelRequestData::Json(json) => base.json(&json),
-            ModelRequestData::Form(formdata) => {
-                let mut form = Form::new();
+    fn to_http_body(self, base: RequestBuilder) -> RequestBuilder {
+        let user = self.user.map(|user| {
+            CROCKFORD.encode(digest::digest(&digest::SHA256, user.as_bytes()).as_ref())
+        });
 
+        match self.request {
+            ModelRequestData::Json(mut json) => {
+                json.remove("stream");
+                match user {
+                    Some(user) => {
+                        json.insert("user".to_string(), Value::String(user));
+                    }
+                    None => {
+                        json.remove("user");
+                    }
+                }
+
+                base.json(&json)
+            }
+            ModelRequestData::Form(mut formdata) => {
+                match user {
+                    Some(user) => {
+                        formdata.insert("user".to_string(), ModelFormItem::Text(user));
+                    }
+                    None => {
+                        formdata.remove("user");
+                    }
+                }
+
+                let mut form = Form::new();
                 for (key, value) in formdata {
                     let key = key.clone();
 
@@ -311,7 +311,8 @@ enum ModelResponseData {
 impl ModelResponse {
     #[instrument(level = "trace", ret)]
     async fn from_http_response(
-        request: &ModelRequest,
+        tag: Uuid,
+        binary: bool,
         label: Value,
         response: Result<Response, reqwest::Error>,
     ) -> ModelResponse {
@@ -366,10 +367,7 @@ impl ModelResponse {
                             }
 
                             if let Some(value) = json.get_mut("id") {
-                                *value = Value::String(format!(
-                                    "{}",
-                                    request.tags.last().unwrap_or(&Uuid::new_v4())
-                                ));
+                                *value = Value::String(format!("{}", tag));
                             }
 
                             ModelResponse {
@@ -389,7 +387,7 @@ impl ModelResponse {
                             }
                         }
                         Err(error) => {
-                            if request.r#type == RequestType::AudioTTS {
+                            if binary {
                                 ModelResponse {
                                     status,
                                     usage: None,
@@ -582,10 +580,12 @@ impl ModelBackend {
                             builder = builder.header("OpenAI-Organization", organization);
                         }
 
+                        let binary = request.r#type == RequestType::AudioTTS;
                         builder = request.to_http_body(builder);
 
                         ModelResponse::from_http_response(
-                            &request,
+                            Uuid::new_v4(),
+                            binary,
                             label,
                             builder.send().instrument(debug_span!("http_request")).await,
                         )
