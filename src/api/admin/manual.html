@@ -51,19 +51,21 @@
 							<li>GET / - Retrieves all objects of a specific type.</li>
 							<li>POST / - Adds an object.
 								<ul>
-									<li>JSON body required. Cannot be used to create an object with a specific UUID.
-									</li>
+									<li>JSON body required.</li>
+									<li>Cannot be used to create an object with a specific UUID.</li>
 								</ul>
 							</li>
 							<li>PUT / - Adds or replaces an object with a specific UUID.
 								<ul>
-									<li>JSON body required. Object must contain a valid UUID.</li>
+									<li>JSON body required.</li>
+									<li>Object must contain a valid UUID.</li>
 								</ul>
 							</li>
 							<li>GET /:uuid - Retrieves an object with a specific UUID.</li>
 							<li>PUT /:uuid - Adds or replaces an object with a specific UUID.
 								<ul>
-									<li>JSON body required. Cannot be used to change the object's UUID.</li>
+									<li>JSON body required.</li>
+									<li>Cannot be used to change the object's UUID.</li>
 								</ul>
 							</li>
 							<!-- Need to add PATCH /:uuid -->
