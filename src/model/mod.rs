@@ -9,7 +9,7 @@ use reqwest::{
 use ring::digest;
 use serde::{Deserialize, Serialize};
 use serde_json::{value::Value, Map};
-use tracing::instrument;
+use tracing::{debug_span, instrument, Instrument};
 use uuid::Uuid;
 
 mod interface;
@@ -584,8 +584,12 @@ impl ModelBackend {
 
                         builder = request.to_http_body(builder);
 
-                        ModelResponse::from_http_response(&request, label, builder.send().await)
-                            .await
+                        ModelResponse::from_http_response(
+                            &request,
+                            label,
+                            builder.send().instrument(debug_span!("http_request")).await,
+                        )
+                        .await
                     }
                     Err(error) => {
                         tracing::warn!("Unable to parse model URL: {:?}", error);

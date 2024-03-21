@@ -5,11 +5,12 @@ use clap::Parser;
 use http::uri::{Authority, Parts, PathAndQuery, Scheme, Uri};
 use opentelemetry::KeyValue;
 use opentelemetry_otlp::WithExportConfig;
-use opentelemetry_sdk::{trace, Resource};
+use opentelemetry_sdk::{runtime, trace, Resource};
 use reqwest::{Client, ClientBuilder};
 use sled::{Db, Mode}; // sled should probably be replaced with a proper database at some point. will need to write manual migrations when that time comes.
 use tokio::{fs, net::TcpListener, signal};
 use tracing::Level;
+use tracing_opentelemetry::MetricsLayer;
 use tracing_subscriber::{filter, layer::SubscriberExt, util::SubscriberInitExt};
 
 mod api;
@@ -78,16 +79,30 @@ async fn main() -> Result<()> {
                 .with_exporter(
                     opentelemetry_otlp::new_exporter()
                         .tonic()
-                        .with_endpoint(endpoint),
+                        .with_endpoint(endpoint.clone()),
                 )
                 .with_trace_config(trace::config().with_resource(Resource::new(vec![
                     KeyValue::new("service.name", "generative-model-proxy-server"),
                 ])))
-                .install_batch(opentelemetry_sdk::runtime::Tokio)
-                .context("Failed to start OpenTelemetry")?;
+                .install_batch(runtime::Tokio)
+                .context("Failed to start OpenTelemetry tracing pipeline")?;
+            let meter = opentelemetry_otlp::new_pipeline()
+                .metrics(runtime::Tokio)
+                .with_exporter(
+                    opentelemetry_otlp::new_exporter()
+                        .tonic()
+                        .with_endpoint(endpoint),
+                )
+                .with_resource(Resource::new(vec![KeyValue::new(
+                    "service.name",
+                    "generative-model-proxy-server",
+                )]))
+                .build()
+                .context("Failed to start OpenTelemetry metrics pipeline")?;
             let telemetry = tracing_opentelemetry::layer().with_tracer(tracer);
+            let metrics = MetricsLayer::new(meter);
 
-            registry.with(telemetry).init()
+            registry.with(metrics).with(telemetry).init()
         }
         None => registry.init(),
     }
