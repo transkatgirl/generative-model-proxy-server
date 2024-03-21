@@ -22,6 +22,12 @@ mod interface;
 - Use trace level for things that are useful for debug but not release builds; May contain sensitive info
 
 - Make use of logging when useful
+
+See:
+- https://opentelemetry.io/docs/specs/semconv/http/http-spans/#http-client
+  - https://docs.rs/tracing-opentelemetry/latest/tracing_opentelemetry/index.html
+- https://opentelemetry.io/docs/specs/semconv/http/http-metrics/#http-client
+  - https://docs.rs/tracing-opentelemetry/latest/tracing_opentelemetry/struct.MetricsLayer.html
 */
 
 // TODO: Perform rate-limiting based on headers
@@ -551,7 +557,7 @@ impl ModelBackend {
         }
     }
 
-    #[instrument(skip(http_client), level = "debug", fields(otel.kind = "Client"), ret)]
+    #[instrument(skip(self, http_client), level = "debug", fields(otel.kind = "Client"), ret)]
     pub(super) async fn generate(
         &self,
         http_client: &Client,
