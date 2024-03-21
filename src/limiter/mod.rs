@@ -95,7 +95,7 @@ pub(super) struct Limit {
 }
 
 impl Limit {
-    #[tracing::instrument(skip(clock), level = "debug", ret)]
+    #[tracing::instrument(skip(clock), level = "trace", ret)]
     pub(super) fn request(&mut self, clock: &LimiterClock, request: &Request) -> LimiterResult {
         let mut state = GcraState {
             tat: self.state.and_then(|state| state.to_monotonic(clock)),
@@ -129,7 +129,7 @@ impl Limit {
         result
     }
 
-    #[tracing::instrument(skip(clock), level = "debug", ret)]
+    #[tracing::instrument(skip(clock), level = "trace", ret)]
     pub(super) fn response(&mut self, clock: &LimiterClock, response: &Response) -> LimiterResult {
         if let LimitItem::Request = self.r#type {
             return LimiterResult::Ready;

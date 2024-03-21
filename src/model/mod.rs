@@ -14,6 +14,16 @@ use uuid::Uuid;
 
 mod interface;
 
+/*
+
+! Need to redo telemetry
+
+- Use debug level for things which don't contain sensitive info and should show up in release builds
+- Use trace level for things that are useful for debug but not release builds; May contain sensitive info
+
+- Make use of logging when useful
+*/
+
 // TODO: Perform rate-limiting based on headers
 
 #[instrument(level = "trace", ret)]

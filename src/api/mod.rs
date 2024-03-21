@@ -27,7 +27,7 @@ use serde::{Deserialize, Serialize};
 use tokio::time;
 use tower::ServiceBuilder;
 use tower_http::{classify::ServerErrorsFailureClass, trace::TraceLayer};
-use tracing::{field::Empty, Span};
+use tracing::{field::Empty, Instrument, Span};
 use uuid::Uuid;
 
 mod admin;
@@ -166,6 +166,10 @@ pub fn api_router(state: AppState) -> Router {
                                     unit = "By"
                                 );
                             }
+
+                            if cfg!(debug_assertions) {
+                                tracing::trace!(target: "on_request", request = ?request);
+                            }
                         })
                         .on_response(
                             |response: &Response<Body>, latency: Duration, span: &Span| {
@@ -198,6 +202,10 @@ pub fn api_router(state: AppState) -> Router {
                                     histogram.http.server.request.duration = latency.as_secs_f64(),
                                     unit = "s"
                                 );
+
+                                if cfg!(debug_assertions) {
+                                    tracing::trace!(target: "on_response", response = ?response);
+                                }
                             },
                         )
                         .on_failure(
@@ -243,6 +251,10 @@ async fn authenticate(
             })
         }) {
         Some(api_key) => {
+            if cfg!(debug_assertions) {
+                tracing::trace!(api_key = api_key);
+            }
+
             if state.is_table_empty("users") && api_key == "setup-key" {
                 request.extensions_mut().insert(Authenticated {
                     timestamp,
@@ -260,7 +272,11 @@ async fn authenticate(
 
             match state.get_related_item::<_, Uuid, User>(("api_keys", "users"), &api_key) {
                 DatabaseValueResult::Success(user) => {
-                    tracing::debug!(user = ?user.uuid);
+                    if cfg!(debug_assertions) {
+                        tracing::debug!(user = ?user);
+                    } else {
+                        tracing::debug!(user = ?user.uuid);
+                    }
 
                     let roles: Vec<Uuid> = user.roles.iter().copied().collect();
 
@@ -274,7 +290,11 @@ async fn authenticate(
                                 }
                             }
 
-                            tracing::debug!(roles = ?roles.iter().map(|role| role.uuid).collect::<Vec<Uuid>>());
+                            if cfg!(debug_assertions) {
+                                tracing::debug!(roles = ?roles)
+                            } else {
+                                tracing::debug!(roles = ?roles.iter().map(|role| role.uuid).collect::<Vec<Uuid>>());
+                            }
 
                             request.extensions_mut().insert(Authenticated {
                                 timestamp,
@@ -327,17 +347,12 @@ async fn modify_response<B>(mut response: Response<B>) -> Response<B> {
     response
 }
 
-#[tracing::instrument(level = "debug", skip_all, ret)]
+#[tracing::instrument(level = "debug", skip_all)]
 async fn handle_model_request(
     Extension(auth): Extension<Authenticated>,
     State(state): State<AppState>,
-    request: Result<ModelRequest, ModelError>,
+    mut request: ModelRequest,
 ) -> Result<ModelResponse, ModelError> {
-    let mut request = match request {
-        Ok(request) => request,
-        Err(error) => return Err(error),
-    };
-
     let models_result = state.get_items_skip_missing::<_, Model>(
         "models",
         &auth
@@ -351,18 +366,28 @@ async fn handle_model_request(
 
     let model_name = request.get_model().unwrap_or_default();
     let model = match models_result {
-        DatabaseValueResult::Success(models) => match models
-            .iter()
-            .find(|model| model.types.contains(&request.r#type) && model.name == model_name)
-        {
-            Some(model) => model.clone(),
-            None => return Err(ModelError::UnknownModel),
-        },
+        DatabaseValueResult::Success(models) => {
+            if cfg!(debug_assertions) {
+                tracing::trace!(models = ?models);
+            }
+
+            match models
+                .iter()
+                .find(|model| model.types.contains(&request.r#type) && model.name == model_name)
+            {
+                Some(model) => model.clone(),
+                None => return Err(ModelError::UnknownModel),
+            }
+        }
         DatabaseValueResult::NotFound => return Err(ModelError::UnknownModel),
         DatabaseValueResult::BackendError => return Err(ModelError::InternalError),
     };
 
-    tracing::debug!(model = ?model.uuid);
+    if cfg!(debug_assertions) {
+        tracing::debug!(model = ?model);
+    } else {
+        tracing::debug!(model = ?model.uuid);
+    }
 
     let model_max_tokens = model.api.get_max_tokens().unwrap_or(1);
     let estimated_tokens = request.get_max_tokens().unwrap_or(model_max_tokens);
@@ -406,7 +431,9 @@ async fn handle_model_request(
     match state.modify_items_skip_missing("quotas", &quotas, limit_request) {
         DatabaseFunctionResult::Success(timestamps) => {
             if let Some(wait_until) = timestamps.iter().max().cloned() {
-                time::sleep_until(time::Instant::from_std(wait_until)).await
+                time::sleep_until(time::Instant::from_std(wait_until))
+                    .instrument(tracing::debug_span!("rate_limit_request"))
+                    .await
             }
         }
         DatabaseFunctionResult::FunctionError(error) => return Err(error),
@@ -438,7 +465,9 @@ async fn handle_model_request(
         match state.modify_items_skip_missing("quotas", &quotas, limit_response) {
             DatabaseFunctionResult::Success(timestamps) => {
                 if let Some(wait_until) = timestamps.iter().max().cloned() {
-                    time::sleep_until(time::Instant::from_std(wait_until)).await
+                    time::sleep_until(time::Instant::from_std(wait_until))
+                        .instrument(tracing::debug_span!("rate_limit_response"))
+                        .await
                 }
             }
             DatabaseFunctionResult::FunctionError(error) => return Err(error),

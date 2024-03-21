@@ -32,7 +32,6 @@ struct Args {
     database_folder: PathBuf,
 
     /// The OpenTelemetry-compatible collector used for logging.
-    /// Signals sent to the collector may contain sensitive information.
     #[arg(short, long)]
     opentelemetry_endpoint: Option<String>,
 }
@@ -102,7 +101,13 @@ async fn main() -> Result<()> {
             let telemetry = tracing_opentelemetry::layer().with_tracer(tracer);
             let metrics = MetricsLayer::new(meter);
 
-            registry.with(metrics).with(telemetry).init()
+            registry.with(metrics).with(telemetry).init();
+
+            if cfg!(debug_assertions) {
+                tracing::warn!(
+                    "On debug builds, OpenTelemetry signals may contain sensitive information, such as API keys."
+                );
+            }
         }
         None => registry.init(),
     }
