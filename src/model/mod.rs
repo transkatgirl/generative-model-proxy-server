@@ -278,7 +278,7 @@ enum ModelResponseData {
 
 impl ModelResponseData {
     #[tracing::instrument(level = "trace", ret)]
-    fn into_common_api(
+    fn into_hybrid_api(
         self,
         model: Option<String>,
         r#type: RequestType,
@@ -656,7 +656,7 @@ impl ModelBackend {
                         response.response =
                             response
                                 .response
-                                .into_common_api(label, request_type, tag, model);
+                                .into_hybrid_api(label, request_type, tag, model);
                     }
 
                     response

@@ -438,9 +438,20 @@
 					<li>The request will then be sent to the Model's backend, which will generate a
 						<code>ModelResponse</code>
 						object.
+						<ul>
+							<li>The request may be modified before being sent to the backend, in order to allow for
+								translation between model APIs.</li>
+							<li>The proxy does not currently support streamed responses.</li>
+						</ul>
 					</li>
 					<li>All of the request's Quotas will be readjusted based on the actual number of tokens used. The
 						<code>ModelResponse</code> will then be converted into an HTTP response.
+						<ul>
+							<li>The response may contain additional fields not recognized by the API the user is
+								using. This is because the response uses a "hybrid" format, which contains the fields
+								expected by multiple different model calling APIs.
+							</li>
+						</ul>
 					</li>
 				</ol>
 			</li>
