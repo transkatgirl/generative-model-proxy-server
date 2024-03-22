@@ -309,8 +309,6 @@
 					<li>(optional) quotas: []Uuid
 						<ul>
 							<li>A list of rate limiters that all requests to this model should be subject to.</li>
-							<!-- <li>Note: Some model backends may perform rate limiting independently of this option, using
-								information like HTTP headers from the backend.</li> -->
 						</ul>
 					</li>
 				</ul>
@@ -432,7 +430,8 @@
 					<li>The request will be run against the Quotas, using the maximum possible number of tokens (the
 						minimum of
 						the
-						request's <code>max_tokens</code> and the Model's token maximum) for rate limiting purposes.
+						request's <code>max_tokens</code> and the Model's token maximum, multiplied by the number of
+						queries in the request) for rate limiting purposes.
 					</li>
 					<li>The request will then be sent to the Model's backend, which will generate a
 						<code>ModelResponse</code>

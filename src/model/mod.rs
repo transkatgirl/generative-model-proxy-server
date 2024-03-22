@@ -3,15 +3,15 @@ use std::{collections::HashMap, fmt::Debug};
 use fast32::base32::{CROCKFORD, RFC4648};
 use http::{status::StatusCode, Uri};
 use reqwest::{
-    multipart::{Form, Part},
-    Client, RequestBuilder, Response, Url,
+    header::{HeaderMap, HeaderValue, AUTHORIZATION},
+    Client, Method, Url,
 };
 use ring::digest;
 use serde::{Deserialize, Serialize};
 use serde_json::{value::Value, Map};
-use tracing::{debug_span, instrument, Instrument};
 use uuid::Uuid;
 
+mod client;
 mod interface;
 
 /*
@@ -36,9 +36,7 @@ ModelRequest / ModelResponse specific attributes worth logging:
 
 */
 
-// TODO: Perform rate-limiting based on headers
-
-#[instrument(level = "trace", ret)]
+#[tracing::instrument(level = "trace", ret)]
 fn get_prompt_count(prompt: &Value) -> usize {
     match prompt {
         Value::Array(array) => {
@@ -72,7 +70,7 @@ enum ModelRequestData {
 }
 
 impl ModelRequestData {
-    #[instrument(level = "trace", ret)]
+    #[tracing::instrument(level = "trace", ret)]
     fn into_openai(self, model: String, user: Option<Uuid>) -> Self {
         let user = user.map(|user| {
             CROCKFORD.encode(digest::digest(&digest::SHA256, user.as_bytes()).as_ref())
@@ -109,7 +107,7 @@ impl ModelRequestData {
         }
     }
 
-    #[instrument(level = "trace", ret)]
+    #[tracing::instrument(level = "trace", ret)]
     fn into_loopback(self) -> ModelResponse {
         let json = match self {
             Self::Json(json) => json,
@@ -154,7 +152,7 @@ impl ModelRequestData {
         }
     }
 
-    #[instrument(level = "trace", ret)]
+    #[tracing::instrument(level = "trace", ret)]
     fn get_model(&self) -> Option<&str> {
         match self {
             Self::Json(json) => json.get("model").and_then(|value| value.as_str()),
@@ -168,7 +166,7 @@ impl ModelRequestData {
         }
     }
 
-    #[instrument(level = "trace", ret)]
+    #[tracing::instrument(level = "trace", ret)]
     fn get_count(&self) -> usize {
         match &self {
             Self::Json(json) => {
@@ -204,7 +202,7 @@ impl ModelRequestData {
         }
     }
 
-    #[instrument(level = "trace", ret)]
+    #[tracing::instrument(level = "trace", ret)]
     fn get_max_tokens(&self) -> Option<u64> {
         match self {
             Self::Json(json) => json
@@ -276,41 +274,6 @@ impl ModelRequest {
     pub(super) fn get_max_tokens(&self) -> Option<u64> {
         self.request.get_max_tokens()
     }
-
-    #[instrument(skip(base), level = "trace")]
-    fn to_http_body(self, base: RequestBuilder) -> RequestBuilder {
-        match self.request {
-            ModelRequestData::Json(json) => base.json(&json),
-            ModelRequestData::Form(formdata) => {
-                let mut form = Form::new();
-                for (key, value) in formdata {
-                    let key = key.clone();
-
-                    form = match value {
-                        ModelFormItem::Text(text) => form.text(key, text.clone()),
-                        ModelFormItem::File(file) => {
-                            let mut part = Part::bytes(file.data.clone());
-
-                            if let Some(content_type) = &file.content_type {
-                                part = match part.mime_str(content_type) {
-                                    Ok(updated_part) => updated_part,
-                                    Err(_) => Part::bytes(file.data.clone()),
-                                };
-                            }
-
-                            if let Some(filename) = &file.file_name {
-                                part = part.file_name(filename.clone());
-                            }
-
-                            form.part(key, part)
-                        }
-                    };
-                }
-
-                base.multipart(form)
-            }
-        }
-    }
 }
 
 #[derive(Debug)]
@@ -327,7 +290,7 @@ enum ModelResponseData {
 }
 
 impl ModelResponseData {
-    #[instrument(level = "trace", ret)]
+    #[tracing::instrument(level = "trace", ret)]
     fn into_openai(self, model: Option<String>, tag: Uuid) -> Self {
         match self {
             Self::Json(mut json) => {
@@ -345,7 +308,7 @@ impl ModelResponseData {
         }
     }
 
-    #[instrument(level = "trace", ret)]
+    #[tracing::instrument(level = "trace", ret)]
     fn get_usage(&self, is_error: bool) -> Option<TokenUsage> {
         match self {
             Self::Json(json) => json.get("usage").and_then(|usage| {
@@ -372,105 +335,6 @@ impl ModelResponseData {
             true => Some(TokenUsage::default()),
             false => None,
         })
-    }
-}
-
-impl ModelResponse {
-    #[instrument(level = "trace", ret)]
-    async fn from_http_response(
-        binary: bool,
-        response: Result<Response, reqwest::Error>,
-    ) -> ModelResponse {
-        match response {
-            Ok(response) => {
-                let status = StatusCode::from_u16(response.status().as_u16()).unwrap();
-                let body = response.bytes().await;
-
-                if status.is_server_error() {
-                    tracing::warn!("Backend returned {} error: {:?}", status, body);
-                    return ModelResponse::from(ModelError::BackendError);
-                }
-
-                if status.is_client_error() {
-                    if status == StatusCode::UNAUTHORIZED
-                        || status == StatusCode::FORBIDDEN
-                        || status == StatusCode::PROXY_AUTHENTICATION_REQUIRED
-                    {
-                        tracing::warn!("Failed to authenticate with backend: {:?}", body);
-                        return ModelResponse::from(ModelError::BackendError);
-                    }
-
-                    if status == StatusCode::NOT_FOUND
-                        || status == StatusCode::METHOD_NOT_ALLOWED
-                        || status == StatusCode::NOT_ACCEPTABLE
-                        || status == StatusCode::REQUEST_TIMEOUT
-                        || status == StatusCode::GONE
-                        || status == StatusCode::LENGTH_REQUIRED
-                        || status == StatusCode::URI_TOO_LONG
-                        || status == StatusCode::EXPECTATION_FAILED
-                        || status == StatusCode::MISDIRECTED_REQUEST
-                        || status == StatusCode::UPGRADE_REQUIRED
-                        || status == StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE
-                    {
-                        tracing::warn!("Backend returned {} error: {:?}", status, body);
-                        return ModelResponse::from(ModelError::BackendError);
-                    }
-
-                    if status == StatusCode::PAYMENT_REQUIRED
-                        || status == StatusCode::TOO_MANY_REQUESTS
-                    {
-                        tracing::warn!("Request was rate-limited by backend: {:?}", body);
-                        return ModelResponse::from(ModelError::ModelRateLimit);
-                    }
-                }
-
-                match body {
-                    Ok(body) => match serde_json::from_slice::<Map<String, Value>>(&body) {
-                        Ok(json) => {
-                            let response = ModelResponseData::Json(json);
-
-                            ModelResponse {
-                                status,
-                                usage: response.get_usage(status.is_client_error()),
-                                response,
-                            }
-                        }
-                        Err(error) => {
-                            if binary {
-                                let response = ModelResponseData::Binary(body.to_vec());
-
-                                ModelResponse {
-                                    status,
-                                    usage: response.get_usage(status.is_client_error()),
-                                    response,
-                                }
-                            } else {
-                                tracing::warn!("Error parsing response: {:?}", error);
-                                ModelResponse::from(ModelError::BackendError)
-                            }
-                        }
-                    },
-                    Err(error) => {
-                        tracing::warn!("Error receiving response: {:?}", error);
-
-                        ModelResponse::from(ModelError::BackendError)
-                    }
-                }
-            }
-            Err(error) => {
-                tracing::warn!("Error sending request: {:?}", error);
-
-                if error.is_connect() | error.is_redirect() | error.is_decode() {
-                    return ModelResponse::from(ModelError::BackendError);
-                }
-
-                if error.is_timeout() {
-                    return ModelResponse::from(ModelError::ModelRateLimit);
-                }
-
-                ModelResponse::from(ModelError::InternalError)
-            }
-        }
     }
 }
 
@@ -579,8 +443,57 @@ struct OpenAIModelBackend {
     openai_organization: Option<String>,
 }
 
+impl OpenAIModelBackend {
+    #[tracing::instrument(level = "trace")]
+    fn get_request_parameters(
+        &self,
+        r#type: RequestType,
+    ) -> Option<(Method, Url, HeaderMap, bool)> {
+        match Url::parse(&self.openai_api_base).and_then(|base_url| {
+            base_url.join(match r#type {
+                RequestType::TextChat => "/v1/chat/completions",
+                RequestType::TextCompletion => "/v1/completions",
+                RequestType::TextEdit => "/v1/edits",
+                RequestType::TextEmbedding => "/v1/embeddings",
+                RequestType::TextModeration => "/v1/moderations",
+                RequestType::ImageGeneration => "/v1/images/generations",
+                RequestType::ImageEdit => "/v1/images/edits",
+                RequestType::ImageVariation => "/v1/images/variations",
+                RequestType::AudioTTS => "/v1/audio/speech",
+                RequestType::AudioTranscription => "/v1/audio/transcriptions",
+                RequestType::AudioTranslation => "/v1/audio/translations",
+            })
+        }) {
+            Ok(url) => match HeaderValue::from_str(&format!("Bearer {}", self.openai_api_key)) {
+                Ok(auth_header) => {
+                    let mut headers = HeaderMap::new();
+                    headers.insert(AUTHORIZATION, auth_header);
+
+                    if let Some(organization) = self
+                        .openai_organization
+                        .as_ref()
+                        .and_then(|value| value.parse::<HeaderValue>().ok())
+                    {
+                        headers.insert("OpenAI-Organization", organization);
+                    }
+
+                    Some((Method::POST, url, headers, r#type == RequestType::AudioTTS))
+                }
+                Err(error) => {
+                    tracing::warn!("Unable to parse API key: {:?}", error);
+                    None
+                }
+            },
+            Err(error) => {
+                tracing::warn!("Unable to parse model URL: {:?}", error);
+                None
+            }
+        }
+    }
+}
+
 impl ModelBackend {
-    #[instrument(level = "trace", ret)]
+    #[tracing::instrument(level = "trace", ret)]
     pub(super) fn get_max_tokens(&self) -> Option<u64> {
         match &self {
             Self::OpenAI(backend) => backend.model_context_len,
@@ -588,63 +501,37 @@ impl ModelBackend {
         }
     }
 
-    #[instrument(skip(self, http_client), level = "debug", fields(otel.kind = "Client"), ret)]
+    #[tracing::instrument(skip(self, http_client), level = "debug", fields(otel.kind = "Client"), ret)]
     pub(super) async fn generate(
         &self,
         http_client: &Client,
         mut request: ModelRequest,
     ) -> ModelResponse {
-        let label = request.get_model().map(|value| value.to_string());
-
         match &self {
-            Self::OpenAI(config) => {
-                request.request = request
-                    .request
-                    .into_openai(config.model_string.clone(), request.user);
+            Self::OpenAI(config) => match config.get_request_parameters(request.r#type) {
+                Some((method, url, headers, binary)) => {
+                    let label = request.get_model().map(|value| value.to_string());
 
-                let url = Url::parse(&config.openai_api_base).and_then(|base_url| {
-                    base_url.join(match request.r#type {
-                        RequestType::TextChat => "/v1/chat/completions",
-                        RequestType::TextCompletion => "/v1/completions",
-                        RequestType::TextEdit => "/v1/edits",
-                        RequestType::TextEmbedding => "/v1/embeddings",
-                        RequestType::TextModeration => "/v1/moderations",
-                        RequestType::ImageGeneration => "/v1/images/generations",
-                        RequestType::ImageEdit => "/v1/images/edits",
-                        RequestType::ImageVariation => "/v1/images/variations",
-                        RequestType::AudioTTS => "/v1/audio/speech",
-                        RequestType::AudioTranscription => "/v1/audio/transcriptions",
-                        RequestType::AudioTranslation => "/v1/audio/translations",
-                    })
-                });
+                    request.request = request
+                        .request
+                        .into_openai(config.model_string.clone(), request.user);
 
-                match url {
-                    Ok(url) => {
-                        let mut builder = http_client.post(url).bearer_auth(&config.openai_api_key);
+                    let mut response = client::send_http_request(
+                        http_client,
+                        method,
+                        url,
+                        headers,
+                        request,
+                        binary,
+                    )
+                    .await;
 
-                        if let Some(organization) = &config.openai_organization {
-                            builder = builder.header("OpenAI-Organization", organization);
-                        }
+                    response.response = response.response.into_openai(label, Uuid::new_v4());
 
-                        let binary = request.r#type == RequestType::AudioTTS;
-                        builder = request.to_http_body(builder);
-
-                        let mut response = ModelResponse::from_http_response(
-                            binary,
-                            builder.send().instrument(debug_span!("http_request")).await,
-                        )
-                        .await;
-
-                        response.response = response.response.into_openai(label, Uuid::new_v4());
-
-                        response
-                    }
-                    Err(error) => {
-                        tracing::warn!("Unable to parse model URL: {:?}", error);
-                        ModelResponse::from(ModelError::InternalError)
-                    }
+                    response
                 }
-            }
+                None => ModelResponse::from(ModelError::InternalError),
+            },
             Self::Loopback => request.request.into_loopback(),
         }
     }
