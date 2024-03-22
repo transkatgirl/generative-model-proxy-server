@@ -394,6 +394,7 @@ async fn handle_model_request(
     if estimated_tokens > model_max_tokens {
         return Err(ModelError::UserRateLimit);
     }
+    let estimated_tokens = estimated_tokens * request.get_count() as u64;
 
     let quotas: HashSet<Uuid> = auth
         .user

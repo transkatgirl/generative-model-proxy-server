@@ -57,30 +57,6 @@ fn get_prompt_count(prompt: &Value) -> usize {
     }
 }
 
-#[instrument(level = "trace", ret)]
-fn get_usage(response: &Map<String, Value>) -> Option<TokenUsage> {
-    if let Some(Value::Object(usage)) = response.get("usage") {
-        let input_tokens = usage.get("prompt_tokens").and_then(|num| num.as_u64());
-        let output_tokens = usage.get("completion_tokens").and_then(|num| num.as_u64());
-
-        usage
-            .get("total_tokens")
-            .and_then(|num| num.as_u64())
-            .or(input_tokens
-                .and_then(|input_tokens| {
-                    output_tokens.map(|output_tokens| input_tokens + output_tokens)
-                })
-                .or(output_tokens))
-            .map(|total| TokenUsage {
-                total,
-                input: input_tokens,
-                output: output_tokens,
-            })
-    } else {
-        None
-    }
-}
-
 #[derive(Debug)]
 pub(super) struct ModelRequest {
     pub(super) user: Option<Uuid>,
@@ -93,6 +69,150 @@ pub(super) struct ModelRequest {
 enum ModelRequestData {
     Json(Map<String, Value>),
     Form(HashMap<String, ModelFormItem>),
+}
+
+impl ModelRequestData {
+    #[instrument(level = "trace", ret)]
+    fn into_openai(self, model: String, user: Option<Uuid>) -> Self {
+        let user = user.map(|user| {
+            CROCKFORD.encode(digest::digest(&digest::SHA256, user.as_bytes()).as_ref())
+        });
+
+        match self {
+            Self::Json(mut json) => {
+                json.remove("stream");
+                json.insert("model".to_string(), Value::String(model));
+                match user {
+                    Some(user) => {
+                        json.insert("user".to_string(), Value::String(user));
+                    }
+                    None => {
+                        json.remove("user");
+                    }
+                }
+
+                Self::Json(json)
+            }
+            Self::Form(mut form) => {
+                form.insert("model".to_string(), ModelFormItem::Text(model));
+                match user {
+                    Some(user) => {
+                        form.insert("user".to_string(), ModelFormItem::Text(user));
+                    }
+                    None => {
+                        form.remove("user");
+                    }
+                }
+
+                Self::Form(form)
+            }
+        }
+    }
+
+    #[instrument(level = "trace", ret)]
+    fn into_loopback(self) -> ModelResponse {
+        let json = match self {
+            Self::Json(json) => json,
+            Self::Form(form) => {
+                let mut json = Map::new();
+
+                for (key, value) in form {
+                    match value {
+                        ModelFormItem::Text(text) => {
+                            json.insert(key, Value::String(text));
+                        }
+                        ModelFormItem::File(file) => {
+                            let mut file_json = Map::new();
+
+                            file_json.insert(
+                                "filename".to_string(),
+                                file.file_name.map(Value::String).unwrap_or(Value::Null),
+                            );
+                            file_json.insert(
+                                "content-type".to_string(),
+                                file.content_type.map(Value::String).unwrap_or(Value::Null),
+                            );
+
+                            file_json.insert(
+                                "data".to_string(),
+                                Value::String(RFC4648.encode(&file.data)),
+                            );
+
+                            json.insert(key, Value::Object(file_json));
+                        }
+                    }
+                }
+
+                json
+            }
+        };
+
+        ModelResponse {
+            status: StatusCode::OK,
+            usage: None,
+            response: ModelResponseData::Json(json),
+        }
+    }
+
+    #[instrument(level = "trace", ret)]
+    fn get_model(&self) -> Option<&str> {
+        match self {
+            Self::Json(json) => json.get("model").and_then(|value| value.as_str()),
+            Self::Form(form) => {
+                if let Some(ModelFormItem::Text(model)) = form.get("model") {
+                    Some(model)
+                } else {
+                    None
+                }
+            }
+        }
+    }
+
+    #[instrument(level = "trace", ret)]
+    fn get_count(&self) -> usize {
+        match &self {
+            Self::Json(json) => {
+                json.get("best_of")
+                    .and_then(|value| {
+                        value
+                            .as_u64()
+                            .map(|int| int.clamp(1, usize::MAX as u64) as usize)
+                    })
+                    .unwrap_or(1)
+                    * json
+                        .get("n")
+                        .and_then(|value| {
+                            value
+                                .as_u64()
+                                .map(|int| int.clamp(1, usize::MAX as u64) as usize)
+                        })
+                        .unwrap_or(1)
+                    * json.get("prompt").map(get_prompt_count).unwrap_or(1)
+                    * json.get("input").map(get_prompt_count).unwrap_or(1)
+            }
+            Self::Form(form) => form
+                .get("n")
+                .and_then(|value| {
+                    if let ModelFormItem::Text(string) = value {
+                        Some(string)
+                    } else {
+                        None
+                    }
+                })
+                .and_then(|string| string.parse().ok())
+                .unwrap_or(1),
+        }
+    }
+
+    #[instrument(level = "trace", ret)]
+    fn get_max_tokens(&self) -> Option<u64> {
+        match self {
+            Self::Json(json) => json
+                .get("max_tokens")
+                .and_then(|value| value.as_u64().map(|int| int.max(1))),
+            Self::Form(_) => None,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -145,147 +265,23 @@ impl TryFrom<&Uri> for RequestType {
 }
 
 impl ModelRequest {
-    #[allow(clippy::wrong_self_convention)]
-    fn to_json(self) -> Map<String, Value> {
-        match self.request {
-            ModelRequestData::Json(json) => json,
-            ModelRequestData::Form(form) => {
-                let mut json = Map::new();
-
-                for (key, value) in form {
-                    match value {
-                        ModelFormItem::Text(text) => {
-                            json.insert(key, Value::String(text));
-                        }
-                        ModelFormItem::File(file) => {
-                            let mut file_json = Map::new();
-
-                            file_json.insert(
-                                "filename".to_string(),
-                                file.file_name.map(Value::String).unwrap_or(Value::Null),
-                            );
-                            file_json.insert(
-                                "content-type".to_string(),
-                                file.content_type.map(Value::String).unwrap_or(Value::Null),
-                            );
-
-                            file_json.insert(
-                                "data".to_string(),
-                                Value::String(RFC4648.encode(&file.data)),
-                            );
-
-                            json.insert(key, Value::Object(file_json));
-                        }
-                    }
-                }
-
-                json
-            }
-        }
-    }
-
-    #[instrument(level = "trace", ret)]
     pub(super) fn get_model(&self) -> Option<&str> {
-        match &self.request {
-            ModelRequestData::Json(json) => json.get("model").and_then(|value| value.as_str()),
-            ModelRequestData::Form(form) => {
-                if let Some(ModelFormItem::Text(model)) = form.get("model") {
-                    Some(model)
-                } else {
-                    None
-                }
-            }
-        }
+        self.request.get_model()
     }
 
-    #[instrument(level = "trace")]
-    fn update_model(&mut self, model: String) {
-        match &mut self.request {
-            ModelRequestData::Json(json) => {
-                json.insert("model".to_string(), Value::String(model));
-            }
-            ModelRequestData::Form(form) => {
-                form.insert("model".to_string(), ModelFormItem::Text(model));
-            }
-        }
-    }
-
-    #[instrument(level = "trace", ret)]
     pub(super) fn get_count(&self) -> usize {
-        match &self.request {
-            ModelRequestData::Json(json) => {
-                json.get("best_of")
-                    .and_then(|value| {
-                        value
-                            .as_u64()
-                            .map(|int| int.clamp(1, usize::MAX as u64) as usize)
-                    })
-                    .unwrap_or(1)
-                    * json
-                        .get("n")
-                        .and_then(|value| {
-                            value
-                                .as_u64()
-                                .map(|int| int.clamp(1, usize::MAX as u64) as usize)
-                        })
-                        .unwrap_or(1)
-                    * json.get("prompt").map(get_prompt_count).unwrap_or(1)
-                    * json.get("input").map(get_prompt_count).unwrap_or(1)
-            }
-            ModelRequestData::Form(form) => form
-                .get("n")
-                .and_then(|value| {
-                    if let ModelFormItem::Text(string) = value {
-                        Some(string)
-                    } else {
-                        None
-                    }
-                })
-                .and_then(|string| string.parse().ok())
-                .unwrap_or(1),
-        }
+        self.request.get_count()
     }
 
-    #[instrument(level = "trace", ret)]
     pub(super) fn get_max_tokens(&self) -> Option<u64> {
-        match &self.request {
-            ModelRequestData::Json(json) => json
-                .get("max_tokens")
-                .and_then(|value| value.as_u64().map(|int| int.max(1))),
-            ModelRequestData::Form(_) => None,
-        }
+        self.request.get_max_tokens()
     }
 
     #[instrument(skip(base), level = "trace")]
     fn to_http_body(self, base: RequestBuilder) -> RequestBuilder {
-        let user = self.user.map(|user| {
-            CROCKFORD.encode(digest::digest(&digest::SHA256, user.as_bytes()).as_ref())
-        });
-
         match self.request {
-            ModelRequestData::Json(mut json) => {
-                json.remove("stream");
-                match user {
-                    Some(user) => {
-                        json.insert("user".to_string(), Value::String(user));
-                    }
-                    None => {
-                        json.remove("user");
-                    }
-                }
-
-                base.json(&json)
-            }
-            ModelRequestData::Form(mut formdata) => {
-                match user {
-                    Some(user) => {
-                        formdata.insert("user".to_string(), ModelFormItem::Text(user));
-                    }
-                    None => {
-                        formdata.remove("user");
-                    }
-                }
-
+            ModelRequestData::Json(json) => base.json(&json),
+            ModelRequestData::Form(formdata) => {
                 let mut form = Form::new();
                 for (key, value) in formdata {
                     let key = key.clone();
@@ -330,12 +326,59 @@ enum ModelResponseData {
     Binary(Vec<u8>),
 }
 
+impl ModelResponseData {
+    #[instrument(level = "trace", ret)]
+    fn into_openai(self, model: Option<String>, tag: Uuid) -> Self {
+        match self {
+            Self::Json(mut json) => {
+                if let Some(value) = json.get_mut("model") {
+                    *value = model.map(Value::String).unwrap_or(Value::Null);
+                }
+
+                if let Some(value) = json.get_mut("id") {
+                    *value = Value::String(format!("{}", tag));
+                }
+
+                Self::Json(json)
+            }
+            Self::Binary(binary) => Self::Binary(binary),
+        }
+    }
+
+    #[instrument(level = "trace", ret)]
+    fn get_usage(&self, is_error: bool) -> Option<TokenUsage> {
+        match self {
+            Self::Json(json) => json.get("usage").and_then(|usage| {
+                let input_tokens = usage.get("prompt_tokens").and_then(|num| num.as_u64());
+                let output_tokens = usage.get("completion_tokens").and_then(|num| num.as_u64());
+
+                usage
+                    .get("total_tokens")
+                    .and_then(|num| num.as_u64())
+                    .or(input_tokens
+                        .and_then(|input_tokens| {
+                            output_tokens.map(|output_tokens| input_tokens + output_tokens)
+                        })
+                        .or(output_tokens))
+                    .map(|total| TokenUsage {
+                        total,
+                        input: input_tokens,
+                        output: output_tokens,
+                    })
+            }),
+            Self::Binary(_binary) => None,
+        }
+        .or_else(|| match is_error {
+            true => Some(TokenUsage::default()),
+            false => None,
+        })
+    }
+}
+
 impl ModelResponse {
     #[instrument(level = "trace", ret)]
     async fn from_http_response(
-        tag: Uuid,
         binary: bool,
-        label: Value,
         response: Result<Response, reqwest::Error>,
     ) -> ModelResponse {
         match response {
@@ -383,37 +426,23 @@ impl ModelResponse {
 
                 match body {
                     Ok(body) => match serde_json::from_slice::<Map<String, Value>>(&body) {
-                        Ok(mut json) => {
-                            if let Some(value) = json.get_mut("model") {
-                                *value = label;
-                            }
-
-                            if let Some(value) = json.get_mut("id") {
-                                *value = Value::String(format!("{}", tag));
-                            }
+                        Ok(json) => {
+                            let response = ModelResponseData::Json(json);
 
                             ModelResponse {
                                 status,
-                                usage: get_usage(&json).or_else(|| {
-                                    if status.is_client_error() {
-                                        Some(TokenUsage {
-                                            total: 0,
-                                            input: None,
-                                            output: None,
-                                        })
-                                    } else {
-                                        None
-                                    }
-                                }),
-                                response: ModelResponseData::Json(json),
+                                usage: response.get_usage(status.is_client_error()),
+                                response,
                             }
                         }
                         Err(error) => {
                             if binary {
+                                let response = ModelResponseData::Binary(body.to_vec());
+
                                 ModelResponse {
                                     status,
-                                    usage: None,
-                                    response: ModelResponseData::Binary(body.to_vec()),
+                                    usage: response.get_usage(status.is_client_error()),
+                                    response,
                                 }
                             } else {
                                 tracing::warn!("Error parsing response: {:?}", error);
@@ -505,18 +534,14 @@ impl From<ModelError> for ModelResponse {
         };
 
         ModelResponse {
-            usage: Some(TokenUsage {
-                total: 0,
-                input: None,
-                output: None,
-            }),
+            usage: Some(TokenUsage::default()),
             status,
             response: ModelResponseData::Json(json),
         }
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 #[allow(dead_code)]
 pub(super) struct TokenUsage {
     pub(super) total: u64,
@@ -569,14 +594,13 @@ impl ModelBackend {
         http_client: &Client,
         mut request: ModelRequest,
     ) -> ModelResponse {
-        let label = request
-            .get_model()
-            .map(|string| Value::String(string.to_string()))
-            .unwrap_or(Value::Null);
+        let label = request.get_model().map(|value| value.to_string());
 
         match &self {
             Self::OpenAI(config) => {
-                request.update_model(config.model_string.clone());
+                request.request = request
+                    .request
+                    .into_openai(config.model_string.clone(), request.user);
 
                 let url = Url::parse(&config.openai_api_base).and_then(|base_url| {
                     base_url.join(match request.r#type {
@@ -605,13 +629,15 @@ impl ModelBackend {
                         let binary = request.r#type == RequestType::AudioTTS;
                         builder = request.to_http_body(builder);
 
-                        ModelResponse::from_http_response(
-                            Uuid::new_v4(),
+                        let mut response = ModelResponse::from_http_response(
                             binary,
-                            label,
                             builder.send().instrument(debug_span!("http_request")).await,
                         )
-                        .await
+                        .await;
+
+                        response.response = response.response.into_openai(label, Uuid::new_v4());
+
+                        response
                     }
                     Err(error) => {
                         tracing::warn!("Unable to parse model URL: {:?}", error);
@@ -619,11 +645,7 @@ impl ModelBackend {
                     }
                 }
             }
-            Self::Loopback => ModelResponse {
-                status: StatusCode::OK,
-                usage: None,
-                response: ModelResponseData::Json(request.to_json()),
-            },
+            Self::Loopback => request.request.into_loopback(),
         }
     }
 }
