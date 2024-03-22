@@ -345,31 +345,19 @@ impl ModelResponseData {
 
                 match r#type {
                     RequestType::TextChat => {
-                        json.insert(
-                            "object".to_string(),
-                            Value::String("chat.completion".to_string()),
-                        );
                         json.insert("created".to_string(), Value::Null);
                         json.insert("id".to_string(), Value::Null);
                         json.insert("model".to_string(), Value::Null);
                     }
                     RequestType::TextCompletion => {
-                        json.insert(
-                            "object".to_string(),
-                            Value::String("text_completion".to_string()),
-                        );
                         json.insert("created".to_string(), Value::Null);
                         json.insert("id".to_string(), Value::Null);
                         json.insert("model".to_string(), Value::Null);
                     }
                     RequestType::TextEdit => {
-                        json.insert("object".to_string(), Value::String("edit".to_string()));
                         json.insert("created".to_string(), Value::Null);
                     }
                     RequestType::TextEmbedding => {
-                        if json.contains_key("data") {
-                            json.insert("object".to_string(), Value::String("list".to_string()));
-                        }
                         json.insert("model".to_string(), Value::Null);
 
                         if let Some(Value::Array(objects)) = json.get_mut("data") {
@@ -381,11 +369,6 @@ impl ModelResponseData {
                                             Value::Number(index.into()),
                                         );
                                     }
-
-                                    object.insert(
-                                        "object".to_string(),
-                                        Value::String("embedding".to_string()),
-                                    );
                                 }
                             }
 
@@ -581,14 +564,6 @@ struct OpenAIModelBackend {
     openai_api_key: String,
     openai_organization: Option<String>,
 }
-
-/*struct TogetherAIModelBackend {
-    model_string: String,
-    model_context_len: Option<u64>,
-    base_url: String,
-    together_api_key: String,
-    model_fingerprint: Option<Uuid>,
-}*/
 
 impl OpenAIModelBackend {
     #[tracing::instrument(level = "trace")]
