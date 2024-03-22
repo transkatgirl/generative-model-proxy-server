@@ -2,7 +2,7 @@ use http::status::StatusCode;
 use reqwest::{
     header::HeaderMap,
     multipart::{Form, Part},
-    Client, Method, Request, RequestBuilder, Url,
+    Client, Method, Request, RequestBuilder, Url, Version,
 };
 use serde_json::{value::Value, Map};
 
@@ -132,7 +132,7 @@ See:
 
 */
 
-#[tracing::instrument(level = "trace", fields(otel.kind = "Client"))]
+#[tracing::instrument(level = "debug", fields(otel.name = format!("{} {}", method, url.as_str()), otel.kind = "Client", network.protocol.name = "http", network.protocol.version, server.address = url.authority(), server.port = url.port_or_known_default(), url.full = url.as_str(), url.scheme = url.scheme(), user_agent.original = "generative-model-proxy-server", http.request.method = method.as_str(), http.request.header.content_type, http.response.status_code, http.response.header.content_type, error.r#type), skip_all)]
 pub(super) async fn send_http_request(
     client: &Client,
     method: Method,
@@ -141,37 +141,72 @@ pub(super) async fn send_http_request(
     request: ModelRequest,
     binary: bool,
 ) -> ModelResponse {
+    let span = tracing::Span::current();
+
     match request.to_http_body(client.request(method, url).headers(headers)) {
-        Ok(http_request) => match client.execute(http_request).await {
-            Ok(http_response) => {
-                let status = StatusCode::from_u16(http_response.status().as_u16()).unwrap();
-                let body = http_response.bytes().await;
+        Ok(http_request) => {
+            if let Some(content_type) = http_request
+                .headers()
+                .get("content-type")
+                .and_then(|value| value.to_str().ok())
+            {
+                span.record("http.request.header.content_type", content_type);
+            }
 
-                match body {
-                    Ok(body) => ModelResponse::from_http_body(status, &body.to_vec(), binary),
-                    Err(error) => {
-                        tracing::error!("Error receiving response: {:?}", error);
+            match client.execute(http_request).await {
+                Ok(http_response) => {
+                    span.record(
+                        "network.protocol.version",
+                        match http_response.version() {
+                            Version::HTTP_09 => Some("0.9"),
+                            Version::HTTP_10 => Some("1.0"),
+                            Version::HTTP_11 => Some("1.1"),
+                            Version::HTTP_2 => Some("2"),
+                            Version::HTTP_3 => Some("3"),
+                            _ => None,
+                        },
+                    );
+                    span.record("http.response.status_code", http_response.status().as_u16());
+                    if let Some(content_type) = http_response
+                        .headers()
+                        .get("content-type")
+                        .and_then(|value| value.to_str().ok())
+                    {
+                        span.record("http.response.header.content_type", content_type);
+                    }
 
-                        ModelResponse::from(ModelError::BackendError)
+                    let status = StatusCode::from_u16(http_response.status().as_u16()).unwrap();
+                    let body = http_response.bytes().await;
+
+                    match body {
+                        Ok(body) => ModelResponse::from_http_body(status, &body.to_vec(), binary),
+                        Err(error) => {
+                            tracing::error!("Error receiving response: {:?}", error);
+                            span.record("error.type", format!("{}", error));
+
+                            ModelResponse::from(ModelError::BackendError)
+                        }
                     }
                 }
-            }
-            Err(error) => {
-                tracing::error!("Error sending request: {:?}", error);
+                Err(error) => {
+                    tracing::error!("Error sending request: {:?}", error);
+                    span.record("error.type", format!("{}", error));
 
-                if error.is_connect() | error.is_redirect() | error.is_decode() {
-                    return ModelResponse::from(ModelError::BackendError);
+                    if error.is_connect() | error.is_redirect() | error.is_decode() {
+                        return ModelResponse::from(ModelError::BackendError);
+                    }
+
+                    if error.is_timeout() {
+                        return ModelResponse::from(ModelError::ModelRateLimit);
+                    }
+
+                    ModelResponse::from(ModelError::InternalError)
                 }
-
-                if error.is_timeout() {
-                    return ModelResponse::from(ModelError::ModelRateLimit);
-                }
-
-                ModelResponse::from(ModelError::InternalError)
             }
-        },
+        }
         Err(error) => {
             tracing::error!("Error building request: {:?}", error);
+            span.record("error.type", format!("{}", error));
             ModelResponse::from(ModelError::InternalError)
         }
     }
