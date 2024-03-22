@@ -390,11 +390,15 @@ async fn handle_model_request(
     }
 
     let model_max_tokens = model.api.get_max_tokens().unwrap_or(1);
-    let estimated_tokens = request.get_max_tokens().unwrap_or(model_max_tokens);
-    if estimated_tokens > model_max_tokens {
+    let request_max_tokens = request.get_max_tokens();
+    let request_count = request.get_count() as u64;
+    if request_max_tokens.unwrap_or(model_max_tokens) > model_max_tokens {
         return Err(ModelError::UserRateLimit);
     }
-    let estimated_tokens = estimated_tokens * request.get_count() as u64;
+    if let Some(max_tokens) = request_max_tokens {
+        tracing::debug!(histogram.request.max_tokens = max_tokens, unit = "tokens");
+    }
+    tracing::debug!(histogram.request.count = request_count);
 
     let quotas: HashSet<Uuid> = auth
         .user
@@ -412,8 +416,12 @@ async fn handle_model_request(
 
     let limiter_request = limiter::Request {
         arrived_at: auth.timestamp,
-        estimated_tokens,
+        estimated_tokens: request_max_tokens.unwrap_or(model_max_tokens) * request_count,
     };
+    tracing::debug!(
+        histogram.quota.estimated_tokens = limiter_request.estimated_tokens,
+        unit = "tokens"
+    );
 
     let limit_request = |quota: &mut Quota| {
         let mut wait_until = Instant::now();
@@ -448,6 +456,15 @@ async fn handle_model_request(
             request: limiter_request,
             actual_tokens: usage.total,
         };
+        tracing::debug!(
+            histogram.quota.actual_tokens = limiter_response.actual_tokens,
+            unit = "tokens"
+        );
+        tracing::debug!(
+            histogram.quota.estimate_offset = limiter_response.request.estimated_tokens as i64
+                - limiter_response.actual_tokens as i64,
+            unit = "tokens"
+        );
 
         let limit_response = |quota: &mut Quota| {
             let mut wait_until = Instant::now();

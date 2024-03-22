@@ -14,28 +14,6 @@ use uuid::Uuid;
 mod client;
 mod interface;
 
-/*
-
-! Need to redo telemetry
-
-- Use debug level for things which don't contain sensitive info and should show up in release builds
-- Use trace level for things that are useful for debug but not release builds; May contain sensitive info
-
-- Make use of logging when useful
-
-See:
-- https://opentelemetry.io/docs/specs/semconv/http/http-spans/#http-client
-  - https://docs.rs/tracing-opentelemetry/latest/tracing_opentelemetry/index.html
-- https://opentelemetry.io/docs/specs/semconv/http/http-metrics/#http-client
-  - https://docs.rs/tracing-opentelemetry/latest/tracing_opentelemetry/struct.MetricsLayer.html
-
-ModelRequest / ModelResponse specific attributes worth logging:
-- usage
-- request_count
-- max_tokens
-
-*/
-
 #[tracing::instrument(level = "trace", ret)]
 fn get_prompt_count(prompt: &Value) -> usize {
     match prompt {
@@ -493,7 +471,6 @@ impl OpenAIModelBackend {
 }
 
 impl ModelBackend {
-    #[tracing::instrument(level = "trace", ret)]
     pub(super) fn get_max_tokens(&self) -> Option<u64> {
         match &self {
             Self::OpenAI(backend) => backend.model_context_len,
@@ -501,12 +478,15 @@ impl ModelBackend {
         }
     }
 
-    #[tracing::instrument(skip(self, http_client), level = "debug", fields(otel.kind = "Client"), ret)]
+    #[tracing::instrument(skip(self, http_client), level = "debug", ret)]
     pub(super) async fn generate(
         &self,
         http_client: &Client,
         mut request: ModelRequest,
     ) -> ModelResponse {
+        let tag = Uuid::new_v4();
+        tracing::debug!(tag = ?tag);
+
         match &self {
             Self::OpenAI(config) => match config.get_request_parameters(request.r#type) {
                 Some((method, url, headers, binary)) => {
@@ -526,7 +506,7 @@ impl ModelBackend {
                     )
                     .await;
 
-                    response.response = response.response.into_openai(label, Uuid::new_v4());
+                    response.response = response.response.into_openai(label, tag);
 
                     response
                 }

@@ -1,47 +1,18 @@
-use std::{collections::HashMap, fmt::Debug};
-
-use fast32::base32::{CROCKFORD, RFC4648};
-use http::{status::StatusCode, Uri};
+use http::status::StatusCode;
 use reqwest::{
     header::HeaderMap,
     multipart::{Form, Part},
-    Client, Method, Request, RequestBuilder, Response, Url,
+    Client, Method, Request, RequestBuilder, Url,
 };
-use ring::digest;
-use serde::{Deserialize, Serialize};
 use serde_json::{value::Value, Map};
-use tracing::{debug_span, instrument, Instrument};
-use uuid::Uuid;
 
 use super::{
     ModelError, ModelFormItem, ModelRequest, ModelRequestData, ModelResponse, ModelResponseData,
 };
 
-/*
-
-! Need to redo telemetry
-
-- Use debug level for things which don't contain sensitive info and should show up in release builds
-- Use trace level for things that are useful for debug but not release builds; May contain sensitive info
-
-- Make use of logging when useful
-
-See:
-- https://opentelemetry.io/docs/specs/semconv/http/http-spans/#http-client
-  - https://docs.rs/tracing-opentelemetry/latest/tracing_opentelemetry/index.html
-- https://opentelemetry.io/docs/specs/semconv/http/http-metrics/#http-client
-  - https://docs.rs/tracing-opentelemetry/latest/tracing_opentelemetry/struct.MetricsLayer.html
-
-ModelRequest / ModelResponse specific attributes worth logging:
-- usage
-- request_count
-- max_tokens
-
-*/
-
 impl ModelRequest {
-    #[tracing::instrument(skip(base), level = "trace")]
-    fn to_http_body(self, base: RequestBuilder) -> RequestBuilder {
+    #[tracing::instrument(name = "serialize_model_request", level = "debug", skip_all)]
+    fn to_http_body(self, base: RequestBuilder) -> reqwest::Result<Request> {
         match self.request {
             ModelRequestData::Json(json) => base.json(&json),
             ModelRequestData::Form(formdata) => {
@@ -73,14 +44,15 @@ impl ModelRequest {
                 base.multipart(form)
             }
         }
+        .build()
     }
 }
 
 impl ModelResponse {
-    #[instrument(level = "trace", ret)]
+    #[tracing::instrument(name = "deserialize_model_response", level = "debug", skip_all)]
     fn from_http_body(status: StatusCode, body: &Vec<u8>, binary: bool) -> ModelResponse {
         if status.is_server_error() {
-            tracing::warn!("Backend returned {} error: {:?}", status, body);
+            tracing::error!("Backend returned {} error: {:?}", status, body);
             return ModelResponse::from(ModelError::BackendError);
         }
 
@@ -89,7 +61,7 @@ impl ModelResponse {
                 || status == StatusCode::FORBIDDEN
                 || status == StatusCode::PROXY_AUTHENTICATION_REQUIRED
             {
-                tracing::warn!("Failed to authenticate with backend: {:?}", body);
+                tracing::error!("Failed to authenticate with backend: {:?}", body);
                 return ModelResponse::from(ModelError::BackendError);
             }
 
@@ -105,17 +77,17 @@ impl ModelResponse {
                 || status == StatusCode::UPGRADE_REQUIRED
                 || status == StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE
             {
-                tracing::warn!("Backend returned {} error: {:?}", status, body);
+                tracing::error!("Backend returned {} error: {:?}", status, body);
                 return ModelResponse::from(ModelError::BackendError);
             }
 
             if status == StatusCode::PAYMENT_REQUIRED || status == StatusCode::TOO_MANY_REQUESTS {
-                tracing::warn!("Request was rate-limited by backend: {:?}", body);
+                tracing::error!("Request was rate-limited by backend: {:?}", body);
                 return ModelResponse::from(ModelError::ModelRateLimit);
             }
         }
 
-        match serde_json::from_slice::<Map<String, Value>>(&body) {
+        match serde_json::from_slice::<Map<String, Value>>(body) {
             Ok(json) => {
                 let response = ModelResponseData::Json(json);
 
@@ -135,7 +107,7 @@ impl ModelResponse {
                         response,
                     }
                 } else {
-                    tracing::warn!("Error parsing response: {:?}", error);
+                    tracing::error!("Error parsing response: {:?}", error);
                     ModelResponse::from(ModelError::BackendError)
                 }
             }
@@ -143,7 +115,24 @@ impl ModelResponse {
     }
 }
 
-#[tracing::instrument(level = "trace")]
+/*
+
+! Need to redo telemetry
+
+- Use debug level for things which don't contain sensitive info and should show up in release builds
+- Use trace level for things that are useful for debug but not release builds; May contain sensitive info
+
+- Make use of logging when useful
+
+See:
+- https://opentelemetry.io/docs/specs/semconv/http/http-spans/#http-client
+  - https://docs.rs/tracing-opentelemetry/latest/tracing_opentelemetry/index.html
+- https://opentelemetry.io/docs/specs/semconv/http/http-metrics/#http-client
+  - https://docs.rs/tracing-opentelemetry/latest/tracing_opentelemetry/struct.MetricsLayer.html
+
+*/
+
+#[tracing::instrument(level = "trace", fields(otel.kind = "Client"))]
 pub(super) async fn send_http_request(
     client: &Client,
     method: Method,
@@ -152,33 +141,37 @@ pub(super) async fn send_http_request(
     request: ModelRequest,
     binary: bool,
 ) -> ModelResponse {
-    let http_request = request.to_http_body(client.request(method, url).headers(headers));
+    match request.to_http_body(client.request(method, url).headers(headers)) {
+        Ok(http_request) => match client.execute(http_request).await {
+            Ok(http_response) => {
+                let status = StatusCode::from_u16(http_response.status().as_u16()).unwrap();
+                let body = http_response.bytes().await;
 
-    match http_request.send().await {
-        Ok(http_response) => {
-            let status = StatusCode::from_u16(http_response.status().as_u16()).unwrap();
-            let body = http_response.bytes().await;
+                match body {
+                    Ok(body) => ModelResponse::from_http_body(status, &body.to_vec(), binary),
+                    Err(error) => {
+                        tracing::error!("Error receiving response: {:?}", error);
 
-            match body {
-                Ok(body) => ModelResponse::from_http_body(status, &body.to_vec(), binary),
-                Err(error) => {
-                    tracing::warn!("Error receiving response: {:?}", error);
-
-                    ModelResponse::from(ModelError::BackendError)
+                        ModelResponse::from(ModelError::BackendError)
+                    }
                 }
             }
-        }
+            Err(error) => {
+                tracing::error!("Error sending request: {:?}", error);
+
+                if error.is_connect() | error.is_redirect() | error.is_decode() {
+                    return ModelResponse::from(ModelError::BackendError);
+                }
+
+                if error.is_timeout() {
+                    return ModelResponse::from(ModelError::ModelRateLimit);
+                }
+
+                ModelResponse::from(ModelError::InternalError)
+            }
+        },
         Err(error) => {
-            tracing::warn!("Error sending request: {:?}", error);
-
-            if error.is_connect() | error.is_redirect() | error.is_decode() {
-                return ModelResponse::from(ModelError::BackendError);
-            }
-
-            if error.is_timeout() {
-                return ModelResponse::from(ModelError::ModelRateLimit);
-            }
-
+            tracing::error!("Error building request: {:?}", error);
             ModelResponse::from(ModelError::InternalError)
         }
     }
