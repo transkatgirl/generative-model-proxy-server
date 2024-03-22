@@ -278,26 +278,18 @@ enum ModelResponseData {
 
 impl ModelResponseData {
     #[tracing::instrument(level = "trace", ret)]
-    fn into_common_api(self, model: Option<String>, tag: Uuid, fingerprint: Uuid) -> Self {
+    fn into_common_api(
+        self,
+        model: Option<String>,
+        r#type: RequestType,
+        tag: Uuid,
+        fingerprint: Uuid,
+    ) -> Self {
         match self {
             Self::Json(mut json) => {
-                json.insert(
-                    "model".to_string(),
-                    model.map(Value::String).unwrap_or(Value::Null),
-                );
-                json.insert("id".to_string(), Value::String(format!("{}", tag)));
-                json.insert(
-                    "created".to_string(),
-                    Value::Number(
-                        SystemTime::now()
-                            .duration_since(UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_secs()
-                            .into(),
-                    ),
-                );
-
-                if !json.contains_key("system_fingerprint") {
+                if (r#type == RequestType::TextChat || r#type == RequestType::TextCompletion)
+                    && !json.contains_key("system_fingerprint")
+                {
                     json.insert(
                         "system_fingerprint".to_string(),
                         Value::String(CROCKFORD.encode(
@@ -306,25 +298,143 @@ impl ModelResponseData {
                     );
                 }
 
-                if let Some(Value::Array(choices)) = json.get_mut("choices") {
-                    for (index, value) in choices.iter_mut().enumerate() {
-                        if let Value::Object(choice) = value {
-                            if !choice.contains_key("index") {
-                                choice.insert("index".to_string(), Value::Number(index.into()));
+                if r#type == RequestType::TextChat
+                    || r#type == RequestType::TextCompletion
+                    || r#type == RequestType::TextEdit
+                {
+                    if let Some(Value::Array(choices)) = json.get_mut("choices") {
+                        for (index, value) in choices.iter_mut().enumerate() {
+                            if let Value::Object(choice) = value {
+                                if !choice.contains_key("index") {
+                                    choice.insert("index".to_string(), Value::Number(index.into()));
+                                }
+
+                                if !choice.contains_key("logprobs") {
+                                    choice.insert("logprobs".to_string(), Value::Null);
+                                }
+
+                                if (r#type == RequestType::TextCompletion
+                                    || r#type == RequestType::TextEdit)
+                                    && !choice.contains_key("text")
+                                {
+                                    if let Some(Value::Object(message)) = choice.get("message") {
+                                        if let Some(Value::String(content)) = message.get("content")
+                                        {
+                                            choice.insert(
+                                                "text".to_string(),
+                                                Value::String(content.clone()),
+                                            );
+                                        }
+                                    }
+                                }
                             }
                         }
-                    }
 
-                    choices.sort_by(|a, b| {
-                        if let (Some(a), Some(b)) = (
-                            a.get("index").and_then(|v| v.as_u64()),
-                            b.get("index").and_then(|v| v.as_u64()),
-                        ) {
-                            a.cmp(&b)
-                        } else {
-                            Ordering::Equal
+                        choices.sort_by(|a, b| {
+                            if let (Some(a), Some(b)) = (
+                                a.get("index").and_then(|v| v.as_u64()),
+                                b.get("index").and_then(|v| v.as_u64()),
+                            ) {
+                                a.cmp(&b)
+                            } else {
+                                Ordering::Equal
+                            }
+                        });
+                    }
+                }
+
+                match r#type {
+                    RequestType::TextChat => {
+                        json.insert(
+                            "object".to_string(),
+                            Value::String("chat.completion".to_string()),
+                        );
+                        json.insert("created".to_string(), Value::Null);
+                        json.insert("id".to_string(), Value::Null);
+                        json.insert("model".to_string(), Value::Null);
+                    }
+                    RequestType::TextCompletion => {
+                        json.insert(
+                            "object".to_string(),
+                            Value::String("text_completion".to_string()),
+                        );
+                        json.insert("created".to_string(), Value::Null);
+                        json.insert("id".to_string(), Value::Null);
+                        json.insert("model".to_string(), Value::Null);
+                    }
+                    RequestType::TextEdit => {
+                        json.insert("object".to_string(), Value::String("edit".to_string()));
+                        json.insert("created".to_string(), Value::Null);
+                    }
+                    RequestType::TextEmbedding => {
+                        if json.contains_key("data") {
+                            json.insert("object".to_string(), Value::String("list".to_string()));
                         }
-                    });
+                        json.insert("model".to_string(), Value::Null);
+
+                        if let Some(Value::Array(objects)) = json.get_mut("data") {
+                            for (index, value) in objects.iter_mut().enumerate() {
+                                if let Value::Object(object) = value {
+                                    if !object.contains_key("index") {
+                                        object.insert(
+                                            "index".to_string(),
+                                            Value::Number(index.into()),
+                                        );
+                                    }
+
+                                    object.insert(
+                                        "object".to_string(),
+                                        Value::String("embedding".to_string()),
+                                    );
+                                }
+                            }
+
+                            objects.sort_by(|a, b| {
+                                if let (Some(a), Some(b)) = (
+                                    a.get("index").and_then(|v| v.as_u64()),
+                                    b.get("index").and_then(|v| v.as_u64()),
+                                ) {
+                                    a.cmp(&b)
+                                } else {
+                                    Ordering::Equal
+                                }
+                            });
+                        }
+                    }
+                    RequestType::TextModeration => {
+                        json.insert("id".to_string(), Value::Null);
+                        json.insert("model".to_string(), Value::Null);
+                    }
+                    RequestType::ImageGeneration => {
+                        json.insert("created".to_string(), Value::Null);
+                    }
+                    RequestType::ImageEdit => {
+                        json.insert("created".to_string(), Value::Null);
+                    }
+                    RequestType::ImageVariation => {
+                        json.insert("created".to_string(), Value::Null);
+                    }
+                    RequestType::AudioTTS => {}
+                    RequestType::AudioTranscription => {}
+                    RequestType::AudioTranslation => {}
+                }
+
+                if let Some(value) = json.get_mut("model") {
+                    *value = model.map(Value::String).unwrap_or(Value::Null);
+                }
+
+                if let Some(value) = json.get_mut("id") {
+                    *value = Value::String(format!("{}", tag));
+                }
+
+                if let Some(value) = json.get_mut("created") {
+                    *value = Value::Number(
+                        SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs()
+                            .into(),
+                    );
                 }
 
                 Self::Json(json)
@@ -550,6 +660,7 @@ impl ModelBackend {
         match &self {
             Self::OpenAI(config) => match config.get_request_parameters(request.r#type) {
                 Some((method, url, headers, binary)) => {
+                    let request_type = request.r#type;
                     let label = request.get_model().map(|value| value.to_string());
 
                     request.request = request
@@ -567,7 +678,10 @@ impl ModelBackend {
                     .await;
 
                     if response.status.is_success() {
-                        response.response = response.response.into_common_api(label, tag, model);
+                        response.response =
+                            response
+                                .response
+                                .into_common_api(label, request_type, tag, model);
                     }
 
                     response
