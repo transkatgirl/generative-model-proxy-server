@@ -1,3 +1,5 @@
+use std::time::Instant;
+
 use http::status::StatusCode;
 use reqwest::{
     header::HeaderMap,
@@ -115,24 +117,7 @@ impl ModelResponse {
     }
 }
 
-/*
-
-! Need to redo telemetry
-
-- Use debug level for things which don't contain sensitive info and should show up in release builds
-- Use trace level for things that are useful for debug but not release builds; May contain sensitive info
-
-- Make use of logging when useful
-
-See:
-- https://opentelemetry.io/docs/specs/semconv/http/http-spans/#http-client
-  - https://docs.rs/tracing-opentelemetry/latest/tracing_opentelemetry/index.html
-- https://opentelemetry.io/docs/specs/semconv/http/http-metrics/#http-client
-  - https://docs.rs/tracing-opentelemetry/latest/tracing_opentelemetry/struct.MetricsLayer.html
-
-*/
-
-#[tracing::instrument(level = "debug", fields(otel.name = format!("{} {}", method, url.as_str()), otel.kind = "Client", network.protocol.name = "http", network.protocol.version, server.address = url.authority(), server.port = url.port_or_known_default(), url.full = url.as_str(), url.scheme = url.scheme(), user_agent.original = "generative-model-proxy-server", http.request.method = method.as_str(), http.request.header.content_type, http.response.status_code, http.response.header.content_type, error.r#type), skip_all)]
+#[tracing::instrument(level = "debug", fields(otel.name = format!("{} {}", method, url.as_str()), otel.kind = "Client", network.protocol.name = "http", network.protocol.version, server.address = url.authority(), server.port = url.port_or_known_default(), url.full = url.as_str(), url.scheme = url.scheme(), user_agent.original = "generative-model-proxy-server", http.request.method = method.as_str(), http.request.header.content_type, http.response.status_code, http.response.header.content_type), skip_all)]
 pub(super) async fn send_http_request(
     client: &Client,
     method: Method,
@@ -152,7 +137,16 @@ pub(super) async fn send_http_request(
             {
                 span.record("http.request.header.content_type", content_type);
             }
+            tracing::debug!(
+                histogram.http.client.request.body.size = http_request
+                    .body()
+                    .and_then(|body| body.as_bytes())
+                    .map(|body| body.len())
+                    .unwrap_or_default(),
+                unit = "By"
+            );
 
+            let timestamp = Instant::now();
             match client.execute(http_request).await {
                 Ok(http_response) => {
                     span.record(
@@ -178,11 +172,22 @@ pub(super) async fn send_http_request(
                     let status = StatusCode::from_u16(http_response.status().as_u16()).unwrap();
                     let body = http_response.bytes().await;
 
+                    tracing::debug!(
+                        histogram.http.client.request.duration = timestamp.elapsed().as_secs_f64(),
+                        unit = "s"
+                    );
+
                     match body {
-                        Ok(body) => ModelResponse::from_http_body(status, &body.to_vec(), binary),
+                        Ok(body) => {
+                            tracing::debug!(
+                                histogram.http.client.response.body.size = body.len(),
+                                unit = "By"
+                            );
+
+                            ModelResponse::from_http_body(status, &body.to_vec(), binary)
+                        }
                         Err(error) => {
                             tracing::error!("Error receiving response: {:?}", error);
-                            span.record("error.type", format!("{}", error));
 
                             ModelResponse::from(ModelError::BackendError)
                         }
@@ -190,7 +195,6 @@ pub(super) async fn send_http_request(
                 }
                 Err(error) => {
                     tracing::error!("Error sending request: {:?}", error);
-                    span.record("error.type", format!("{}", error));
 
                     if error.is_connect() | error.is_redirect() | error.is_decode() {
                         return ModelResponse::from(ModelError::BackendError);
@@ -206,7 +210,6 @@ pub(super) async fn send_http_request(
         }
         Err(error) => {
             tracing::error!("Error building request: {:?}", error);
-            span.record("error.type", format!("{}", error));
             ModelResponse::from(ModelError::InternalError)
         }
     }

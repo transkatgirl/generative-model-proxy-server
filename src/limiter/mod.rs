@@ -5,8 +5,9 @@ use std::{
 
 use gcra::{GcraError, GcraState, RateLimit};
 use serde::{Deserialize, Serialize};
-use tracing::{event, Level};
 use uuid::Uuid;
+
+// TODO: Add metrics
 
 #[cfg(test)]
 mod tests;
@@ -157,8 +158,7 @@ impl Limit {
             }
             Ordering::Equal => LimiterResult::Ready,
             Ordering::Less => {
-                event!(
-                    Level::WARN,
+                tracing::warn!(
                     "Request had greater final token count ({}) than estimated maximum of {}!",
                     response.actual_tokens,
                     response.request.estimated_tokens
@@ -177,8 +177,7 @@ impl Limit {
                         cost: _,
                         rate_limit: _,
                     }) => {
-                        event!(
-                            Level::WARN,
+                        tracing::warn!(
                             "Request had greater final token count ({}) than rate limiter maximum of {}!",
                             response.actual_tokens,
                             rate_limit.resource_limit,
