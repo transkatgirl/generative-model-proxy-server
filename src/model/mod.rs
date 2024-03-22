@@ -1,4 +1,8 @@
-use std::{collections::HashMap, fmt::Debug};
+use std::{
+    collections::HashMap,
+    fmt::Debug,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use fast32::base32::{CROCKFORD, RFC4648};
 use http::{status::StatusCode, Uri};
@@ -125,7 +129,11 @@ impl ModelRequestData {
 
         ModelResponse {
             status: StatusCode::OK,
-            usage: None,
+            usage: TokenUsage {
+                total: 1,
+                input: None,
+                output: None,
+            },
             response: ModelResponseData::Json(json),
         }
     }
@@ -257,7 +265,7 @@ impl ModelRequest {
 #[derive(Debug)]
 pub(super) struct ModelResponse {
     pub(super) status: StatusCode,
-    pub(super) usage: Option<TokenUsage>,
+    pub(super) usage: TokenUsage,
     response: ModelResponseData,
 }
 
@@ -269,16 +277,35 @@ enum ModelResponseData {
 
 impl ModelResponseData {
     #[tracing::instrument(level = "trace", ret)]
-    fn into_openai(self, model: Option<String>, tag: Uuid) -> Self {
+    fn into_common_api(self, model: Option<String>, tag: Uuid, fingerprint: Uuid) -> Self {
         match self {
             Self::Json(mut json) => {
-                if let Some(value) = json.get_mut("model") {
-                    *value = model.map(Value::String).unwrap_or(Value::Null);
+                json.insert(
+                    "model".to_string(),
+                    model.map(Value::String).unwrap_or(Value::Null),
+                );
+                json.insert("id".to_string(), Value::String(format!("{}", tag)));
+                json.insert(
+                    "created".to_string(),
+                    Value::Number(
+                        SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs()
+                            .into(),
+                    ),
+                );
+
+                if !json.contains_key("system_fingerprint") {
+                    json.insert(
+                        "system_fingerprint".to_string(),
+                        Value::String(CROCKFORD.encode(
+                            digest::digest(&digest::SHA256, fingerprint.as_bytes()).as_ref(),
+                        )),
+                    );
                 }
 
-                if let Some(value) = json.get_mut("id") {
-                    *value = Value::String(format!("{}", tag));
-                }
+                // todo: sort responses
 
                 Self::Json(json)
             }
@@ -287,7 +314,7 @@ impl ModelResponseData {
     }
 
     #[tracing::instrument(level = "trace", ret)]
-    fn get_usage(&self, is_error: bool) -> Option<TokenUsage> {
+    fn get_usage(&self, is_error: bool) -> TokenUsage {
         match self {
             Self::Json(json) => json.get("usage").and_then(|usage| {
                 let input_tokens = usage.get("prompt_tokens").and_then(|num| num.as_u64());
@@ -309,9 +336,13 @@ impl ModelResponseData {
             }),
             Self::Binary(_binary) => None,
         }
-        .or_else(|| match is_error {
-            true => Some(TokenUsage::default()),
-            false => None,
+        .unwrap_or(TokenUsage {
+            total: match is_error {
+                true => 0,
+                false => 1,
+            },
+            input: None,
+            output: None,
         })
     }
 }
@@ -376,7 +407,7 @@ impl From<ModelError> for ModelResponse {
         };
 
         ModelResponse {
-            usage: Some(TokenUsage::default()),
+            usage: TokenUsage::default(),
             status,
             response: ModelResponseData::Json(json),
         }
@@ -420,6 +451,14 @@ struct OpenAIModelBackend {
     openai_api_key: String,
     openai_organization: Option<String>,
 }
+
+/*struct TogetherAIModelBackend {
+    model_string: String,
+    model_context_len: Option<u64>,
+    base_url: String,
+    together_api_key: String,
+    model_fingerprint: Option<Uuid>,
+}*/
 
 impl OpenAIModelBackend {
     #[tracing::instrument(level = "trace")]
@@ -471,10 +510,10 @@ impl OpenAIModelBackend {
 }
 
 impl ModelBackend {
-    pub(super) fn get_max_tokens(&self) -> Option<u64> {
+    pub(super) fn get_max_tokens(&self) -> u64 {
         match &self {
-            Self::OpenAI(backend) => backend.model_context_len,
-            Self::Loopback => None,
+            Self::OpenAI(backend) => backend.model_context_len.unwrap_or(1),
+            Self::Loopback => 1,
         }
     }
 
@@ -482,6 +521,7 @@ impl ModelBackend {
     pub(super) async fn generate(
         &self,
         http_client: &Client,
+        model: Uuid,
         mut request: ModelRequest,
     ) -> ModelResponse {
         let tag = Uuid::new_v4();
@@ -506,7 +546,9 @@ impl ModelBackend {
                     )
                     .await;
 
-                    response.response = response.response.into_openai(label, tag);
+                    if response.status.is_success() {
+                        response.response = response.response.into_common_api(label, tag, model);
+                    }
 
                     response
                 }

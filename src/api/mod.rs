@@ -389,7 +389,7 @@ async fn handle_model_request(
         tracing::debug!(model = ?model.uuid);
     }
 
-    let model_max_tokens = model.api.get_max_tokens().unwrap_or(1);
+    let model_max_tokens = model.api.get_max_tokens();
     let request_max_tokens = request.get_max_tokens();
     let request_count = request.get_count() as u64;
     if request_max_tokens.unwrap_or(model_max_tokens) > model_max_tokens {
@@ -449,48 +449,58 @@ async fn handle_model_request(
         DatabaseFunctionResult::BackendError => return Err(ModelError::InternalError),
     }
 
-    let response = model.api.generate(&state.http, request).await;
+    let response = model.api.generate(&state.http, model.uuid, request).await;
 
-    if let Some(usage) = &response.usage {
-        let limiter_response = limiter::Response {
-            request: limiter_request,
-            actual_tokens: usage.total,
-        };
+    let limiter_response = limiter::Response {
+        request: limiter_request,
+        actual_tokens: response.usage.total,
+    };
+    tracing::debug!(
+        histogram.quota.actual_tokens = limiter_response.actual_tokens,
+        unit = "tokens"
+    );
+    if let Some(input_tokens) = response.usage.input {
         tracing::debug!(
-            histogram.quota.actual_tokens = limiter_response.actual_tokens,
+            histogram.quota.actual_tokens.input = input_tokens,
             unit = "tokens"
         );
+    }
+    if let Some(output_tokens) = response.usage.output {
         tracing::debug!(
-            histogram.quota.estimate_offset = limiter_response.request.estimated_tokens as i64
-                - limiter_response.actual_tokens as i64,
+            histogram.quota.actual_tokens.output = output_tokens,
             unit = "tokens"
         );
+    }
+    tracing::debug!(
+        histogram.quota.estimate_offset = limiter_response.request.estimated_tokens as i64
+            - limiter_response.actual_tokens as i64,
+        unit = "tokens"
+    );
 
-        let limit_response = |quota: &mut Quota| {
-            let mut wait_until = Instant::now();
+    let limit_response = |quota: &mut Quota| {
+        let mut wait_until = Instant::now();
 
-            for limit in &mut quota.limits {
-                match limit.response(&state.clock, &limiter_response) {
-                    LimiterResult::Ready => {}
-                    LimiterResult::WaitUntil(timestamp) => wait_until = wait_until.max(timestamp),
-                    LimiterResult::Oversized => return Err(ModelError::UserRateLimit),
-                }
+        for limit in &mut quota.limits {
+            match limit.response(&state.clock, &limiter_response) {
+                LimiterResult::Ready => {}
+                LimiterResult::WaitUntil(timestamp) => wait_until = wait_until.max(timestamp),
+                LimiterResult::Oversized => return Err(ModelError::UserRateLimit),
             }
-
-            Ok(wait_until)
-        };
-
-        match state.modify_items_skip_missing("quotas", &quotas, limit_response) {
-            DatabaseFunctionResult::Success(timestamps) => {
-                if let Some(wait_until) = timestamps.iter().max().cloned() {
-                    time::sleep_until(time::Instant::from_std(wait_until))
-                        .instrument(tracing::debug_span!("rate_limit_response"))
-                        .await
-                }
-            }
-            DatabaseFunctionResult::FunctionError(error) => return Err(error),
-            DatabaseFunctionResult::BackendError => return Err(ModelError::InternalError),
         }
+
+        Ok(wait_until)
+    };
+
+    match state.modify_items_skip_missing("quotas", &quotas, limit_response) {
+        DatabaseFunctionResult::Success(timestamps) => {
+            if let Some(wait_until) = timestamps.iter().max().cloned() {
+                time::sleep_until(time::Instant::from_std(wait_until))
+                    .instrument(tracing::debug_span!("rate_limit_response"))
+                    .await
+            }
+        }
+        DatabaseFunctionResult::FunctionError(error) => return Err(error),
+        DatabaseFunctionResult::BackendError => return Err(ModelError::InternalError),
     }
 
     Ok(response)

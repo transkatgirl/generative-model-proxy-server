@@ -222,7 +222,7 @@
 									<li>OpenAI
 										<ul>
 											<li>model_string: String</li>
-											<li>(optional) model_context_len: PositiveWholeNumber</li>
+											<li>(optional**) model_context_len: PositiveWholeNumber</li>
 											<li>openai_api_base: String</li>
 											<li>openai_api_key: String</li>
 											<li>(optional) openai_organization: String</li>
@@ -373,6 +373,8 @@
 				</ul>
 			</li>
 			<li>* - UUIDs are mandatory when creating an object using the PUT method.</li>
+			<li>** - If the model context length is not specified, it will default to a value of 1. This may result in
+				unintended consequences when used with text-based models.</li>
 		</ul>
 		<section id="datatypes">
 			<h3>Datatype JSON Representations</h3>
