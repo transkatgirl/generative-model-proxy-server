@@ -1,4 +1,5 @@
 use std::{
+    cmp::Ordering,
     collections::HashMap,
     fmt::Debug,
     time::{SystemTime, UNIX_EPOCH},
@@ -305,7 +306,26 @@ impl ModelResponseData {
                     );
                 }
 
-                // todo: sort responses
+                if let Some(Value::Array(choices)) = json.get_mut("choices") {
+                    for (index, value) in choices.iter_mut().enumerate() {
+                        if let Value::Object(choice) = value {
+                            if !choice.contains_key("index") {
+                                choice.insert("index".to_string(), Value::Number(index.into()));
+                            }
+                        }
+                    }
+
+                    choices.sort_by(|a, b| {
+                        if let (Some(a), Some(b)) = (
+                            a.get("index").and_then(|v| v.as_u64()),
+                            b.get("index").and_then(|v| v.as_u64()),
+                        ) {
+                            a.cmp(&b)
+                        } else {
+                            Ordering::Equal
+                        }
+                    });
+                }
 
                 Self::Json(json)
             }
