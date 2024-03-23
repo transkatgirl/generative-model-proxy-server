@@ -33,6 +33,7 @@ use uuid::Uuid;
 mod admin;
 mod state;
 
+pub use state::Database;
 use state::{RelatedToItem, RelatedToItemSet};
 
 use crate::limiter::{self, LimiterResult};
@@ -255,7 +256,7 @@ async fn authenticate(
                 tracing::trace!(api_key = api_key);
             }
 
-            if state.is_table_empty("users") && api_key == "setup-key" {
+            if state.database.is_table_empty("users") && api_key == "setup-key" {
                 request.extensions_mut().insert(Authenticated {
                     timestamp,
                     admin: true,
@@ -270,7 +271,10 @@ async fn authenticate(
                 return Ok(next.run(request).await);
             }
 
-            match state.get_related_item::<_, Uuid, User>(("api_keys", "users"), &api_key) {
+            match state
+                .database
+                .get_related_item::<_, Uuid, User>(("api_keys", "users"), &api_key)
+            {
                 DatabaseValueResult::Success(user) => {
                     if cfg!(debug_assertions) {
                         tracing::debug!(user = ?user);
@@ -280,7 +284,10 @@ async fn authenticate(
 
                     let roles: Vec<Uuid> = user.roles.iter().copied().collect();
 
-                    match state.get_items_skip_missing::<_, Role>("roles", &roles) {
+                    match state
+                        .database
+                        .get_items_skip_missing::<_, Role>("roles", &roles)
+                    {
                         DatabaseValueResult::Success(roles) => {
                             let mut admin = user.admin;
 
@@ -353,7 +360,7 @@ async fn handle_model_request(
     State(state): State<AppState>,
     mut request: ModelRequest,
 ) -> Result<ModelResponse, ModelError> {
-    let models_result = state.get_items_skip_missing::<_, Model>(
+    let models_result = state.database.get_items_skip_missing::<_, Model>(
         "models",
         &auth
             .user
@@ -437,7 +444,10 @@ async fn handle_model_request(
         Ok(wait_until)
     };
 
-    match state.modify_items_skip_missing("quotas", &quotas, limit_request) {
+    match state
+        .database
+        .modify_items_skip_missing("quotas", &quotas, limit_request)
+    {
         DatabaseFunctionResult::Success(timestamps) => {
             if let Some(wait_until) = timestamps.iter().max().cloned() {
                 time::sleep_until(time::Instant::from_std(wait_until))
@@ -491,7 +501,10 @@ async fn handle_model_request(
         Ok(wait_until)
     };
 
-    match state.modify_items_skip_missing("quotas", &quotas, limit_response) {
+    match state
+        .database
+        .modify_items_skip_missing("quotas", &quotas, limit_response)
+    {
         DatabaseFunctionResult::Success(timestamps) => {
             if let Some(wait_until) = timestamps.iter().max().cloned() {
                 time::sleep_until(time::Instant::from_std(wait_until))

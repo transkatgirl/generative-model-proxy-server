@@ -7,7 +7,6 @@ use opentelemetry::KeyValue;
 use opentelemetry_otlp::WithExportConfig;
 use opentelemetry_sdk::{runtime, trace, Resource};
 use reqwest::{Client, ClientBuilder};
-use sled::{Db, Mode}; // sled should probably be replaced with a proper database at some point. will need to write manual migrations when that time comes.
 use tokio::{fs, net::TcpListener, signal};
 use tracing::Level;
 use tracing_opentelemetry::MetricsLayer;
@@ -17,6 +16,7 @@ mod api;
 mod limiter;
 mod model;
 
+use api::Database;
 use limiter::LimiterClock;
 
 /// A multi-user proxy server for major generative model APIs
@@ -39,14 +39,9 @@ struct Args {
 #[derive(Clone)]
 struct AppState {
     http: Client,
-    database: Db,
+    database: Database,
     clock: Arc<LimiterClock>,
 }
-
-// TODO: Implement a system for handling database migrations
-//const PAST_DATABASE_STRING: &str = "version-0";
-//const FUTURE_DATABASE_STRING: &str = "version-2"; // ? How will we handle version rollbacks?
-const CURRENT_DATABASE_STRING: &str = "version-1";
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -116,10 +111,6 @@ async fn main() -> Result<()> {
         .await
         .context("Unable to create database directory!")?;
 
-    let database_location = args
-        .database_folder
-        .join(PathBuf::from(CURRENT_DATABASE_STRING));
-
     let state = AppState {
         http: ClientBuilder::new()
             .user_agent("generative-model-proxy-server")
@@ -129,11 +120,7 @@ async fn main() -> Result<()> {
             .http2_keep_alive_while_idle(true)
             .build()
             .context("Unable to initalize HTTP client")?,
-        database: sled::Config::default()
-            .path(&database_location)
-            .mode(Mode::HighThroughput)
-            .open()
-            .context("Unable to initalize database")?,
+        database: Database::open(&args.database_folder).context("Unable to initalize database")?,
         clock: Arc::new(LimiterClock::new()),
     };
 
@@ -141,7 +128,7 @@ async fn main() -> Result<()> {
         .await
         .with_context(|| format!("Failed to bind HTTP server to {}", &args.bind_to))?;
 
-    if state.is_table_empty("users") {
+    if state.database.is_table_empty("users") {
         let addr = listener.local_addr().unwrap_or(args.bind_to);
         let mut parts = Parts::default();
         parts.scheme = Some(Scheme::HTTP);
@@ -166,7 +153,7 @@ async fn main() -> Result<()> {
         .context("Failed to start HTTP server")?;
 
     tracing::debug!("flushing database to disk");
-    if let Err(error) = state.database.flush_async().await {
+    if let Err(error) = state.database.close().await {
         tracing::error!("Unable to flush database to disk: {}", error)
     }
 

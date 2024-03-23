@@ -93,7 +93,7 @@ impl<T> From<DatabaseValueResult<T>> for Result<Json<T>, StatusCode> {
 }
 
 async fn get_users(State(state): State<AppState>) -> Result<Json<Vec<User>>, StatusCode> {
-    state.get_table("users").into()
+    state.database.get_table("users").into()
 }
 
 async fn get_user(
@@ -104,7 +104,7 @@ async fn get_user(
         return Err(StatusCode::BAD_REQUEST);
     }
 
-    state.get_item("users", &uuid).into()
+    state.database.get_item("users", &uuid).into()
 }
 
 async fn add_user_post(
@@ -122,7 +122,7 @@ async fn add_user_post(
         .map(|item| (item, payload.uuid))
         .collect();
 
-    match state.insert_related_items(
+    match state.database.insert_related_items(
         ("users", "api_keys"),
         (&payload.uuid, &payload),
         &related_items,
@@ -145,6 +145,7 @@ async fn add_user_put(State(state): State<AppState>, Json(payload): Json<User>) 
         .collect();
 
     state
+        .database
         .insert_related_items(
             ("users", "api_keys"),
             (&payload.uuid, &payload),
@@ -170,6 +171,7 @@ async fn update_user(
         .collect();
 
     state
+        .database
         .insert_related_items(
             ("users", "api_keys"),
             (&payload.uuid, &payload),
@@ -184,12 +186,13 @@ async fn delete_user(State(state): State<AppState>, Path(uuid): Path<Uuid>) -> S
     }
 
     state
+        .database
         .remove_related_items::<_, User>(("users", "api_keys"), &uuid)
         .into()
 }
 
 async fn get_roles(State(state): State<AppState>) -> Result<Json<Vec<Role>>, StatusCode> {
-    state.get_table("roles").into()
+    state.database.get_table("roles").into()
 }
 
 async fn get_role(
@@ -200,7 +203,7 @@ async fn get_role(
         return Err(StatusCode::BAD_REQUEST);
     }
 
-    state.get_item("roles", &uuid).into()
+    state.database.get_item("roles", &uuid).into()
 }
 
 async fn add_role_post(
@@ -212,7 +215,7 @@ async fn add_role_post(
     }
     payload.uuid = Uuid::new_v4();
 
-    match state.insert_item("roles", &payload.uuid, &payload) {
+    match state.database.insert_item("roles", &payload.uuid, &payload) {
         DatabaseActionResult::Success => Ok(Json(payload.uuid)),
         DatabaseActionResult::NotFound => Err(StatusCode::NOT_FOUND),
         DatabaseActionResult::BackendError => Err(StatusCode::INTERNAL_SERVER_ERROR),
@@ -224,7 +227,10 @@ async fn add_role_put(State(state): State<AppState>, Json(payload): Json<Role>) 
         return StatusCode::BAD_REQUEST;
     }
 
-    state.insert_item("roles", &payload.uuid, &payload).into()
+    state
+        .database
+        .insert_item("roles", &payload.uuid, &payload)
+        .into()
 }
 
 async fn update_role(
@@ -237,7 +243,10 @@ async fn update_role(
     }
     payload.uuid = uuid;
 
-    state.insert_item("roles", &payload.uuid, &payload).into()
+    state
+        .database
+        .insert_item("roles", &payload.uuid, &payload)
+        .into()
 }
 
 async fn delete_role(State(state): State<AppState>, Path(uuid): Path<Uuid>) -> StatusCode {
@@ -245,11 +254,11 @@ async fn delete_role(State(state): State<AppState>, Path(uuid): Path<Uuid>) -> S
         return StatusCode::BAD_REQUEST;
     }
 
-    state.remove_item("roles", &uuid).into()
+    state.database.remove_item("roles", &uuid).into()
 }
 
 async fn get_models(State(state): State<AppState>) -> Result<Json<Vec<Model>>, StatusCode> {
-    state.get_table("models").into()
+    state.database.get_table("models").into()
 }
 
 async fn get_model(
@@ -260,7 +269,7 @@ async fn get_model(
         return Err(StatusCode::BAD_REQUEST);
     }
 
-    state.get_item("models", &uuid).into()
+    state.database.get_item("models", &uuid).into()
 }
 
 async fn add_model_post(
@@ -272,7 +281,10 @@ async fn add_model_post(
     }
     payload.uuid = Uuid::new_v4();
 
-    match state.insert_item("models", &payload.uuid, &payload) {
+    match state
+        .database
+        .insert_item("models", &payload.uuid, &payload)
+    {
         DatabaseActionResult::Success => Ok(Json(payload.uuid)),
         DatabaseActionResult::NotFound => Err(StatusCode::NOT_FOUND),
         DatabaseActionResult::BackendError => Err(StatusCode::INTERNAL_SERVER_ERROR),
@@ -284,7 +296,10 @@ async fn add_model_put(State(state): State<AppState>, Json(payload): Json<Model>
         return StatusCode::BAD_REQUEST;
     }
 
-    state.insert_item("models", &payload.uuid, &payload).into()
+    state
+        .database
+        .insert_item("models", &payload.uuid, &payload)
+        .into()
 }
 
 async fn update_model(
@@ -297,7 +312,10 @@ async fn update_model(
     }
     payload.uuid = uuid;
 
-    state.insert_item("models", &payload.uuid, &payload).into()
+    state
+        .database
+        .insert_item("models", &payload.uuid, &payload)
+        .into()
 }
 
 async fn delete_model(State(state): State<AppState>, Path(uuid): Path<Uuid>) -> StatusCode {
@@ -305,11 +323,11 @@ async fn delete_model(State(state): State<AppState>, Path(uuid): Path<Uuid>) -> 
         return StatusCode::BAD_REQUEST;
     }
 
-    state.remove_item("models", &uuid).into()
+    state.database.remove_item("models", &uuid).into()
 }
 
 async fn get_quotas(State(state): State<AppState>) -> Result<Json<Vec<Quota>>, StatusCode> {
-    state.get_table("quotas").into()
+    state.database.get_table("quotas").into()
 }
 
 async fn get_quota(
@@ -320,7 +338,7 @@ async fn get_quota(
         return Err(StatusCode::BAD_REQUEST);
     }
 
-    state.get_item("quotas", &uuid).into()
+    state.database.get_item("quotas", &uuid).into()
 }
 
 async fn add_quota_post(
@@ -332,7 +350,10 @@ async fn add_quota_post(
     }
     payload.uuid = Uuid::new_v4();
 
-    match state.insert_item("quotas", &payload.uuid, &payload) {
+    match state
+        .database
+        .insert_item("quotas", &payload.uuid, &payload)
+    {
         DatabaseActionResult::Success => Ok(Json(payload.uuid)),
         DatabaseActionResult::NotFound => Err(StatusCode::NOT_FOUND),
         DatabaseActionResult::BackendError => Err(StatusCode::INTERNAL_SERVER_ERROR),
@@ -344,7 +365,10 @@ async fn add_quota_put(State(state): State<AppState>, Json(payload): Json<Quota>
         return StatusCode::BAD_REQUEST;
     }
 
-    state.insert_item("quotas", &payload.uuid, &payload).into()
+    state
+        .database
+        .insert_item("quotas", &payload.uuid, &payload)
+        .into()
 }
 
 async fn update_quota(
@@ -357,7 +381,10 @@ async fn update_quota(
     }
     payload.uuid = uuid;
 
-    state.insert_item("quotas", &payload.uuid, &payload).into()
+    state
+        .database
+        .insert_item("quotas", &payload.uuid, &payload)
+        .into()
 }
 
 async fn delete_quota(State(state): State<AppState>, Path(uuid): Path<Uuid>) -> StatusCode {
@@ -365,5 +392,5 @@ async fn delete_quota(State(state): State<AppState>, Path(uuid): Path<Uuid>) -> 
         return StatusCode::BAD_REQUEST;
     }
 
-    state.remove_item("quotas", &uuid).into()
+    state.database.remove_item("quotas", &uuid).into()
 }

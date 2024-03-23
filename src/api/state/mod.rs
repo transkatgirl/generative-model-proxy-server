@@ -1,10 +1,11 @@
+use std::path::{Path, PathBuf};
+
 use serde::{de::DeserializeOwned, Serialize};
 use sled::{
     transaction::{ConflictableTransactionError, TransactionError, Transactional},
-    Batch,
+    Batch, Db, Mode,
 };
-
-use super::AppState;
+// sled should probably be replaced with a proper database at some point. will need to write manual migrations when that time comes.
 
 pub(super) trait RelatedToItem {
     type Key: Serialize;
@@ -21,6 +22,11 @@ pub(super) trait RelatedToItemSet {
 enum Either<A, B> {
     A(A),
     B(B),
+}
+
+#[derive(Clone)]
+pub struct Database {
+    database: Db,
 }
 
 pub(super) enum DatabaseActionResult {
@@ -47,7 +53,29 @@ pub(super) enum DatabaseFunctionResult<T, E> {
     BackendError,
 }
 
-impl AppState {
+// TODO: Implement a system for handling database migrations
+//const PAST_DATABASE_STRING: &str = "version-0";
+//const FUTURE_DATABASE_STRING: &str = "version-2"; // ? How will we handle version rollbacks?
+const CURRENT_DATABASE_STRING: &str = "version-1";
+
+impl Database {
+    pub fn open(path: &Path) -> Result<Self, sled::Error> {
+        let database_location = path.join(PathBuf::from(CURRENT_DATABASE_STRING));
+
+        Ok(Database {
+            database: sled::Config::default()
+                .path(database_location)
+                .mode(Mode::HighThroughput)
+                .open()?,
+        })
+    }
+
+    pub async fn close(self) -> Result<(), sled::Error> {
+        self.database.flush_async().await?;
+
+        Ok(())
+    }
+
     #[tracing::instrument(skip(self), level = "trace")]
     pub fn is_table_empty(&self, table: &str) -> bool {
         match self.database.open_tree(table.as_bytes()) {
