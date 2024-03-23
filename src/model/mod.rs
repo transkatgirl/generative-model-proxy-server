@@ -18,6 +18,7 @@ use uuid::Uuid;
 
 mod client;
 mod interface;
+mod tokenizer;
 
 #[tracing::instrument(level = "trace", ret)]
 fn get_prompt_count(prompt: &Value) -> usize {
@@ -276,6 +277,12 @@ enum ModelResponseData {
     Binary(Vec<u8>),
 }
 
+/*
+
+TODO: Need to add token counting as a fallback when usage information is not available
+
+*/
+
 impl ModelResponseData {
     #[tracing::instrument(level = "trace", ret)]
     fn into_hybrid_api(
@@ -314,6 +321,9 @@ impl ModelResponseData {
                             || r#type == RequestType::TextCompletion
                             || r#type == RequestType::TextEdit
                         {
+                            let mut completion = None;
+                            let mut stop_reason = None;
+
                             if let Some(Value::Array(choices)) = json.get_mut("choices") {
                                 for (index, value) in choices.iter_mut().enumerate() {
                                     if let Value::Object(choice) = value {
@@ -358,6 +368,47 @@ impl ModelResponseData {
                                         Ordering::Equal
                                     }
                                 });
+
+                                if choices.len() == 1 {
+                                    if let Some(Value::Object(choice)) = choices.first() {
+                                        if r#type == RequestType::TextCompletion {
+                                            completion = choice.get("text").cloned();
+                                            stop_reason = choice
+                                                .get("finish_reason")
+                                                .and_then(|value| value.as_str())
+                                                .map(|reason| {
+                                                    match reason {
+                                                        "stop" => "stop_sequence",
+                                                        "length" => "max_tokens",
+                                                        _ => reason,
+                                                    }
+                                                    .to_string()
+                                                })
+                                                .map(Value::String);
+                                        } else {
+                                            stop_reason = choice
+                                                .get("finish_reason")
+                                                .and_then(|value| value.as_str())
+                                                .map(|reason| {
+                                                    match reason {
+                                                        "stop" => "end_turn",
+                                                        "length" => "max_tokens",
+                                                        _ => reason,
+                                                    }
+                                                    .to_string()
+                                                })
+                                                .map(Value::String);
+                                        }
+                                    }
+                                }
+                            }
+
+                            if let Some(completion) = completion {
+                                json.insert("completion".to_string(), completion);
+                            }
+
+                            if let Some(stop_reason) = stop_reason {
+                                json.insert("stop_reason".to_string(), stop_reason);
                             }
                         }
 

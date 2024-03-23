@@ -83,6 +83,7 @@ uuid = { version = "1.7", features = [
 postcard = { versiion = "1.0", features = [
 	"use-std",
 ] }
+tiktoken-rs = "0.5.8"
 
 [dev-dependencies]
 rand = "0.8.5"
