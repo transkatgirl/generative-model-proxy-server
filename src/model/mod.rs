@@ -13,7 +13,7 @@ use reqwest::{
 };
 use ring::digest;
 use serde::{Deserialize, Serialize};
-use serde_json::{value::Value, Map};
+use serde_json::{json, value::Value, Map};
 use uuid::Uuid;
 
 mod client;
@@ -284,122 +284,163 @@ impl ModelResponseData {
         r#type: RequestType,
         tag: Uuid,
         fingerprint: Uuid,
+        is_error: bool,
     ) -> Self {
         match self {
             Self::Json(mut json) => {
-                if (r#type == RequestType::TextChat || r#type == RequestType::TextCompletion)
-                    && !json.contains_key("system_fingerprint")
-                {
-                    json.insert(
-                        "system_fingerprint".to_string(),
-                        Value::String(CROCKFORD.encode(
-                            digest::digest(&digest::SHA256, fingerprint.as_bytes()).as_ref(),
-                        )),
-                    );
-                }
+                match is_error {
+                    true => {
+                        if json.contains_key("error") {
+                            json.insert("type".to_string(), Value::String("error".to_string()));
+                        }
+                    }
+                    false => {
+                        if (r#type == RequestType::TextChat
+                            || r#type == RequestType::TextCompletion)
+                            && !json.contains_key("system_fingerprint")
+                        {
+                            json.insert(
+                                "system_fingerprint".to_string(),
+                                Value::String(
+                                    CROCKFORD.encode(
+                                        digest::digest(&digest::SHA256, fingerprint.as_bytes())
+                                            .as_ref(),
+                                    ),
+                                ),
+                            );
+                        }
 
-                if r#type == RequestType::TextChat
-                    || r#type == RequestType::TextCompletion
-                    || r#type == RequestType::TextEdit
-                {
-                    if let Some(Value::Array(choices)) = json.get_mut("choices") {
-                        for (index, value) in choices.iter_mut().enumerate() {
-                            if let Value::Object(choice) = value {
-                                if !choice.contains_key("index") {
-                                    choice.insert("index".to_string(), Value::Number(index.into()));
-                                }
-
-                                if !choice.contains_key("logprobs") {
-                                    choice.insert("logprobs".to_string(), Value::Null);
-                                }
-
-                                if (r#type == RequestType::TextCompletion
-                                    || r#type == RequestType::TextEdit)
-                                    && !choice.contains_key("text")
-                                {
-                                    if let Some(Value::Object(message)) = choice.get("message") {
-                                        if let Some(Value::String(content)) = message.get("content")
-                                        {
+                        if r#type == RequestType::TextChat
+                            || r#type == RequestType::TextCompletion
+                            || r#type == RequestType::TextEdit
+                        {
+                            if let Some(Value::Array(choices)) = json.get_mut("choices") {
+                                for (index, value) in choices.iter_mut().enumerate() {
+                                    if let Value::Object(choice) = value {
+                                        if !choice.contains_key("index") {
                                             choice.insert(
-                                                "text".to_string(),
-                                                Value::String(content.clone()),
+                                                "index".to_string(),
+                                                Value::Number(index.into()),
                                             );
+                                        }
+
+                                        if !choice.contains_key("logprobs") {
+                                            choice.insert("logprobs".to_string(), Value::Null);
+                                        }
+
+                                        if (r#type == RequestType::TextCompletion
+                                            || r#type == RequestType::TextEdit)
+                                            && !choice.contains_key("text")
+                                        {
+                                            if let Some(Value::Object(message)) =
+                                                choice.get("message")
+                                            {
+                                                if let Some(Value::String(content)) =
+                                                    message.get("content")
+                                                {
+                                                    choice.insert(
+                                                        "text".to_string(),
+                                                        Value::String(content.clone()),
+                                                    );
+                                                }
+                                            }
                                         }
                                     }
                                 }
-                            }
-                        }
 
-                        choices.sort_by(|a, b| {
-                            if let (Some(a), Some(b)) = (
-                                a.get("index").and_then(|v| v.as_u64()),
-                                b.get("index").and_then(|v| v.as_u64()),
-                            ) {
-                                a.cmp(&b)
-                            } else {
-                                Ordering::Equal
-                            }
-                        });
-                    }
-                }
-
-                match r#type {
-                    RequestType::TextChat => {
-                        json.insert("created".to_string(), Value::Null);
-                        json.insert("id".to_string(), Value::Null);
-                        json.insert("model".to_string(), Value::Null);
-                    }
-                    RequestType::TextCompletion => {
-                        json.insert("created".to_string(), Value::Null);
-                        json.insert("id".to_string(), Value::Null);
-                        json.insert("model".to_string(), Value::Null);
-                    }
-                    RequestType::TextEdit => {
-                        json.insert("created".to_string(), Value::Null);
-                    }
-                    RequestType::TextEmbedding => {
-                        json.insert("model".to_string(), Value::Null);
-
-                        if let Some(Value::Array(objects)) = json.get_mut("data") {
-                            for (index, value) in objects.iter_mut().enumerate() {
-                                if let Value::Object(object) = value {
-                                    if !object.contains_key("index") {
-                                        object.insert(
-                                            "index".to_string(),
-                                            Value::Number(index.into()),
-                                        );
+                                choices.sort_by(|a, b| {
+                                    if let (Some(a), Some(b)) = (
+                                        a.get("index").and_then(|v| v.as_u64()),
+                                        b.get("index").and_then(|v| v.as_u64()),
+                                    ) {
+                                        a.cmp(&b)
+                                    } else {
+                                        Ordering::Equal
                                     }
+                                });
+                            }
+                        }
+
+                        match r#type {
+                            RequestType::TextChat => {
+                                json.insert(
+                                    "object".to_string(),
+                                    Value::String("chat.completion".to_string()),
+                                );
+                                json.insert("created".to_string(), Value::Null);
+                                json.insert("id".to_string(), Value::Null);
+                                json.insert("model".to_string(), Value::Null);
+                            }
+                            RequestType::TextCompletion => {
+                                json.insert(
+                                    "object".to_string(),
+                                    Value::String("text_completion".to_string()),
+                                );
+                                json.insert("created".to_string(), Value::Null);
+                                json.insert("id".to_string(), Value::Null);
+                                json.insert("model".to_string(), Value::Null);
+                            }
+                            RequestType::TextEdit => {
+                                json.insert(
+                                    "object".to_string(),
+                                    Value::String("edit".to_string()),
+                                );
+                                json.insert("created".to_string(), Value::Null);
+                            }
+                            RequestType::TextEmbedding => {
+                                json.insert(
+                                    "object".to_string(),
+                                    Value::String("list".to_string()),
+                                );
+                                json.insert("model".to_string(), Value::Null);
+
+                                if let Some(Value::Array(objects)) = json.get_mut("data") {
+                                    for (index, value) in objects.iter_mut().enumerate() {
+                                        if let Value::Object(object) = value {
+                                            if !object.contains_key("index") {
+                                                object.insert(
+                                                    "index".to_string(),
+                                                    Value::Number(index.into()),
+                                                );
+                                            }
+
+                                            object.insert(
+                                                "object".to_string(),
+                                                Value::String("embedding".to_string()),
+                                            );
+                                        }
+                                    }
+
+                                    objects.sort_by(|a, b| {
+                                        if let (Some(a), Some(b)) = (
+                                            a.get("index").and_then(|v| v.as_u64()),
+                                            b.get("index").and_then(|v| v.as_u64()),
+                                        ) {
+                                            a.cmp(&b)
+                                        } else {
+                                            Ordering::Equal
+                                        }
+                                    });
                                 }
                             }
-
-                            objects.sort_by(|a, b| {
-                                if let (Some(a), Some(b)) = (
-                                    a.get("index").and_then(|v| v.as_u64()),
-                                    b.get("index").and_then(|v| v.as_u64()),
-                                ) {
-                                    a.cmp(&b)
-                                } else {
-                                    Ordering::Equal
-                                }
-                            });
+                            RequestType::TextModeration => {
+                                json.insert("id".to_string(), Value::Null);
+                                json.insert("model".to_string(), Value::Null);
+                            }
+                            RequestType::ImageGeneration => {
+                                json.insert("created".to_string(), Value::Null);
+                            }
+                            RequestType::ImageEdit => {
+                                json.insert("created".to_string(), Value::Null);
+                            }
+                            RequestType::ImageVariation => {
+                                json.insert("created".to_string(), Value::Null);
+                            }
+                            RequestType::AudioTTS => {}
+                            RequestType::AudioTranscription => {}
+                            RequestType::AudioTranslation => {}
                         }
                     }
-                    RequestType::TextModeration => {
-                        json.insert("id".to_string(), Value::Null);
-                        json.insert("model".to_string(), Value::Null);
-                    }
-                    RequestType::ImageGeneration => {
-                        json.insert("created".to_string(), Value::Null);
-                    }
-                    RequestType::ImageEdit => {
-                        json.insert("created".to_string(), Value::Null);
-                    }
-                    RequestType::ImageVariation => {
-                        json.insert("created".to_string(), Value::Null);
-                    }
-                    RequestType::AudioTTS => {}
-                    RequestType::AudioTranscription => {}
-                    RequestType::AudioTranslation => {}
                 }
 
                 if let Some(value) = json.get_mut("model") {
@@ -422,7 +463,23 @@ impl ModelResponseData {
 
                 Self::Json(json)
             }
-            Self::Binary(binary) => Self::Binary(binary),
+            Self::Binary(binary) => match is_error {
+                true => match String::from_utf8(binary.clone()) {
+                    Ok(message) => Self::Json(
+                        json!({
+                            "type": "error",
+                            "error": {
+                                "message": message,
+                            }
+                        })
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                    ),
+                    Err(_) => Self::Binary(binary),
+                },
+                false => Self::Binary(binary),
+            },
         }
     }
 
@@ -519,10 +576,14 @@ impl From<ModelError> for ModelResponse {
             ModelError::BackendError => StatusCode::BAD_GATEWAY,
         };
 
+        let mut error_object = Map::new();
+        error_object.insert("type".to_string(), Value::String("error".to_string()));
+        error_object.insert("error".to_string(), Value::Object(json));
+
         ModelResponse {
             usage: TokenUsage::default(),
             status,
-            response: ModelResponseData::Json(json),
+            response: ModelResponseData::Json(error_object),
         }
     }
 }
@@ -652,12 +713,13 @@ impl ModelBackend {
                     )
                     .await;
 
-                    if response.status.is_success() {
-                        response.response =
-                            response
-                                .response
-                                .into_hybrid_api(label, request_type, tag, model);
-                    }
+                    response.response = response.response.into_hybrid_api(
+                        label,
+                        request_type,
+                        tag,
+                        model,
+                        !response.status.is_success(),
+                    );
 
                     response
                 }

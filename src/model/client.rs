@@ -100,7 +100,7 @@ impl ModelResponse {
                 }
             }
             Err(error) => {
-                if binary {
+                if binary || status.is_client_error() {
                     let response = ModelResponseData::Binary(body.to_vec());
 
                     ModelResponse {
