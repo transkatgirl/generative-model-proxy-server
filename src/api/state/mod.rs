@@ -1,11 +1,10 @@
-use std::path::{Path, PathBuf};
-
 use serde::{de::DeserializeOwned, Serialize};
 use sled::{
     transaction::{ConflictableTransactionError, TransactionError, Transactional},
-    Batch, Db, Mode,
+    Batch, Db,
 };
-// sled should probably be replaced with a proper database at some point. will need to write manual migrations when that time comes.
+
+mod migration;
 
 pub(super) trait RelatedToItem {
     type Key: Serialize;
@@ -53,23 +52,7 @@ pub(super) enum DatabaseFunctionResult<T, E> {
     BackendError,
 }
 
-// TODO: Implement a system for handling database migrations
-//const PAST_DATABASE_STRING: &str = "version-0";
-//const FUTURE_DATABASE_STRING: &str = "version-2"; // ? How will we handle version rollbacks?
-const CURRENT_DATABASE_STRING: &str = "version-1";
-
 impl Database {
-    pub fn open(path: &Path) -> Result<Self, sled::Error> {
-        let database_location = path.join(PathBuf::from(CURRENT_DATABASE_STRING));
-
-        Ok(Database {
-            database: sled::Config::default()
-                .path(database_location)
-                .mode(Mode::HighThroughput)
-                .open()?,
-        })
-    }
-
     pub async fn close(self) -> Result<(), sled::Error> {
         self.database.flush_async().await?;
 
