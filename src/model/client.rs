@@ -10,6 +10,7 @@ use serde_json::{value::Value, Map};
 
 use super::{
     ModelError, ModelFormItem, ModelRequest, ModelRequestData, ModelResponse, ModelResponseData,
+    TokenUsage,
 };
 
 impl ModelRequest {
@@ -95,7 +96,7 @@ impl ModelResponse {
 
                 ModelResponse {
                     status,
-                    usage: response.get_usage(status.is_client_error()),
+                    usage: TokenUsage::default(),
                     response,
                 }
             }
@@ -105,7 +106,7 @@ impl ModelResponse {
 
                     ModelResponse {
                         status,
-                        usage: response.get_usage(status.is_client_error()),
+                        usage: TokenUsage::default(),
                         response,
                     }
                 } else {

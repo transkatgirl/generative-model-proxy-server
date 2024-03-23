@@ -285,12 +285,12 @@ impl ModelResponseData {
         tag: Uuid,
         fingerprint: Uuid,
         is_error: bool,
-    ) -> Self {
+    ) -> (Self, TokenUsage) {
         match self {
             Self::Json(mut json) => {
                 match is_error {
                     true => {
-                        if json.contains_key("error") {
+                        if let Some(Value::Object(_)) = json.get("error") {
                             json.insert("type".to_string(), Value::String("error".to_string()));
                         }
                     }
@@ -367,6 +367,10 @@ impl ModelResponseData {
                                     "object".to_string(),
                                     Value::String("chat.completion".to_string()),
                                 );
+                                json.insert(
+                                    "type".to_string(),
+                                    Value::String("message".to_string()),
+                                );
                                 json.insert("created".to_string(), Value::Null);
                                 json.insert("id".to_string(), Value::Null);
                                 json.insert("model".to_string(), Value::Null);
@@ -375,6 +379,10 @@ impl ModelResponseData {
                                 json.insert(
                                     "object".to_string(),
                                     Value::String("text_completion".to_string()),
+                                );
+                                json.insert(
+                                    "type".to_string(),
+                                    Value::String("completion".to_string()),
                                 );
                                 json.insert("created".to_string(), Value::Null);
                                 json.insert("id".to_string(), Value::Null);
@@ -461,59 +469,102 @@ impl ModelResponseData {
                     );
                 }
 
-                Self::Json(json)
+                let usage = if let Some(Value::Object(object)) = json.get_mut("usage") {
+                    let input = object
+                        .get("input_tokens")
+                        .or(object.get("prompt_tokens"))
+                        .and_then(|num| num.as_u64());
+                    let output = object
+                        .get("output_tokens")
+                        .or(object.get("completion_tokens"))
+                        .and_then(|num| num.as_u64());
+                    let total = object
+                        .get("total_tokens")
+                        .and_then(|num| num.as_u64())
+                        .unwrap_or((input.unwrap_or_default() + output.unwrap_or_default()).max(1));
+
+                    if !object.contains_key("total_tokens") && (total > 1) {
+                        object.insert("total_tokens".to_string(), Value::Number(total.into()));
+                    }
+
+                    if let Some(input) = input {
+                        object.insert("input_tokens".to_string(), Value::Number(input.into()));
+
+                        if !object.contains_key("prompt_tokens")
+                            && (r#type == RequestType::TextChat
+                                || r#type == RequestType::TextCompletion
+                                || r#type == RequestType::TextEdit
+                                || r#type == RequestType::TextEmbedding
+                                || r#type == RequestType::TextModeration
+                                || r#type == RequestType::ImageGeneration
+                                || r#type == RequestType::ImageEdit
+                                || r#type == RequestType::ImageVariation)
+                        {
+                            object.insert("prompt_tokens".to_string(), Value::Number(input.into()));
+                        }
+                    }
+
+                    if let Some(output) = output {
+                        object.insert("output_tokens".to_string(), Value::Number(output.into()));
+
+                        if !object.contains_key("completion_tokens")
+                            && (r#type == RequestType::TextChat
+                                || r#type == RequestType::TextCompletion
+                                || r#type == RequestType::TextEdit)
+                        {
+                            object.insert(
+                                "completion_tokens".to_string(),
+                                Value::Number(output.into()),
+                            );
+                        }
+                    }
+
+                    TokenUsage {
+                        total,
+                        input,
+                        output,
+                    }
+                } else {
+                    TokenUsage {
+                        total: match is_error {
+                            true => 0,
+                            false => 1,
+                        },
+                        input: None,
+                        output: None,
+                    }
+                };
+
+                (Self::Json(json), usage)
             }
             Self::Binary(binary) => match is_error {
-                true => match String::from_utf8(binary.clone()) {
-                    Ok(message) => Self::Json(
-                        json!({
-                            "type": "error",
-                            "error": {
-                                "message": message,
-                            }
-                        })
-                        .as_object()
-                        .unwrap()
-                        .clone(),
-                    ),
-                    Err(_) => Self::Binary(binary),
-                },
-                false => Self::Binary(binary),
+                true => (
+                    match String::from_utf8(binary.clone()) {
+                        Ok(message) => Self::Json(
+                            json!({
+                                "type": "error",
+                                "error": {
+                                    "message": message,
+                                }
+                            })
+                            .as_object()
+                            .unwrap()
+                            .clone(),
+                        ),
+                        Err(_) => Self::Binary(binary),
+                    },
+                    TokenUsage::default(),
+                ),
+                false => (
+                    Self::Binary(binary),
+                    TokenUsage {
+                        total: 1,
+                        input: None,
+                        output: None,
+                    },
+                ),
             },
         }
-    }
-
-    #[tracing::instrument(level = "trace", ret)]
-    fn get_usage(&self, is_error: bool) -> TokenUsage {
-        match self {
-            Self::Json(json) => json.get("usage").and_then(|usage| {
-                let input_tokens = usage.get("prompt_tokens").and_then(|num| num.as_u64());
-                let output_tokens = usage.get("completion_tokens").and_then(|num| num.as_u64());
-
-                usage
-                    .get("total_tokens")
-                    .and_then(|num| num.as_u64())
-                    .or(input_tokens
-                        .and_then(|input_tokens| {
-                            output_tokens.map(|output_tokens| input_tokens + output_tokens)
-                        })
-                        .or(output_tokens))
-                    .map(|total| TokenUsage {
-                        total,
-                        input: input_tokens,
-                        output: output_tokens,
-                    })
-            }),
-            Self::Binary(_binary) => None,
-        }
-        .unwrap_or(TokenUsage {
-            total: match is_error {
-                true => 0,
-                false => 1,
-            },
-            input: None,
-            output: None,
-        })
     }
 }
 
@@ -717,7 +768,7 @@ impl ModelBackend {
                     )
                     .await;
 
-                    response.response = response.response.into_hybrid_api(
+                    (response.response, response.usage) = response.response.into_hybrid_api(
                         label,
                         request_type,
                         tag,
