@@ -557,10 +557,14 @@ impl From<ModelError> for ModelResponse {
             ModelError::InternalError => Value::Null,
             ModelError::BackendError => Value::Null,
         };
+        let error_param = match value {
+            ModelError::UnknownModel => Value::String("model".to_string()),
+            _ => Value::Null,
+        };
 
         json.insert("message".to_string(), Value::String(message.to_string()));
         json.insert("type".to_string(), Value::String(error_type.to_string()));
-        json.insert("param".to_string(), Value::Null);
+        json.insert("param".to_string(), error_param);
         json.insert("code".to_string(), error_code);
 
         let status = match value {
