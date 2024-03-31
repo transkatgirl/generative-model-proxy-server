@@ -1,5 +1,4 @@
 use std::{
-    cmp::Ordering,
     collections::HashMap,
     fmt::Debug,
     time::{SystemTime, UNIX_EPOCH},
@@ -16,9 +15,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, value::Value, Map};
 use uuid::Uuid;
 
+use self::tokenizer::{TokenizerMessage, TokenizerSettings};
+
 mod client;
 mod interface;
 mod tokenizer;
+mod utility;
 
 #[tracing::instrument(level = "trace", ret)]
 fn get_prompt_count(prompt: &Value) -> usize {
@@ -39,6 +41,11 @@ fn get_prompt_count(prompt: &Value) -> usize {
     }
 }
 
+#[tracing::instrument(level = "trace", ret)]
+fn get_token_count(map: &Map<String, Value>, tokenizer: &TokenizerSettings) -> Option<usize> {
+    None // ! FIXME
+}
+
 #[derive(Debug)]
 pub(super) struct ModelRequest {
     pub(super) user: Option<Uuid>,
@@ -55,38 +62,128 @@ enum ModelRequestData {
 
 impl ModelRequestData {
     #[tracing::instrument(level = "trace", ret)]
-    fn into_openai(self, model: String, user: Option<Uuid>) -> Self {
+    fn convert_type(
+        &mut self,
+        input_type: RequestType,
+        desired_type: RequestType,
+        model: String,
+        user: Option<Uuid>,
+    ) {
         let user = user.map(|user| {
             CROCKFORD.encode(digest::digest(&digest::SHA256, user.as_bytes()).as_ref())
         });
 
         match self {
-            Self::Json(mut json) => {
+            Self::Json(json) => {
+                // TODO: Convert OpenAI requests with "N" values into multiple requests
+
+                // TODO
+                match desired_type {
+                    RequestType::OpenAI_TextChat => match input_type {
+                        RequestType::Anthropic_TextChat => {}
+                        RequestType::OpenAI_TextCompletion => {
+                            utility::update_item(json, "prompt", "messages", |value| match value {
+                                Value::String(prompt) => Some(json!([{
+                                    "role": "user",
+                                    "content": prompt,
+                                }])),
+                                Value::Array(prompts) => {
+                                    let prompts = prompts
+                                        .iter()
+                                        .filter_map(|prompt| {
+                                            prompt.as_str().map(|text| {
+                                                json!({
+                                                    "role": "user",
+                                                    "content": text,
+                                                })
+                                            })
+                                        })
+                                        .collect();
+
+                                    Some(Value::Array(prompts))
+                                }
+                                _ => None,
+                            });
+
+                            json.remove("best_of");
+                        }
+                        RequestType::Anthropic_TextCompletion => {}
+                        _ => {}
+                    },
+                    RequestType::Anthropic_TextChat => match input_type {
+                        RequestType::OpenAI_TextChat => {}
+                        RequestType::OpenAI_TextCompletion => {}
+                        RequestType::Anthropic_TextCompletion => {}
+                        _ => {}
+                    },
+                    RequestType::OpenAI_TextCompletion => match input_type {
+                        RequestType::OpenAI_TextChat => {}
+                        RequestType::Anthropic_TextChat => {}
+                        RequestType::Anthropic_TextCompletion => {}
+                        _ => {}
+                    },
+                    RequestType::Anthropic_TextCompletion => match input_type {
+                        RequestType::OpenAI_TextChat => {}
+                        RequestType::Anthropic_TextChat => {}
+                        RequestType::OpenAI_TextCompletion => {}
+                        _ => {}
+                    },
+                    _ => {}
+                }
+
+                if desired_type == RequestType::Anthropic_TextChat
+                    || desired_type == RequestType::Anthropic_TextCompletion
+                {
+                    match &user {
+                        Some(user) => {
+                            json.insert(
+                                "metadata".to_string(),
+                                json!({
+                                    "user_id": user,
+                                }),
+                            );
+                        }
+                        None => {
+                            json.remove("metadata");
+                        }
+                    }
+                }
+
+                if desired_type == RequestType::OpenAI_TextChat
+                    || desired_type == RequestType::OpenAI_TextCompletion
+                    || desired_type == RequestType::OpenAI_TextEmbedding
+                    || desired_type == RequestType::OpenAI_ImageGeneration
+                    || desired_type == RequestType::OpenAI_ImageEdit
+                    || desired_type == RequestType::OpenAI_ImageVariation
+                {
+                    match &user {
+                        Some(user) => {
+                            json.insert("user".to_string(), json!(user));
+                        }
+                        None => {
+                            json.remove("user");
+                        }
+                    }
+                }
+
                 json.remove("stream");
                 json.insert("model".to_string(), Value::String(model));
-                match user {
-                    Some(user) => {
-                        json.insert("user".to_string(), Value::String(user));
-                    }
-                    None => {
-                        json.remove("user");
-                    }
-                }
-
-                Self::Json(json)
             }
-            Self::Form(mut form) => {
-                form.insert("model".to_string(), ModelFormItem::Text(model));
-                match user {
-                    Some(user) => {
-                        form.insert("user".to_string(), ModelFormItem::Text(user));
-                    }
-                    None => {
-                        form.remove("user");
+            Self::Form(form) => {
+                if desired_type == RequestType::OpenAI_ImageEdit
+                    || desired_type == RequestType::OpenAI_ImageVariation
+                {
+                    match user {
+                        Some(user) => {
+                            form.insert("user".to_string(), ModelFormItem::Text(user));
+                        }
+                        None => {
+                            form.remove("user");
+                        }
                     }
                 }
 
-                Self::Form(form)
+                form.insert("model".to_string(), ModelFormItem::Text(model));
             }
         }
     }
@@ -157,25 +254,25 @@ impl ModelRequestData {
     #[tracing::instrument(level = "trace", ret)]
     fn get_count(&self) -> usize {
         match &self {
-            Self::Json(json) => {
-                json.get("best_of")
+            Self::Json(json) => (json
+                .get("best_of")
+                .and_then(|value| {
+                    value
+                        .as_u64()
+                        .map(|int| int.clamp(1, usize::MAX as u64) as usize)
+                })
+                .unwrap_or(1)
+                * json
+                    .get("n")
                     .and_then(|value| {
                         value
                             .as_u64()
                             .map(|int| int.clamp(1, usize::MAX as u64) as usize)
                     })
                     .unwrap_or(1)
-                    * json
-                        .get("n")
-                        .and_then(|value| {
-                            value
-                                .as_u64()
-                                .map(|int| int.clamp(1, usize::MAX as u64) as usize)
-                        })
-                        .unwrap_or(1)
-                    * json.get("prompt").map(get_prompt_count).unwrap_or(1)
-                    * json.get("input").map(get_prompt_count).unwrap_or(1)
-            }
+                * json.get("prompt").map(get_prompt_count).unwrap_or(1)
+                * json.get("input").map(get_prompt_count).unwrap_or(1))
+            .max(1),
             Self::Form(form) => form
                 .get("n")
                 .and_then(|value| {
@@ -186,6 +283,7 @@ impl ModelRequestData {
                     }
                 })
                 .and_then(|string| string.parse().ok())
+                .map(|value: usize| value.max(1))
                 .unwrap_or(1),
         }
     }
@@ -215,18 +313,113 @@ struct ModelFormFile {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[allow(non_camel_case_types)]
 pub(super) enum RequestType {
-    TextChat,
-    TextCompletion,
-    TextEdit,
-    TextEmbedding,
-    TextModeration,
-    ImageGeneration,
-    ImageEdit,
-    ImageVariation,
-    AudioTTS,
-    AudioTranscription,
-    AudioTranslation,
+    OpenAI_TextChat,
+    Anthropic_TextChat,
+    OpenAI_TextCompletion,
+    Anthropic_TextCompletion,
+    OpenAI_TextEdit,
+    OpenAI_TextEmbedding,
+    OpenAI_TextModeration,
+    OpenAI_ImageGeneration,
+    OpenAI_ImageEdit,
+    OpenAI_ImageVariation,
+    OpenAI_AudioTTS,
+    OpenAI_AudioTranscription,
+    OpenAI_AudioTranslation,
+}
+
+impl RequestType {
+    fn is_text_chat(&self) -> bool {
+        matches!(self, Self::OpenAI_TextChat | Self::Anthropic_TextChat)
+    }
+
+    fn is_text_completion(&self) -> bool {
+        matches!(
+            self,
+            Self::OpenAI_TextCompletion | Self::Anthropic_TextCompletion
+        )
+    }
+
+    fn is_text_based(&self) -> bool {
+        matches!(
+            self,
+            Self::OpenAI_TextChat
+                | Self::Anthropic_TextChat
+                | Self::OpenAI_TextCompletion
+                | Self::Anthropic_TextCompletion
+                | Self::OpenAI_TextEdit
+                | Self::OpenAI_TextEmbedding
+                | Self::OpenAI_TextModeration
+        )
+    }
+
+    fn is_image_based(&self) -> bool {
+        matches!(
+            self,
+            Self::OpenAI_ImageGeneration | Self::OpenAI_ImageEdit | Self::OpenAI_ImageVariation
+        )
+    }
+
+    fn is_audio_based(&self) -> bool {
+        matches!(
+            self,
+            Self::OpenAI_AudioTTS | Self::OpenAI_AudioTranscription | Self::OpenAI_AudioTranslation
+        )
+    }
+
+    fn is_openai(&self) -> bool {
+        matches!(
+            self,
+            Self::OpenAI_TextChat
+                | Self::OpenAI_TextCompletion
+                | Self::OpenAI_TextEdit
+                | Self::OpenAI_TextEmbedding
+                | Self::OpenAI_TextModeration
+                | Self::OpenAI_ImageGeneration
+                | Self::OpenAI_ImageEdit
+                | Self::OpenAI_ImageVariation
+                | Self::OpenAI_AudioTTS
+                | Self::OpenAI_AudioTranscription
+                | Self::OpenAI_AudioTranslation
+        )
+    }
+
+    fn as_openai(self) -> Option<Self> {
+        match self {
+            Self::OpenAI_TextChat | Self::Anthropic_TextChat => Some(Self::OpenAI_TextChat),
+            Self::OpenAI_TextCompletion | Self::Anthropic_TextCompletion => {
+                Some(Self::OpenAI_TextCompletion)
+            }
+            Self::OpenAI_TextEdit => Some(Self::OpenAI_TextEdit),
+            Self::OpenAI_TextEmbedding => Some(Self::OpenAI_TextEmbedding),
+            Self::OpenAI_TextModeration => Some(Self::OpenAI_TextModeration),
+            Self::OpenAI_ImageGeneration => Some(Self::OpenAI_ImageGeneration),
+            Self::OpenAI_ImageEdit => Some(Self::OpenAI_ImageEdit),
+            Self::OpenAI_ImageVariation => Some(Self::OpenAI_ImageVariation),
+            Self::OpenAI_AudioTTS => Some(Self::OpenAI_AudioTTS),
+            Self::OpenAI_AudioTranscription => Some(Self::OpenAI_AudioTranscription),
+            Self::OpenAI_AudioTranslation => Some(Self::OpenAI_AudioTranslation),
+        }
+    }
+
+    fn is_anthropic(&self) -> bool {
+        matches!(
+            self,
+            Self::Anthropic_TextChat | Self::Anthropic_TextCompletion
+        )
+    }
+
+    fn as_anthropic(self) -> Option<Self> {
+        match self {
+            Self::Anthropic_TextChat | Self::OpenAI_TextChat => Some(Self::Anthropic_TextChat),
+            Self::Anthropic_TextCompletion | Self::OpenAI_TextCompletion => {
+                Some(Self::Anthropic_TextCompletion)
+            }
+            _ => None,
+        }
+    }
 }
 
 impl TryFrom<&Uri> for RequestType {
@@ -234,17 +427,19 @@ impl TryFrom<&Uri> for RequestType {
 
     fn try_from(value: &Uri) -> Result<Self, Self::Error> {
         match value.path() {
-            "/v1/chat/completions" => Ok(RequestType::TextChat),
-            "/v1/completions" => Ok(RequestType::TextCompletion),
-            "/v1/edits" => Ok(RequestType::TextEdit),
-            "/v1/embeddings" => Ok(RequestType::TextEmbedding),
-            "/v1/moderations" => Ok(RequestType::TextModeration),
-            "/v1/images/generations" => Ok(RequestType::ImageGeneration),
-            "/v1/images/edits" => Ok(RequestType::ImageEdit),
-            "/v1/images/variations" => Ok(RequestType::ImageVariation),
-            "/v1/audio/speech" => Ok(RequestType::AudioTTS),
-            "/v1/audio/transcriptions" => Ok(RequestType::AudioTranscription),
-            "/v1/audio/translations" => Ok(RequestType::AudioTranslation),
+            "/v1/chat/completions" => Ok(RequestType::OpenAI_TextChat),
+            "/v1/completions" => Ok(RequestType::OpenAI_TextCompletion),
+            "/v1/edits" => Ok(RequestType::OpenAI_TextEdit),
+            "/v1/embeddings" => Ok(RequestType::OpenAI_TextEmbedding),
+            "/v1/moderations" => Ok(RequestType::OpenAI_TextModeration),
+            "/v1/images/generations" => Ok(RequestType::OpenAI_ImageGeneration),
+            "/v1/images/edits" => Ok(RequestType::OpenAI_ImageEdit),
+            "/v1/images/variations" => Ok(RequestType::OpenAI_ImageVariation),
+            "/v1/audio/speech" => Ok(RequestType::OpenAI_AudioTTS),
+            "/v1/audio/transcriptions" => Ok(RequestType::OpenAI_AudioTranscription),
+            "/v1/audio/translations" => Ok(RequestType::OpenAI_AudioTranslation),
+            "/v1/messages" => Ok(RequestType::Anthropic_TextChat),
+            "/v1/complete" => Ok(RequestType::Anthropic_TextCompletion),
             _ => Err("Invalid URI"),
         }
     }
@@ -255,12 +450,21 @@ impl ModelRequest {
         self.request.get_model()
     }
 
-    pub(super) fn get_count(&self) -> usize {
-        self.request.get_count()
-    }
+    pub(super) fn get_token_estimate(&self, model: &ModelConfig) -> (bool, u64) {
+        let count = self.request.get_count();
 
-    pub(super) fn get_max_tokens(&self) -> Option<u64> {
-        self.request.get_max_tokens()
+        tracing::debug!(histogram.request.count = count);
+
+        let max_tokens = self.request.get_max_tokens();
+
+        if let Some(max_tokens) = max_tokens {
+            tracing::debug!(histogram.request.max_tokens = max_tokens, unit = "tokens");
+        }
+
+        let max_tokens = max_tokens.unwrap_or(model.max_tokens);
+        let is_oversized = max_tokens > model.max_tokens;
+
+        (is_oversized, max_tokens * count as u64)
     }
 }
 
@@ -277,227 +481,719 @@ enum ModelResponseData {
     Binary(Vec<u8>),
 }
 
-/*
-
-TODO: Need to add token counting as a fallback when usage information is not available
-
-*/
-
 impl ModelResponseData {
     #[tracing::instrument(level = "trace", ret)]
-    fn into_hybrid_api(
-        self,
-        model: Option<String>,
-        r#type: RequestType,
+    fn convert_type(
+        &mut self,
+        request: &ModelRequest,
+        tokenizer: &Option<TokenizerSettings>,
         tag: Uuid,
-        fingerprint: Uuid,
+        fingerprint: Option<Uuid>,
         is_error: bool,
-    ) -> (Self, TokenUsage) {
+    ) -> TokenUsage {
+        let desired_type = request.r#type;
+        let model = request.get_model().map(|value| value.to_string());
+
         match self {
-            Self::Json(mut json) => {
-                match is_error {
-                    true => {
-                        if let Some(Value::Object(_)) = json.get("error") {
-                            json.insert("type".to_string(), Value::String("error".to_string()));
-                        }
+            Self::Json(json) => {
+                if is_error {
+                    if desired_type.is_anthropic() {
+                        json.insert("type".to_string(), Value::String("error".to_string()));
                     }
-                    false => {
-                        if (r#type == RequestType::TextChat
-                            || r#type == RequestType::TextCompletion)
-                            && !json.contains_key("system_fingerprint")
-                        {
-                            json.insert(
-                                "system_fingerprint".to_string(),
-                                Value::String(
-                                    CROCKFORD.encode(
-                                        digest::digest(&digest::SHA256, fingerprint.as_bytes())
-                                            .as_ref(),
-                                    ),
-                                ),
-                            );
-                        }
+                } else {
+                    let response_type = match json
+                        .get("object")
+                        .or(json.get("type"))
+                        .and_then(|value| value.as_str())
+                    {
+                        Some("chat.completion") => Some(RequestType::OpenAI_TextChat),
+                        Some("message") => Some(RequestType::Anthropic_TextChat),
+                        Some("text_completion") => Some(RequestType::OpenAI_TextCompletion),
+                        Some("completion") => Some(RequestType::Anthropic_TextCompletion),
+                        Some("edit") => Some(RequestType::OpenAI_TextEdit),
+                        Some("list") => Some(RequestType::OpenAI_TextEmbedding),
+                        Some(_) => None,
+                        _ => None,
+                    };
 
-                        if r#type == RequestType::TextChat
-                            || r#type == RequestType::TextCompletion
-                            || r#type == RequestType::TextEdit
-                        {
-                            let mut completion = None;
-                            let mut stop_reason = None;
-
-                            if let Some(Value::Array(choices)) = json.get_mut("choices") {
-                                for (index, value) in choices.iter_mut().enumerate() {
-                                    if let Value::Object(choice) = value {
-                                        if !choice.contains_key("index") {
-                                            choice.insert(
-                                                "index".to_string(),
-                                                Value::Number(index.into()),
+                    // TODO: Split these off as separate functions
+                    match desired_type {
+                        RequestType::OpenAI_TextChat => {
+                            let is_supported_conversion = match response_type {
+                                Some(RequestType::OpenAI_TextChat) => true,
+                                Some(RequestType::OpenAI_TextCompletion) => {
+                                    utility::update_object_array_in_place(
+                                        json.get_mut("choices"),
+                                        |object| {
+                                            utility::update_item(
+                                                object,
+                                                "text",
+                                                "message",
+                                                |value| {
+                                                    value.as_str().map(|text| {
+                                                        json!({
+                                                            "role": "assistant",
+                                                            "content": text,
+                                                        })
+                                                    })
+                                                },
                                             );
-                                        }
+                                        },
+                                    );
 
-                                        if !choice.contains_key("logprobs") {
-                                            choice.insert("logprobs".to_string(), Value::Null);
-                                        }
+                                    true
+                                }
+                                Some(RequestType::Anthropic_TextChat) => {
+                                    let finish_reason = json
+                                        .get("stop_reason")
+                                        .and_then(|value| value.as_str())
+                                        .map(|stop_reason| {
+                                            match stop_reason {
+                                                "end_turn" | "stop_sequence" => "stop",
+                                                "max_tokens" => "length",
+                                                _ => stop_reason,
+                                            }
+                                            .to_string()
+                                        });
+                                    if finish_reason.is_some() {
+                                        json.remove("stop_reason");
+                                        json.remove("stop_sequence");
+                                    }
 
-                                        if (r#type == RequestType::TextCompletion
-                                            || r#type == RequestType::TextEdit)
-                                            && !choice.contains_key("text")
-                                        {
-                                            if let Some(Value::Object(message)) =
-                                                choice.get("message")
+                                    let role = json
+                                        .get("role")
+                                        .and_then(|value| value.as_str())
+                                        .map(|text| text.to_string());
+                                    if role.is_some() {
+                                        json.remove("role");
+                                    }
+
+                                    utility::update_object_array_skipless(
+                                        json,
+                                        "content",
+                                        "choices",
+                                        |object| {
+                                            if object.get("type").and_then(|value| value.as_str())
+                                                == Some("text")
                                             {
-                                                if let Some(Value::String(content)) =
-                                                    message.get("content")
-                                                {
-                                                    choice.insert(
-                                                        "text".to_string(),
-                                                        Value::String(content.clone()),
-                                                    );
+                                                object.remove("type");
+
+                                                utility::update_item(
+                                                    object,
+                                                    "text",
+                                                    "message",
+                                                    |value| {
+                                                        value.as_str().map(|text| {
+                                                            json!({
+                                                                "role": role,
+                                                                "content": text,
+                                                            })
+                                                        })
+                                                    },
+                                                );
+
+                                                if let Some(finish_reason) = &finish_reason {
+                                                    utility::insert_item(
+                                                        object,
+                                                        "finish_reason",
+                                                        json!(finish_reason),
+                                                    )
                                                 }
                                             }
-                                        }
-                                    }
+                                        },
+                                    );
+
+                                    json.remove("type");
+
+                                    true
                                 }
-
-                                choices.sort_by(|a, b| {
-                                    if let (Some(a), Some(b)) = (
-                                        a.get("index").and_then(|v| v.as_u64()),
-                                        b.get("index").and_then(|v| v.as_u64()),
-                                    ) {
-                                        a.cmp(&b)
-                                    } else {
-                                        Ordering::Equal
+                                Some(RequestType::Anthropic_TextCompletion) => {
+                                    let finish_reason = json
+                                        .get("stop_reason")
+                                        .and_then(|value| value.as_str())
+                                        .map(|stop_reason| {
+                                            match stop_reason {
+                                                "end_turn" | "stop_sequence" => "stop",
+                                                "max_tokens" => "length",
+                                                _ => stop_reason,
+                                            }
+                                            .to_string()
+                                        });
+                                    if finish_reason.is_some() {
+                                        json.remove("stop_reason");
                                     }
-                                });
 
-                                if choices.len() == 1 {
-                                    if let Some(Value::Object(choice)) = choices.first() {
-                                        if r#type == RequestType::TextCompletion {
-                                            completion = choice.get("text").cloned();
-                                            stop_reason = choice
-                                                .get("finish_reason")
-                                                .and_then(|value| value.as_str())
-                                                .map(|reason| {
-                                                    match reason {
-                                                        "stop" => "stop_sequence",
-                                                        "length" => "max_tokens",
-                                                        _ => reason,
-                                                    }
-                                                    .to_string()
-                                                })
-                                                .map(Value::String);
-                                        } else {
-                                            stop_reason = choice
-                                                .get("finish_reason")
-                                                .and_then(|value| value.as_str())
-                                                .map(|reason| {
-                                                    match reason {
-                                                        "stop" => "end_turn",
-                                                        "length" => "max_tokens",
-                                                        _ => reason,
-                                                    }
-                                                    .to_string()
-                                                })
-                                                .map(Value::String);
-                                        }
-                                    }
+                                    utility::update_item(json, "completion", "choices", |value| {
+                                        value.as_str().map(|text| {
+                                            if let Some(finish_reason) = &finish_reason {
+                                                json!([{
+                                                    "message": {
+                                                        "role": "assistant",
+                                                        "content": text,
+                                                    },
+                                                    "finish_reason": finish_reason,
+                                                }])
+                                            } else {
+                                                json!([{
+                                                    "message": {
+                                                        "role": "assistant",
+                                                        "content": text,
+                                                    },
+                                                }])
+                                            }
+                                        })
+                                    });
+
+                                    json.remove("type");
+
+                                    true
                                 }
-                            }
+                                _ => false,
+                            };
 
-                            if let Some(completion) = completion {
-                                json.insert("completion".to_string(), completion);
-                            }
+                            if is_supported_conversion {
+                                utility::update_object_array_in_place(
+                                    json.get_mut("choices"),
+                                    |object| {
+                                        utility::insert_item(object, "logprobs", Value::Null);
+                                        utility::insert_item(
+                                            object,
+                                            "finish_reason",
+                                            json!("stop"),
+                                        );
+                                    },
+                                );
 
-                            if let Some(stop_reason) = stop_reason {
-                                json.insert("stop_reason".to_string(), stop_reason);
-                            }
-                        }
-
-                        match r#type {
-                            RequestType::TextChat => {
+                                json.insert("created".to_string(), Value::Null);
+                                json.insert("id".to_string(), Value::Null);
+                                json.insert("model".to_string(), Value::Null);
+                                if let Some(fingerprint) = fingerprint {
+                                    utility::insert_item(
+                                        json,
+                                        "system_fingerprint",
+                                        Value::String(format!("{}", fingerprint)),
+                                    );
+                                }
                                 json.insert(
                                     "object".to_string(),
                                     Value::String("chat.completion".to_string()),
                                 );
+                            }
+                        }
+                        RequestType::Anthropic_TextChat => {
+                            let is_supported_conversion = match response_type {
+                                Some(RequestType::OpenAI_TextChat) => {
+                                    json.remove("object");
+                                    json.remove("created");
+                                    json.remove("system_fingerprint");
+
+                                    let mut stop_reason = None;
+
+                                    utility::update_object_array_skipless(
+                                        json,
+                                        "choices",
+                                        "content",
+                                        |object| {
+                                            if let Some(Value::String(finish_reason)) =
+                                                object.get("finish_reason")
+                                            {
+                                                stop_reason = match finish_reason.as_ref() {
+                                                    "length" => Some("max_tokens".to_string()),
+                                                    "stop" | "tool_calls" | "function_call" => None,
+                                                    _ => Some(finish_reason.to_string()),
+                                                };
+                                                object.remove("finish_reason");
+                                            }
+
+                                            utility::update_item(
+                                                object,
+                                                "message",
+                                                "text",
+                                                |value| {
+                                                    value
+                                                        .as_object()
+                                                        .filter(|object| {
+                                                            object
+                                                                .get("role")
+                                                                .and_then(|value| value.as_str())
+                                                                == Some("assistant")
+                                                        })
+                                                        .and_then(|object| {
+                                                            object
+                                                                .get("content")
+                                                                .and_then(|value| value.as_str())
+                                                                .map(|text| {
+                                                                    json!({
+                                                                        "type": "text",
+                                                                        "text": text,
+                                                                    })
+                                                                })
+                                                        })
+                                                },
+                                            );
+
+                                            if object.contains_key("text") {
+                                                object.insert("type".to_string(), json!("text"));
+                                            }
+
+                                            object.remove("logprobs");
+                                        },
+                                    );
+
+                                    if let Some(stop_reason) = stop_reason {
+                                        utility::insert_item(
+                                            json,
+                                            "stop_reason",
+                                            json!(stop_reason),
+                                        )
+                                    }
+
+                                    true
+                                }
+                                Some(RequestType::OpenAI_TextCompletion) => {
+                                    json.remove("object");
+                                    json.remove("created");
+                                    json.remove("system_fingerprint");
+
+                                    let mut stop_reason = None;
+
+                                    utility::update_object_array_skipless(
+                                        json,
+                                        "choices",
+                                        "content",
+                                        |object| {
+                                            if let Some(Value::String(finish_reason)) =
+                                                object.get("finish_reason")
+                                            {
+                                                stop_reason = match finish_reason.as_ref() {
+                                                    "length" => Some("max_tokens".to_string()),
+                                                    "stop" | "tool_calls" | "function_call" => None,
+                                                    _ => Some(finish_reason.to_string()),
+                                                };
+                                                object.remove("finish_reason");
+                                            }
+
+                                            if object.contains_key("text") {
+                                                object.insert("type".to_string(), json!("text"));
+                                            }
+
+                                            object.remove("logprobs");
+                                        },
+                                    );
+
+                                    if let Some(stop_reason) = stop_reason {
+                                        utility::insert_item(
+                                            json,
+                                            "stop_reason",
+                                            json!(stop_reason),
+                                        )
+                                    }
+
+                                    true
+                                }
+                                Some(RequestType::Anthropic_TextChat) => true,
+                                Some(RequestType::Anthropic_TextCompletion) => {
+                                    utility::update_item(json, "completion", "content", |value| {
+                                        value.as_str().map(|text| {
+                                            json!([{
+                                                "type": "text",
+                                                "text": text,
+                                            }])
+                                        })
+                                    });
+
+                                    utility::update_item_in_place(
+                                        json.get_mut("stop_reason"),
+                                        |value| {
+                                            if let Value::String(text) = value {
+                                                *text = match text.as_ref() {
+                                                    "stop_sequence" => "end_turn",
+                                                    "max_tokens" => "max_tokens",
+                                                    _ => text,
+                                                }
+                                                .to_string()
+                                            }
+                                        },
+                                    );
+
+                                    true
+                                }
+                                _ => false,
+                            };
+
+                            if is_supported_conversion {
+                                utility::insert_item(json, "stop_reason", json!("end_turn"));
+                                utility::insert_item(json, "role", json!("assistant"));
+                                json.insert("id".to_string(), Value::Null);
+                                json.insert("model".to_string(), Value::Null);
                                 json.insert(
                                     "type".to_string(),
                                     Value::String("message".to_string()),
                                 );
-                                json.insert("created".to_string(), Value::Null);
-                                json.insert("id".to_string(), Value::Null);
-                                json.insert("model".to_string(), Value::Null);
                             }
-                            RequestType::TextCompletion => {
-                                json.insert(
-                                    "object".to_string(),
-                                    Value::String("text_completion".to_string()),
-                                );
-                                json.insert(
-                                    "type".to_string(),
-                                    Value::String("completion".to_string()),
-                                );
-                                json.insert("created".to_string(), Value::Null);
-                                json.insert("id".to_string(), Value::Null);
-                                json.insert("model".to_string(), Value::Null);
-                            }
-                            RequestType::TextEdit => {
-                                json.insert(
-                                    "object".to_string(),
-                                    Value::String("edit".to_string()),
-                                );
-                                json.insert("created".to_string(), Value::Null);
-                            }
-                            RequestType::TextEmbedding => {
-                                json.insert(
-                                    "object".to_string(),
-                                    Value::String("list".to_string()),
-                                );
-                                json.insert("model".to_string(), Value::Null);
+                        }
+                        RequestType::OpenAI_TextCompletion => {
+                            let is_supported_conversion = match response_type {
+                                Some(RequestType::OpenAI_TextChat) => {
+                                    utility::update_object_array_in_place(
+                                        json.get_mut("choices"),
+                                        |object| {
+                                            utility::update_item(
+                                                object,
+                                                "message",
+                                                "text",
+                                                |value| {
+                                                    value
+                                                        .as_object()
+                                                        .filter(|object| {
+                                                            object
+                                                                .get("role")
+                                                                .and_then(|value| value.as_str())
+                                                                == Some("assistant")
+                                                        })
+                                                        .and_then(|object| object.get("content"))
+                                                        .and_then(|value| value.as_str())
+                                                        .map(|text| json!(text))
+                                                },
+                                            )
+                                        },
+                                    );
 
-                                if let Some(Value::Array(objects)) = json.get_mut("data") {
-                                    for (index, value) in objects.iter_mut().enumerate() {
-                                        if let Value::Object(object) = value {
-                                            if !object.contains_key("index") {
-                                                object.insert(
-                                                    "index".to_string(),
-                                                    Value::Number(index.into()),
-                                                );
+                                    true
+                                }
+                                Some(RequestType::OpenAI_TextCompletion) => true,
+                                Some(RequestType::Anthropic_TextChat) => {
+                                    let finish_reason = json
+                                        .get("stop_reason")
+                                        .and_then(|value| value.as_str())
+                                        .map(|stop_reason| {
+                                            match stop_reason {
+                                                "end_turn" | "stop_sequence" => "stop",
+                                                "max_tokens" => "length",
+                                                _ => stop_reason,
                                             }
-
-                                            object.insert(
-                                                "object".to_string(),
-                                                Value::String("embedding".to_string()),
-                                            );
-                                        }
+                                            .to_string()
+                                        });
+                                    if finish_reason.is_some() {
+                                        json.remove("stop_reason");
+                                        json.remove("stop_sequence");
                                     }
 
-                                    objects.sort_by(|a, b| {
-                                        if let (Some(a), Some(b)) = (
-                                            a.get("index").and_then(|v| v.as_u64()),
-                                            b.get("index").and_then(|v| v.as_u64()),
-                                        ) {
-                                            a.cmp(&b)
-                                        } else {
-                                            Ordering::Equal
-                                        }
-                                    });
+                                    utility::update_object_array_skipless(
+                                        json,
+                                        "content",
+                                        "choices",
+                                        |object| {
+                                            if object.get("type").and_then(|value| value.as_str())
+                                                == Some("text")
+                                            {
+                                                if let Some(finish_reason) = &finish_reason {
+                                                    utility::insert_item(
+                                                        object,
+                                                        "finish_reason",
+                                                        json!(finish_reason),
+                                                    );
+                                                }
+                                            }
+                                        },
+                                    );
+
+                                    json.remove("role");
+                                    json.remove("type");
+
+                                    true
                                 }
-                            }
-                            RequestType::TextModeration => {
+                                Some(RequestType::Anthropic_TextCompletion) => {
+                                    let finish_reason = json
+                                        .get("stop_reason")
+                                        .and_then(|value| value.as_str())
+                                        .map(|stop_reason| {
+                                            match stop_reason {
+                                                "end_turn" | "stop_sequence" => "stop",
+                                                "max_tokens" => "length",
+                                                _ => stop_reason,
+                                            }
+                                            .to_string()
+                                        });
+                                    if finish_reason.is_some() {
+                                        json.remove("stop_reason");
+                                    }
+
+                                    utility::update_item(json, "completion", "choices", |value| {
+                                        value.as_str().map(|text| {
+                                            if let Some(finish_reason) = &finish_reason {
+                                                json!([{
+                                                    "text": text,
+                                                    "finish_reason": finish_reason,
+                                                }])
+                                            } else {
+                                                json!([{
+                                                    "text": text,
+                                                }])
+                                            }
+                                        })
+                                    });
+
+                                    json.remove("type");
+
+                                    true
+                                }
+                                _ => false,
+                            };
+
+                            if is_supported_conversion {
+                                utility::update_object_array_in_place(
+                                    json.get_mut("choices"),
+                                    |object| {
+                                        utility::insert_item(object, "logprobs", Value::Null);
+                                        utility::insert_item(
+                                            object,
+                                            "finish_reason",
+                                            json!("stop"),
+                                        );
+                                    },
+                                );
+
+                                json.insert("created".to_string(), Value::Null);
                                 json.insert("id".to_string(), Value::Null);
                                 json.insert("model".to_string(), Value::Null);
+                                if let Some(fingerprint) = fingerprint {
+                                    utility::insert_item(
+                                        json,
+                                        "system_fingerprint",
+                                        Value::String(format!("{}", fingerprint)),
+                                    );
+                                }
+                                json.insert("object".to_string(), json!("text_completion"));
                             }
-                            RequestType::ImageGeneration => {
+                        }
+                        RequestType::Anthropic_TextCompletion => {
+                            let is_supported_conversion = match response_type {
+                                Some(RequestType::OpenAI_TextChat) => {
+                                    json.remove("object");
+                                    json.remove("created");
+                                    json.remove("system_fingerprint");
+                                    json.remove("usage");
+
+                                    utility::update_item_in_place(
+                                        json.get_mut("choices"),
+                                        |value| {
+                                            if let Value::Array(objects) = value {
+                                                objects.sort_by_key(|value| {
+                                                    value
+                                                        .get("index")
+                                                        .and_then(|v| v.as_i64())
+                                                        .unwrap_or(i64::MAX)
+                                                });
+                                            }
+                                        },
+                                    );
+
+                                    let mut stop_reason = None;
+
+                                    utility::update_array_single(
+                                        json,
+                                        "choices",
+                                        "completion",
+                                        |value| {
+                                            value.as_object().and_then(|object| {
+                                                if let Some(Value::String(finish_reason)) =
+                                                    object.get("finish_reason")
+                                                {
+                                                    stop_reason = match finish_reason.as_ref() {
+                                                        "length" => Some("max_tokens".to_string()),
+                                                        "stop" | "tool_calls" | "function_call" => {
+                                                            None
+                                                        }
+                                                        _ => Some(finish_reason.to_string()),
+                                                    };
+                                                }
+
+                                                object
+                                                    .get("message")
+                                                    .and_then(|value| value.as_object())
+                                                    .filter(|object| {
+                                                        object
+                                                            .get("role")
+                                                            .and_then(|value| value.as_str())
+                                                            == Some("assistant")
+                                                    })
+                                                    .and_then(|object| {
+                                                        object
+                                                            .get("content")
+                                                            .and_then(|value| value.as_str())
+                                                            .map(|text| text.to_string())
+                                                            .map(Value::String)
+                                                    })
+                                            })
+                                        },
+                                    );
+
+                                    if let Some(stop_reason) = stop_reason {
+                                        utility::insert_item(
+                                            json,
+                                            "stop_reason",
+                                            json!(stop_reason),
+                                        )
+                                    }
+
+                                    true
+                                }
+                                Some(RequestType::OpenAI_TextCompletion) => {
+                                    json.remove("object");
+                                    json.remove("created");
+                                    json.remove("system_fingerprint");
+                                    json.remove("usage");
+
+                                    utility::update_item_in_place(
+                                        json.get_mut("choices"),
+                                        |value| {
+                                            if let Value::Array(objects) = value {
+                                                objects.sort_by_key(|value| {
+                                                    value
+                                                        .get("index")
+                                                        .and_then(|v| v.as_i64())
+                                                        .unwrap_or(i64::MAX)
+                                                });
+                                            }
+                                        },
+                                    );
+
+                                    let mut stop_reason = None;
+
+                                    utility::update_array_single(
+                                        json,
+                                        "choices",
+                                        "completion",
+                                        |value| {
+                                            value.as_object().and_then(|object| {
+                                                if let Some(Value::String(finish_reason)) =
+                                                    object.get("finish_reason")
+                                                {
+                                                    stop_reason = match finish_reason.as_ref() {
+                                                        "length" => Some("max_tokens".to_string()),
+                                                        "stop" | "tool_calls" | "function_call" => {
+                                                            None
+                                                        }
+                                                        _ => Some(finish_reason.to_string()),
+                                                    };
+                                                }
+
+                                                object
+                                                    .get("text")
+                                                    .and_then(|value| value.as_str())
+                                                    .map(|text| text.to_string())
+                                                    .map(Value::String)
+                                            })
+                                        },
+                                    );
+
+                                    if let Some(stop_reason) = stop_reason {
+                                        utility::insert_item(
+                                            json,
+                                            "stop_reason",
+                                            json!(stop_reason),
+                                        )
+                                    }
+
+                                    true
+                                }
+                                Some(RequestType::Anthropic_TextChat) => {
+                                    utility::update_array_single(
+                                        json,
+                                        "content",
+                                        "completion",
+                                        |value| {
+                                            value
+                                                .as_object()
+                                                .filter(|object| {
+                                                    object
+                                                        .get("type")
+                                                        .and_then(|value| value.as_str())
+                                                        == Some("text")
+                                                })
+                                                .and_then(|object| {
+                                                    object
+                                                        .get("text")
+                                                        .and_then(|value| value.as_str())
+                                                        .map(|text| text.to_string())
+                                                        .map(Value::String)
+                                                })
+                                        },
+                                    );
+
+                                    utility::update_item_in_place(
+                                        json.get_mut("stop_reason"),
+                                        |value| {
+                                            if let Value::String(text) = value {
+                                                *text = match text.as_ref() {
+                                                    "end_turn" | "stop_sequence" => "stop_sequence",
+                                                    "max_tokens" => "max_tokens",
+                                                    _ => text,
+                                                }
+                                                .to_string()
+                                            }
+                                        },
+                                    );
+
+                                    json.remove("role");
+                                    json.remove("stop_sequence");
+                                    json.remove("usage");
+
+                                    true
+                                }
+                                Some(RequestType::Anthropic_TextCompletion) => true,
+                                _ => false,
+                            };
+
+                            if is_supported_conversion {
+                                utility::insert_item(json, "stop_reason", json!("stop_sequence"));
+                                json.insert("id".to_string(), Value::Null);
+                                json.insert("model".to_string(), Value::Null);
+                                json.insert("type".to_string(), json!("completion"));
+                            }
+                        }
+                        RequestType::OpenAI_TextEdit => {
+                            if response_type == Some(RequestType::OpenAI_TextEdit) {
                                 json.insert("created".to_string(), Value::Null);
                             }
-                            RequestType::ImageEdit => {
-                                json.insert("created".to_string(), Value::Null);
+                        }
+                        RequestType::OpenAI_TextEmbedding => {
+                            if response_type == Some(RequestType::OpenAI_TextEmbedding) {
+                                json.insert("model".to_string(), Value::Null);
                             }
-                            RequestType::ImageVariation => {
-                                json.insert("created".to_string(), Value::Null);
+                        }
+                        _ => {}
+                    }
+                }
+
+                for (_, value) in json.iter_mut() {
+                    if let Value::Array(objects) = value {
+                        objects.sort_by_key(|value| {
+                            value
+                                .get("index")
+                                .and_then(|v| v.as_i64())
+                                .unwrap_or(i64::MAX)
+                        });
+
+                        if desired_type.is_openai() {
+                            for (index, value) in objects.iter_mut().enumerate() {
+                                if let Value::Object(object) = value {
+                                    if !object.contains_key("index") {
+                                        object.insert(
+                                            "index".to_string(),
+                                            Value::Number(index.into()),
+                                        );
+                                    }
+                                }
                             }
-                            RequestType::AudioTTS => {}
-                            RequestType::AudioTranscription => {}
-                            RequestType::AudioTranslation => {}
+
+                            objects.sort_by_key(|value| {
+                                value
+                                    .get("index")
+                                    .and_then(|v| v.as_i64())
+                                    .unwrap_or(i64::MAX)
+                            });
                         }
                     }
                 }
@@ -520,55 +1216,31 @@ impl ModelResponseData {
                     );
                 }
 
-                let usage = if let Some(Value::Object(object)) = json.get_mut("usage") {
+                if let Some(Value::Object(object)) = json.get("usage") {
                     let input = object
                         .get("input_tokens")
                         .or(object.get("prompt_tokens"))
-                        .and_then(|num| num.as_u64());
+                        .and_then(|num| num.as_u64())
+                        .or(tokenizer.as_ref().and_then(|tokenizer| {
+                            if let ModelRequestData::Json(json) = &request.request {
+                                get_token_count(json, tokenizer)
+                                    .and_then(|tokens| tokens.try_into().ok())
+                            } else {
+                                None
+                            }
+                        }));
                     let output = object
                         .get("output_tokens")
                         .or(object.get("completion_tokens"))
-                        .and_then(|num| num.as_u64());
+                        .and_then(|num| num.as_u64())
+                        .or(tokenizer.as_ref().and_then(|tokenizer| {
+                            get_token_count(json, tokenizer)
+                                .and_then(|tokens| tokens.try_into().ok())
+                        }));
                     let total = object
                         .get("total_tokens")
                         .and_then(|num| num.as_u64())
                         .unwrap_or((input.unwrap_or_default() + output.unwrap_or_default()).max(1));
-
-                    if !object.contains_key("total_tokens") && (total > 1) {
-                        object.insert("total_tokens".to_string(), Value::Number(total.into()));
-                    }
-
-                    if let Some(input) = input {
-                        object.insert("input_tokens".to_string(), Value::Number(input.into()));
-
-                        if !object.contains_key("prompt_tokens")
-                            && (r#type == RequestType::TextChat
-                                || r#type == RequestType::TextCompletion
-                                || r#type == RequestType::TextEdit
-                                || r#type == RequestType::TextEmbedding
-                                || r#type == RequestType::TextModeration
-                                || r#type == RequestType::ImageGeneration
-                                || r#type == RequestType::ImageEdit
-                                || r#type == RequestType::ImageVariation)
-                        {
-                            object.insert("prompt_tokens".to_string(), Value::Number(input.into()));
-                        }
-                    }
-
-                    if let Some(output) = output {
-                        object.insert("output_tokens".to_string(), Value::Number(output.into()));
-
-                        if !object.contains_key("completion_tokens")
-                            && (r#type == RequestType::TextChat
-                                || r#type == RequestType::TextCompletion
-                                || r#type == RequestType::TextEdit)
-                        {
-                            object.insert(
-                                "completion_tokens".to_string(),
-                                Value::Number(output.into()),
-                            );
-                        }
-                    }
 
                     TokenUsage {
                         total,
@@ -579,41 +1251,55 @@ impl ModelResponseData {
                     TokenUsage {
                         total: match is_error {
                             true => 0,
-                            false => 1,
+                            false => request.request.get_count().try_into().unwrap_or(u64::MAX),
                         },
                         input: None,
                         output: None,
                     }
-                };
-
-                (Self::Json(json), usage)
+                }
             }
             Self::Binary(binary) => match is_error {
-                true => (
-                    match String::from_utf8(binary.clone()) {
-                        Ok(message) => Self::Json(
-                            json!({
-                                "type": "error",
-                                "error": {
-                                    "message": message,
-                                }
-                            })
-                            .as_object()
-                            .unwrap()
-                            .clone(),
-                        ),
-                        Err(_) => Self::Binary(binary),
-                    },
-                    TokenUsage::default(),
-                ),
-                false => (
-                    Self::Binary(binary),
-                    TokenUsage {
-                        total: 1,
-                        input: None,
-                        output: None,
-                    },
-                ),
+                true => {
+                    if let Ok(message) = String::from_utf8(binary.clone()) {
+                        if desired_type.is_openai() {
+                            *self = Self::Json(
+                                json!({
+                                    "error": {
+                                        "message": message,
+                                        "type": Value::Null,
+                                        "param": Value::Null,
+                                        "code": Value::Null,
+                                    }
+                                })
+                                .as_object()
+                                .unwrap()
+                                .clone(),
+                            );
+                        }
+
+                        if desired_type.is_anthropic() {
+                            *self = Self::Json(
+                                json!({
+                                    "type": "error",
+                                    "error": {
+                                        "message": message,
+                                        "type": "invalid_request_error",
+                                    }
+                                })
+                                .as_object()
+                                .unwrap()
+                                .clone(),
+                            );
+                        }
+                    }
+
+                    TokenUsage::default()
+                }
+                false => TokenUsage {
+                    total: request.request.get_count().try_into().unwrap_or(u64::MAX),
+                    input: None,
+                    output: None,
+                },
             },
         }
     }
@@ -621,8 +1307,6 @@ impl ModelResponseData {
 
 impl From<ModelError> for ModelResponse {
     fn from(value: ModelError) -> Self {
-        let mut json = Map::new();
-
         let message = match value {
             ModelError::BadRequest => "We could not parse the JSON body of your request. (HINT: This likely means you aren't using your HTTP library correctly. The API expects a JSON payload, but what was sent was not valid JSON. If you have trouble figuring out how to fix this, contact the proxy's administrator.)",
             ModelError::AuthMissing => "You didn't provide an API key. You need to provide your API key in an Authorization header using Bearer auth (i.e. Authorization: Bearer YOUR_KEY), or as the password field (with blank username) if you're accessing the API from your browser and are prompted for a username and password. You can obtain an API key from the proxy's administrator.",
@@ -664,11 +1348,6 @@ impl From<ModelError> for ModelResponse {
             _ => Value::Null,
         };
 
-        json.insert("message".to_string(), Value::String(message.to_string()));
-        json.insert("type".to_string(), Value::String(error_type.to_string()));
-        json.insert("param".to_string(), error_param);
-        json.insert("code".to_string(), error_code);
-
         let status = match value {
             ModelError::BadRequest => StatusCode::BAD_REQUEST,
             ModelError::AuthMissing => StatusCode::UNAUTHORIZED,
@@ -682,14 +1361,23 @@ impl From<ModelError> for ModelResponse {
             ModelError::BackendError => StatusCode::BAD_GATEWAY,
         };
 
-        let mut error_object = Map::new();
-        error_object.insert("type".to_string(), Value::String("error".to_string()));
-        error_object.insert("error".to_string(), Value::Object(json));
-
         ModelResponse {
             usage: TokenUsage::default(),
             status,
-            response: ModelResponseData::Json(error_object),
+            response: ModelResponseData::Json(
+                json!({
+                    "type": "error",
+                    "error": {
+                        "message": message,
+                        "type": error_type,
+                        "param": error_param,
+                        "code": error_code,
+                    }
+                })
+                .as_object()
+                .unwrap()
+                .clone(),
+            ),
         }
     }
 }
@@ -717,6 +1405,13 @@ pub(super) enum ModelError {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
+pub(super) struct ModelConfig {
+    tokenizer: Option<TokenizerSettings>,
+    pub max_tokens: u64,
+    system_fingerprint: Option<Uuid>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
 #[allow(private_interfaces)]
 pub(super) enum ModelBackend {
     OpenAI(OpenAIModelBackend),
@@ -726,7 +1421,6 @@ pub(super) enum ModelBackend {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct OpenAIModelBackend {
     model_string: String,
-    model_context_len: Option<u64>,
     openai_api_base: String,
     openai_api_key: String,
     openai_organization: Option<String>,
@@ -738,21 +1432,22 @@ impl OpenAIModelBackend {
         &self,
         r#type: RequestType,
     ) -> Option<(Method, Url, HeaderMap, bool)> {
-        match Url::parse(&self.openai_api_base).and_then(|base_url| {
-            base_url.join(match r#type {
-                RequestType::TextChat => "/v1/chat/completions",
-                RequestType::TextCompletion => "/v1/completions",
-                RequestType::TextEdit => "/v1/edits",
-                RequestType::TextEmbedding => "/v1/embeddings",
-                RequestType::TextModeration => "/v1/moderations",
-                RequestType::ImageGeneration => "/v1/images/generations",
-                RequestType::ImageEdit => "/v1/images/edits",
-                RequestType::ImageVariation => "/v1/images/variations",
-                RequestType::AudioTTS => "/v1/audio/speech",
-                RequestType::AudioTranscription => "/v1/audio/transcriptions",
-                RequestType::AudioTranslation => "/v1/audio/translations",
-            })
-        }) {
+        let url_suffix = match r#type {
+            RequestType::OpenAI_TextChat => "/v1/chat/completions",
+            RequestType::OpenAI_TextCompletion => "/v1/completions",
+            RequestType::OpenAI_TextEdit => "/v1/edits",
+            RequestType::OpenAI_TextEmbedding => "/v1/embeddings",
+            RequestType::OpenAI_TextModeration => "/v1/moderations",
+            RequestType::OpenAI_ImageGeneration => "/v1/images/generations",
+            RequestType::OpenAI_ImageEdit => "/v1/images/edits",
+            RequestType::OpenAI_ImageVariation => "/v1/images/variations",
+            RequestType::OpenAI_AudioTTS => "/v1/audio/speech",
+            RequestType::OpenAI_AudioTranscription => "/v1/audio/transcriptions",
+            RequestType::OpenAI_AudioTranslation => "/v1/audio/translations",
+            _ => return None,
+        };
+
+        match Url::parse(&self.openai_api_base).and_then(|base_url| base_url.join(url_suffix)) {
             Ok(url) => match HeaderValue::from_str(&format!("Bearer {}", self.openai_api_key)) {
                 Ok(auth_header) => {
                     let mut headers = HeaderMap::new();
@@ -766,7 +1461,12 @@ impl OpenAIModelBackend {
                         headers.insert("OpenAI-Organization", organization);
                     }
 
-                    Some((Method::POST, url, headers, r#type == RequestType::AudioTTS))
+                    Some((
+                        Method::POST,
+                        url,
+                        headers,
+                        r#type == RequestType::OpenAI_AudioTTS,
+                    ))
                 }
                 Err(error) => {
                     tracing::warn!("Unable to parse API key: {:?}", error);
@@ -782,18 +1482,11 @@ impl OpenAIModelBackend {
 }
 
 impl ModelBackend {
-    pub(super) fn get_max_tokens(&self) -> u64 {
-        match &self {
-            Self::OpenAI(backend) => backend.model_context_len.unwrap_or(1),
-            Self::Loopback => 1,
-        }
-    }
-
-    #[tracing::instrument(skip(self, http_client), level = "debug", ret)]
+    #[tracing::instrument(skip(self, http_client, base_config), level = "debug", ret)]
     pub(super) async fn generate(
         &self,
         http_client: &Client,
-        model: Uuid,
+        base_config: ModelConfig,
         mut request: ModelRequest,
     ) -> ModelResponse {
         let tag = Uuid::new_v4();
@@ -802,28 +1495,30 @@ impl ModelBackend {
         match &self {
             Self::OpenAI(config) => match config.get_request_parameters(request.r#type) {
                 Some((method, url, headers, binary)) => {
-                    let request_type = request.r#type;
-                    let label = request.get_model().map(|value| value.to_string());
-
-                    request.request = request
-                        .request
-                        .into_openai(config.model_string.clone(), request.user);
+                    if let Some(r#type) = request.r#type.as_openai() {
+                        request.request.convert_type(
+                            request.r#type,
+                            r#type,
+                            config.model_string.clone(),
+                            request.user,
+                        );
+                    }
 
                     let mut response = client::send_http_request(
                         http_client,
                         method,
                         url,
                         headers,
-                        request,
+                        &request,
                         binary,
                     )
                     .await;
 
-                    (response.response, response.usage) = response.response.into_hybrid_api(
-                        label,
-                        request_type,
+                    response.usage = response.response.convert_type(
+                        &request,
+                        &base_config.tokenizer,
                         tag,
-                        model,
+                        base_config.system_fingerprint,
                         !response.status.is_success(),
                     );
 
