@@ -36,7 +36,10 @@ mod state;
 pub use state::Database;
 use state::{RelatedToItem, RelatedToItemSet};
 
-use crate::limiter::{self, LimiterResult};
+use crate::{
+    limiter::{self, LimiterResult},
+    model::ModelConfig,
+};
 
 use self::state::{DatabaseFunctionResult, DatabaseValueResult};
 
@@ -87,6 +90,7 @@ struct Model {
     #[serde(default)]
     types: HashSet<RequestType>,
 
+    config: ModelConfig,
     api: ModelBackend,
 
     #[serde(default)]
@@ -396,16 +400,11 @@ async fn handle_model_request(
         tracing::debug!(model = ?model.uuid);
     }
 
-    let model_max_tokens = model.api.get_max_tokens();
-    let request_max_tokens = request.get_max_tokens();
-    let request_count = request.get_count() as u64;
-    if request_max_tokens.unwrap_or(model_max_tokens) > model_max_tokens {
+    let (is_oversized, estimated_tokens) = request.get_token_estimate(&model.config);
+
+    if is_oversized {
         return Err(ModelError::UserRateLimit);
     }
-    if let Some(max_tokens) = request_max_tokens {
-        tracing::debug!(histogram.request.max_tokens = max_tokens, unit = "tokens");
-    }
-    tracing::debug!(histogram.request.count = request_count);
 
     let quotas: HashSet<Uuid> = auth
         .user
@@ -423,7 +422,7 @@ async fn handle_model_request(
 
     let limiter_request = limiter::Request {
         arrived_at: auth.timestamp,
-        estimated_tokens: request_max_tokens.unwrap_or(model_max_tokens) * request_count,
+        estimated_tokens,
     };
     tracing::debug!(
         histogram.quota.estimated_tokens = limiter_request.estimated_tokens,
@@ -459,7 +458,7 @@ async fn handle_model_request(
         DatabaseFunctionResult::BackendError => return Err(ModelError::InternalError),
     }
 
-    let response = model.api.generate(&state.http, model.uuid, request).await;
+    let response = model.api.generate(&state.http, model.config, request).await;
 
     let limiter_response = limiter::Response {
         request: limiter_request,

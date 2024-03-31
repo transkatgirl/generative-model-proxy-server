@@ -1,3 +1,6 @@
+use serde::{Deserialize, Serialize};
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub(super) enum Tokenizer {
     Cl100kBase,
     P50kBase,
@@ -6,6 +9,7 @@ pub(super) enum Tokenizer {
     Gpt2,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub(super) struct TokenizerSettings {
     tokenizer: Tokenizer,
     starting_tokens: Option<i64>,

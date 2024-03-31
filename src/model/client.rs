@@ -15,9 +15,9 @@ use super::{
 
 impl ModelRequest {
     #[tracing::instrument(name = "serialize_model_request", level = "debug", skip_all)]
-    fn to_http_body(self, base: RequestBuilder) -> reqwest::Result<Request> {
-        match self.request {
-            ModelRequestData::Json(json) => base.json(&json),
+    fn as_http_body(&self, base: RequestBuilder) -> reqwest::Result<Request> {
+        match &self.request {
+            ModelRequestData::Json(json) => base.json(json),
             ModelRequestData::Form(formdata) => {
                 let mut form = Form::new();
                 for (key, value) in formdata {
@@ -124,12 +124,12 @@ pub(super) async fn send_http_request(
     method: Method,
     url: Url,
     headers: HeaderMap,
-    request: ModelRequest,
+    request: &ModelRequest,
     binary: bool,
 ) -> ModelResponse {
     let span = tracing::Span::current();
 
-    match request.to_http_body(client.request(method, url).headers(headers)) {
+    match request.as_http_body(client.request(method, url).headers(headers)) {
         Ok(http_request) => {
             if let Some(content_type) = http_request
                 .headers()
