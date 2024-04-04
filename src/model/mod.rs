@@ -18,6 +18,7 @@ use uuid::Uuid;
 use self::tokenizer::{TokenizerMessage, TokenizerSettings};
 
 mod client;
+mod endpoints;
 mod interface;
 mod tokenizer;
 mod utility;
@@ -105,7 +106,20 @@ impl ModelRequestData {
                                 _ => None,
                             });
 
+                            utility::update_item(json, "logprobs", "top_logprobs", |value| {
+                                value
+                                    .as_u64()
+                                    .filter(|value| *value > 0)
+                                    .map(|value| json!(value))
+                            });
+
+                            if json.contains_key("top_logprobs") {
+                                json.insert("logprobs".to_string(), Value::Bool(true));
+                            }
+
                             json.remove("best_of");
+                            json.remove("echo"); // TODO: Handle this properly!
+                            json.remove("suffix"); // TODO: Handle this properly!
                         }
                         RequestType::Anthropic_TextCompletion => {}
                         _ => {}
@@ -117,7 +131,11 @@ impl ModelRequestData {
                         _ => {}
                     },
                     RequestType::OpenAI_TextCompletion => match input_type {
-                        RequestType::OpenAI_TextChat => {}
+                        RequestType::OpenAI_TextChat => {
+                            // TODO
+
+                            //utility::update_array(json, "messages", "prompt", |value| {});
+                        }
                         RequestType::Anthropic_TextChat => {}
                         RequestType::Anthropic_TextCompletion => {}
                         _ => {}
@@ -418,29 +436,6 @@ impl RequestType {
                 Some(Self::Anthropic_TextCompletion)
             }
             _ => None,
-        }
-    }
-}
-
-impl TryFrom<&Uri> for RequestType {
-    type Error = &'static str;
-
-    fn try_from(value: &Uri) -> Result<Self, Self::Error> {
-        match value.path() {
-            "/v1/chat/completions" => Ok(RequestType::OpenAI_TextChat),
-            "/v1/completions" => Ok(RequestType::OpenAI_TextCompletion),
-            "/v1/edits" => Ok(RequestType::OpenAI_TextEdit),
-            "/v1/embeddings" => Ok(RequestType::OpenAI_TextEmbedding),
-            "/v1/moderations" => Ok(RequestType::OpenAI_TextModeration),
-            "/v1/images/generations" => Ok(RequestType::OpenAI_ImageGeneration),
-            "/v1/images/edits" => Ok(RequestType::OpenAI_ImageEdit),
-            "/v1/images/variations" => Ok(RequestType::OpenAI_ImageVariation),
-            "/v1/audio/speech" => Ok(RequestType::OpenAI_AudioTTS),
-            "/v1/audio/transcriptions" => Ok(RequestType::OpenAI_AudioTranscription),
-            "/v1/audio/translations" => Ok(RequestType::OpenAI_AudioTranslation),
-            "/v1/messages" => Ok(RequestType::Anthropic_TextChat),
-            "/v1/complete" => Ok(RequestType::Anthropic_TextCompletion),
-            _ => Err("Invalid URI"),
         }
     }
 }
@@ -1426,61 +1421,6 @@ struct OpenAIModelBackend {
     openai_organization: Option<String>,
 }
 
-impl OpenAIModelBackend {
-    #[tracing::instrument(level = "trace")]
-    fn get_request_parameters(
-        &self,
-        r#type: RequestType,
-    ) -> Option<(Method, Url, HeaderMap, bool)> {
-        let url_suffix = match r#type {
-            RequestType::OpenAI_TextChat => "/v1/chat/completions",
-            RequestType::OpenAI_TextCompletion => "/v1/completions",
-            RequestType::OpenAI_TextEdit => "/v1/edits",
-            RequestType::OpenAI_TextEmbedding => "/v1/embeddings",
-            RequestType::OpenAI_TextModeration => "/v1/moderations",
-            RequestType::OpenAI_ImageGeneration => "/v1/images/generations",
-            RequestType::OpenAI_ImageEdit => "/v1/images/edits",
-            RequestType::OpenAI_ImageVariation => "/v1/images/variations",
-            RequestType::OpenAI_AudioTTS => "/v1/audio/speech",
-            RequestType::OpenAI_AudioTranscription => "/v1/audio/transcriptions",
-            RequestType::OpenAI_AudioTranslation => "/v1/audio/translations",
-            _ => return None,
-        };
-
-        match Url::parse(&self.openai_api_base).and_then(|base_url| base_url.join(url_suffix)) {
-            Ok(url) => match HeaderValue::from_str(&format!("Bearer {}", self.openai_api_key)) {
-                Ok(auth_header) => {
-                    let mut headers = HeaderMap::new();
-                    headers.insert(AUTHORIZATION, auth_header);
-
-                    if let Some(organization) = self
-                        .openai_organization
-                        .as_ref()
-                        .and_then(|value| value.parse::<HeaderValue>().ok())
-                    {
-                        headers.insert("OpenAI-Organization", organization);
-                    }
-
-                    Some((
-                        Method::POST,
-                        url,
-                        headers,
-                        r#type == RequestType::OpenAI_AudioTTS,
-                    ))
-                }
-                Err(error) => {
-                    tracing::warn!("Unable to parse API key: {:?}", error);
-                    None
-                }
-            },
-            Err(error) => {
-                tracing::warn!("Unable to parse model URL: {:?}", error);
-                None
-            }
-        }
-    }
-}
-
 impl ModelBackend {
     #[tracing::instrument(skip(self, http_client, base_config), level = "debug", ret)]
     pub(super) async fn generate(
@@ -1493,8 +1433,8 @@ impl ModelBackend {
         tracing::debug!(tag = ?tag);
 
         match &self {
-            Self::OpenAI(config) => match config.get_request_parameters(request.r#type) {
-                Some((method, url, headers, binary)) => {
+            Self::OpenAI(config) => match config.get_endpoint(request.r#type) {
+                Some((endpoint)) => {
                     if let Some(r#type) = request.r#type.as_openai() {
                         request.request.convert_type(
                             request.r#type,
@@ -1504,25 +1444,24 @@ impl ModelBackend {
                         );
                     }
 
-                    let mut response = client::send_http_request(
-                        http_client,
-                        method,
-                        url,
-                        headers,
-                        &request,
-                        binary,
-                    )
-                    .await;
+                    match client::send_http_request(http_client, endpoint, &request.request).await {
+                        Ok((status, mut data)) => {
+                            let usage = data.convert_type(
+                                &request,
+                                &base_config.tokenizer,
+                                tag,
+                                base_config.system_fingerprint,
+                                !status.is_success(),
+                            );
 
-                    response.usage = response.response.convert_type(
-                        &request,
-                        &base_config.tokenizer,
-                        tag,
-                        base_config.system_fingerprint,
-                        !response.status.is_success(),
-                    );
-
-                    response
+                            ModelResponse {
+                                status,
+                                usage,
+                                response: data,
+                            }
+                        }
+                        Err(error) => ModelResponse::from(error),
+                    }
                 }
                 None => ModelResponse::from(ModelError::InternalError),
             },

@@ -45,27 +45,3 @@ Options:
 #### Monitoring
 
 The server supports sending logs to an [OpenTelemetry](https://opentelemetry.io) compatible collector.
-
-## Roadmap
-
-- [X] Adding documentation
-- [ ] Adding unit tests for major internal components
-        - [ ] Rate limiter
-        - [ ] Database
-        - [ ] ModelRequest / ModelResponse
-        - [ ] Admin API
-- [ ] Adding integration tests
-        - [ ] Model API
-- [ ] Adding import functionality from https://github.com/cosmicoptima/openai-cd2-proxy
-- [ ] Model rate limiting based on backend responses (such as HTTP headers)
-- [X] Logging (via OpenTelemetry)
-        - [ ] Metrics (besides those that can be inferred from Spans)
-- [ ] Support more APIs
-        - [ ] Chapter2
-        - [ ] Anthropic
-        - [ ] together.ai
-        - [ ] tabbyAPI
-- [ ] Support ChatCompletion(-like) -> Completion(-like) API conversion
-- [ ] Support additional API key metadata
-- [ ] Support preprocessing
-- [ ] Support model listing

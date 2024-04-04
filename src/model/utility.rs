@@ -69,6 +69,35 @@ pub(super) fn update_object_array<F>(
     })
 }
 
+pub(super) fn update_array<F>(
+    map: &mut Map<String, Value>,
+    input_key: &str,
+    output_key: &str,
+    mut mapper: F,
+) where
+    F: FnMut(&Value) -> Option<Value>,
+{
+    update_item(map, input_key, output_key, |item| {
+        if let Value::Array(objects) = item {
+            let mut new_objects = Vec::with_capacity(objects.len());
+
+            for object in objects.iter() {
+                if let Some(output) = mapper(object) {
+                    new_objects.push(output);
+                }
+            }
+
+            if new_objects.is_empty() {
+                None
+            } else {
+                Some(Value::Array(new_objects))
+            }
+        } else {
+            None
+        }
+    })
+}
+
 pub(super) fn update_array_single<F>(
     map: &mut Map<String, Value>,
     input_key: &str,
@@ -86,6 +115,29 @@ pub(super) fn update_array_single<F>(
             }
 
             None
+        } else {
+            None
+        }
+    })
+}
+
+pub(super) fn update_array_skipless<F>(
+    map: &mut Map<String, Value>,
+    input_key: &str,
+    output_key: &str,
+    mut mapper: F,
+) where
+    F: FnMut(&mut Value),
+{
+    update_item(map, input_key, output_key, |item| {
+        if let Value::Array(objects) = item {
+            let mut objects = objects.clone();
+
+            for object in objects.iter_mut() {
+                mapper(object);
+            }
+
+            Some(Value::Array(objects))
         } else {
             None
         }
