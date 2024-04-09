@@ -1444,7 +1444,9 @@ impl ModelBackend {
                         );
                     }
 
-                    match client::send_http_request(http_client, endpoint, &request.request).await {
+                    let requests = vec![&request.request];
+
+                    match client::send_http_request(http_client, &endpoint, &requests).await {
                         Ok((status, mut data)) => {
                             let usage = data.convert_type(
                                 &request,

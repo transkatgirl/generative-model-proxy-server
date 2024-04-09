@@ -115,102 +115,118 @@ impl ModelResponseData {
 #[tracing::instrument(level = "debug", fields(otel.name = format!("{} {}", endpoint.method, endpoint.url.as_str()), otel.kind = "Client", network.protocol.name = "http", network.protocol.version, server.address = endpoint.url.authority(), server.port = endpoint.url.port_or_known_default(), url.full = endpoint.url.as_str(), url.scheme = endpoint.url.scheme(), user_agent.original = "generative-model-proxy-server", http.request.method = endpoint.method.as_str(), http.request.header.content_type, http.response.status_code, http.response.header.content_type), skip_all)]
 pub(super) async fn send_http_request(
     client: &Client,
-    endpoint: HttpEndpoint,
-    request: &ModelRequestData,
-) -> Result<(StatusCode, ModelResponseData), ModelError> {
+    endpoint: &HttpEndpoint,
+    requests: &[&ModelRequestData],
+) -> Result<Vec<(StatusCode, ModelResponseData)>, ModelError> {
     let span = tracing::Span::current();
 
-    match request.as_http_body(
-        client
-            .request(endpoint.method, endpoint.url)
-            .headers(endpoint.headers),
-    ) {
-        Ok(http_request) => {
-            if let Some(content_type) = http_request
-                .headers()
-                .get("content-type")
-                .and_then(|value| value.to_str().ok())
-            {
-                span.record("http.request.header.content_type", content_type);
-            }
-            tracing::debug!(
-                histogram.http.client.request.body.size = http_request
-                    .body()
-                    .and_then(|body| body.as_bytes())
-                    .map(|body| body.len())
-                    .unwrap_or_default(),
-                unit = "By"
-            );
+    let mut responses = Vec::with_capacity(requests.len());
 
-            let timestamp = Instant::now();
-            match client.execute(http_request).await {
-                Ok(http_response) => {
-                    span.record(
-                        "network.protocol.version",
-                        match http_response.version() {
-                            Version::HTTP_09 => Some("0.9"),
-                            Version::HTTP_10 => Some("1.0"),
-                            Version::HTTP_11 => Some("1.1"),
-                            Version::HTTP_2 => Some("2"),
-                            Version::HTTP_3 => Some("3"),
-                            _ => None,
-                        },
-                    );
-                    span.record("http.response.status_code", http_response.status().as_u16());
-                    if let Some(content_type) = http_response
-                        .headers()
-                        .get("content-type")
-                        .and_then(|value| value.to_str().ok())
-                    {
-                        span.record("http.response.header.content_type", content_type);
+    for request in requests {
+        match request.as_http_body(
+            client
+                .request(endpoint.method.clone(), endpoint.url.clone())
+                .headers(endpoint.headers.clone()),
+        ) {
+            Ok(http_request) => {
+                if let Some(content_type) = http_request
+                    .headers()
+                    .get("content-type")
+                    .and_then(|value| value.to_str().ok())
+                {
+                    span.record("http.request.header.content_type", content_type);
+                }
+                tracing::debug!(
+                    histogram.http.client.request.body.size = http_request
+                        .body()
+                        .and_then(|body| body.as_bytes())
+                        .map(|body| body.len())
+                        .unwrap_or_default(),
+                    unit = "By"
+                );
+
+                let timestamp = Instant::now();
+                match client.execute(http_request).await {
+                    Ok(http_response) => {
+                        span.record(
+                            "network.protocol.version",
+                            match http_response.version() {
+                                Version::HTTP_09 => Some("0.9"),
+                                Version::HTTP_10 => Some("1.0"),
+                                Version::HTTP_11 => Some("1.1"),
+                                Version::HTTP_2 => Some("2"),
+                                Version::HTTP_3 => Some("3"),
+                                _ => None,
+                            },
+                        );
+                        span.record("http.response.status_code", http_response.status().as_u16());
+                        if let Some(content_type) = http_response
+                            .headers()
+                            .get("content-type")
+                            .and_then(|value| value.to_str().ok())
+                        {
+                            span.record("http.response.header.content_type", content_type);
+                        }
+
+                        let status = StatusCode::from_u16(http_response.status().as_u16()).unwrap();
+                        let body = http_response.bytes().await;
+
+                        tracing::debug!(
+                            histogram.http.client.request.duration =
+                                timestamp.elapsed().as_secs_f64(),
+                            unit = "s"
+                        );
+
+                        match body {
+                            Ok(body) => {
+                                tracing::debug!(
+                                    histogram.http.client.response.body.size = body.len(),
+                                    unit = "By"
+                                );
+
+                                match ModelResponseData::from_http_body(
+                                    status,
+                                    &body.to_vec(),
+                                    endpoint.is_binary,
+                                ) {
+                                    Ok(response) => {
+                                        if status.is_client_error() {
+                                            return Ok(vec![response]);
+                                        } else {
+                                            responses.push(response)
+                                        }
+                                    }
+                                    Err(error) => return Err(error),
+                                }
+                            }
+                            Err(error) => {
+                                tracing::error!("Error receiving response: {:?}", error);
+
+                                return Err(ModelError::BackendError);
+                            }
+                        }
                     }
+                    Err(error) => {
+                        tracing::error!("Error sending request: {:?}", error);
 
-                    let status = StatusCode::from_u16(http_response.status().as_u16()).unwrap();
-                    let body = http_response.bytes().await;
-
-                    tracing::debug!(
-                        histogram.http.client.request.duration = timestamp.elapsed().as_secs_f64(),
-                        unit = "s"
-                    );
-
-                    match body {
-                        Ok(body) => {
-                            tracing::debug!(
-                                histogram.http.client.response.body.size = body.len(),
-                                unit = "By"
-                            );
-
-                            ModelResponseData::from_http_body(
-                                status,
-                                &body.to_vec(),
-                                endpoint.is_binary,
-                            )
+                        if error.is_connect() | error.is_redirect() | error.is_decode() {
+                            return Err(ModelError::BackendError);
                         }
-                        Err(error) => {
-                            tracing::error!("Error receiving response: {:?}", error);
 
-                            Err(ModelError::BackendError)
+                        if error.is_timeout() {
+                            return Err(ModelError::ModelRateLimit);
                         }
+
+                        return Err(ModelError::InternalError);
                     }
                 }
-                Err(error) => {
-                    tracing::error!("Error sending request: {:?}", error);
-
-                    if error.is_connect() | error.is_redirect() | error.is_decode() {
-                        return Err(ModelError::BackendError);
-                    }
-
-                    if error.is_timeout() {
-                        return Err(ModelError::ModelRateLimit);
-                    }
-
-                    Err(ModelError::InternalError)
-                }
             }
-        }
-        Err(error) => {
-            tracing::error!("Error building request: {:?}", error);
-            Err(ModelError::InternalError)
+            Err(error) => {
+                tracing::error!("Error building request: {:?}", error);
+                return Err(ModelError::InternalError);
+            }
         }
     }
+
+    Ok(responses)
 }
